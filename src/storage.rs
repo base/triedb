@@ -17,7 +17,7 @@ pub struct StorageManager<P: PageManager> {
 impl<P: PageManager> StorageManager<P> {
     pub fn new(mut page_manager: P) -> Self {
         let root_page = page_manager.allocate_page();
-        let root_node = NodeReference::new(root_page.0, 0);
+        let root_node = NodeReference::new_dirty(root_page.0, 0);
         Self { root_node, page_manager }
     }
 

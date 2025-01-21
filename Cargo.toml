@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+alloy-primitives = "0.8.19"
 alloy-trie = "0.7.6"
 memmap2 = "0.9.5"
