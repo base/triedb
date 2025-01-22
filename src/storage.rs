@@ -147,8 +147,6 @@ fn insert_into_node<'a, P: PageManager, V: Value>(
     node: TrieNode<V>,
     page: &mut SubtriePage<'a>
 ) -> NodeReference {
-    let page_id = page.page_id;
-
     match node {
         TrieNode::EmptyRoot => {
             let leaf = LeafNode::new(path, value);
@@ -173,28 +171,21 @@ fn insert_into_node<'a, P: PageManager, V: Value>(
                 let old_remainder = leaf.prefix.slice(common_prefix_len + 1..);
                 let new_index = path.at(common_prefix_len);
                 let new_remainder = path.slice(common_prefix_len + 1..);
-                let mut children: [Option<NodeReference>; 16] = [const { None }; 16];
-                
+                let mut new_branch = BranchNode::new(common_prefix);
                 // Insert old leaf first
                 let old_leaf = insert_node(
                     page_manager,
                     TrieNode::<V>::from(leaf.with_prefix(old_remainder)),
                     page
                 );
-                let page = page_manager.get_page(page_id).expect("Page not found");
-                let page = &mut SubtriePage::from_id_and_page(page_id, page);
-                children[old_index as usize] = Some(old_leaf);
+                new_branch.set_child(old_index as usize, Some(old_leaf));
                 let new_leaf = insert_node(
                     page_manager,
                     LeafNode::new(new_remainder, value).into(),
                     page
                 );
-                let page = page_manager.get_page(page_id).expect("Page not found");
-                let page = &mut SubtriePage::from_id_and_page(page_id, page);
-                children[new_index as usize] = Some(new_leaf);
+                new_branch.set_child(new_index as usize, Some(new_leaf));
             
-                // Create and insert the branch using the final page state
-                let new_branch = BranchNode::new(common_prefix, children);
                 insert_node::<P, V>(page_manager, new_branch.into(), page)
             }
         }
@@ -222,10 +213,8 @@ fn insert_into_node<'a, P: PageManager, V: Value>(
                     };
                     let dereferenced_node = subtrie_page.pop_node(child.index).expect("Node not found");
                     let new_node = insert_into_node(page_manager, path.slice(common_prefix_len + 1..), value, dereferenced_node, subtrie_page);
-                    let page = page_manager.get_page(page_id).expect("Page not found");
-                    let page = &mut SubtriePage::from_id_and_page(page_id, page);
                     branch.children[path.at(common_prefix_len) as usize] = Some(new_node);
-                    return insert_node::<P, V>(page_manager, branch.into(), page);
+                    return insert_node::<P, V>(page_manager, branch.into(), subtrie_page);
                 }
             } else {
                 // create a new branch at the common prefix
@@ -234,16 +223,11 @@ fn insert_into_node<'a, P: PageManager, V: Value>(
                 let old_remainder = branch.prefix.slice(common_prefix_len + 1..);
                 let new_index = path.at(common_prefix_len);
                 let new_remainder = path.slice(common_prefix_len + 1..);
-                let mut children: [Option<NodeReference>; 16] = [const { None }; 16];
+                let mut new_branch = BranchNode::new(common_prefix);
                 let old_branch = insert_node(page_manager, TrieNode::<V>::from(branch.with_prefix(old_remainder)), page);
-                let page = page_manager.get_page(page_id).expect("Page not found");
-                let page = &mut SubtriePage::from_id_and_page(page_id, page);
                 let new_leaf = insert_node(page_manager, TrieNode::<V>::from(LeafNode::new(new_remainder, value)), page);
-                let page = page_manager.get_page(page_id).expect("Page not found");
-                let page = &mut SubtriePage::from_id_and_page(page_id, page);
-                children[old_index as usize] = Some(old_branch);
-                children[new_index as usize] = Some(new_leaf);
-                let new_branch = BranchNode::new(common_prefix, children);
+                new_branch.set_child(old_index as usize, Some(old_branch));
+                new_branch.set_child(new_index as usize, Some(new_leaf));
                 insert_node::<P, V>(page_manager, new_branch.into(), page)
             }
         }
@@ -258,11 +242,12 @@ fn insert_node<'a, P: PageManager, V: Value>(
     if let Some(node_ref) = page.insert(node.clone()) {
         return node_ref;
     }
-    // WARNING: this reallocation may destroy the existing page reference!!!
+    // WARNING: this allocation may destroy all existing page references if the file size grows!!!
     // TODO: properly split the page instead of just allocating a new one
     let new_page = page_manager.allocate_page();
     let mut new_subtrie_page = SubtriePage::from_identified_page(new_page);
     let node_ref = new_subtrie_page.insert(node).expect("Failed to insert node into newly-allocated page");
+    *page = new_subtrie_page;
     node_ref
 }
 

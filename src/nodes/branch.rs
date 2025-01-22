@@ -10,7 +10,11 @@ pub struct BranchNode {
 }
 
 impl BranchNode {
-    pub fn new(prefix: Nibbles, children: [Option<NodeReference>; BRANCHING_FACTOR]) -> Self {
+    pub fn new(prefix: Nibbles) -> Self {
+        Self { prefix, children: [const { None }; BRANCHING_FACTOR] }
+    }
+
+    pub fn new_with_children(prefix: Nibbles, children: [Option<NodeReference>; BRANCHING_FACTOR]) -> Self {
         Self { prefix, children }
     }
 
@@ -21,6 +25,10 @@ impl BranchNode {
 
     pub fn num_children(&self) -> usize {
         self.children.iter().filter(|child| child.is_some()).count()
+    }
+
+    pub fn set_child(&mut self, index: usize, child: Option<NodeReference>) {
+        self.children[index] = child;
     }
 
     pub fn as_bytes(&self) -> Vec<u8> {

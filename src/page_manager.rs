@@ -8,7 +8,7 @@ use std::sync::{Arc, RwLock};
 pub trait PageManager: Debug {
     fn get_page<'a>(&self, page_id: PageId) -> Option<Page<'a>>;
     // TODO: separate between read-only and read-write page access
-    fn allocate_page(&mut self) -> IdentifiedPage;
+    fn allocate_page<'a>(&mut self) -> IdentifiedPage<'a>;
     fn commit_page(&mut self, page_id: PageId);
 }
 
@@ -94,7 +94,7 @@ impl PageManager for MemoryMappedFilePageManager {
         }
     }
 
-    fn allocate_page(&mut self) -> IdentifiedPage {
+    fn allocate_page<'a>(&mut self) -> IdentifiedPage<'a> {
         let page_id = self.next_page_id;
         self.next_page_id += 1;
         
