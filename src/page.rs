@@ -113,6 +113,24 @@ impl<'a> SubtriePage<'a> {
         Some(TrieNode::from_bytes(&node_bytes))
     }
 
+    pub fn set_node<V: Value>(&mut self, index: u8, node: TrieNode<V>) -> Option<NodeReference> {
+        let mut ptr = self.get_ptr(index)?;
+        let node_bytes = node.as_bytes();
+
+        if node_bytes.len() > ptr.size as usize {
+            return None;
+        } else if node_bytes.len() < ptr.size as usize {
+            ptr.size = node_bytes.len() as u16;
+            self.set_ptr(index, ptr.clone());
+        }
+
+        let start_index = (4096 - ptr.offset_from_end) as usize;
+        let end_index = start_index + ptr.size as usize;
+        self.page.data[start_index..end_index].copy_from_slice(&node_bytes);
+        self.set_dirty(true);
+        Some(NodeReference::new_dirty(self.page_id, index as u8))
+    }
+
     pub fn pop_node<V: Value>(&mut self, index: u8) -> Option<TrieNode<V>> {
         let ptr = self.get_ptr(index)?;
         if ptr.is_empty() {
@@ -127,14 +145,7 @@ impl<'a> SubtriePage<'a> {
     pub fn insert<V: Value>(&mut self, node: TrieNode<V>) -> Option<NodeReference> {
         let size = node.encoded_size();
         let (index, pointer) = self.assign_pointer(size)?;
-
-        // self.nodes.push(node);
-        self.set_dirty(true);
-        let node_bytes = node.as_bytes();
-        let start_index = (4096 - pointer.offset_from_end) as usize;
-        let end_index = start_index + pointer.size as usize;
-        self.page.data[start_index..end_index].copy_from_slice(&node_bytes);
-        Some(NodeReference::new_dirty(self.page_id, index as u8))
+        self.set_node(index, node)
     }
 
     fn assign_pointer(&mut self, size: usize) -> Option<(u8, NodePointer)> {

@@ -6,7 +6,7 @@ const BRANCHING_FACTOR: usize = 16;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BranchNode {
     pub prefix: Nibbles,
-    pub children: [Option<NodeReference>; BRANCHING_FACTOR],
+    children: [Option<NodeReference>; BRANCHING_FACTOR],
 }
 
 impl BranchNode {
@@ -27,8 +27,16 @@ impl BranchNode {
         self.children.iter().filter(|child| child.is_some()).count()
     }
 
-    pub fn set_child(&mut self, index: usize, child: Option<NodeReference>) {
-        self.children[index] = child;
+    pub fn set_child(&mut self, index: u8, child: Option<NodeReference>) {
+        self.children[index as usize] = child;
+    }
+
+    pub fn get_child(&self, index: u8) -> Option<&NodeReference> {
+        self.children[index as usize].as_ref()
+    }
+
+    pub fn children(&self) -> impl Iterator<Item = &NodeReference> {
+        self.children.iter().filter_map(|child| child.as_ref())
     }
 
     pub fn as_bytes(&self) -> Vec<u8> {

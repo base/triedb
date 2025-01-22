@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::mem;
 use crate::page::SubtriePage;
 use crate::page_manager::PageManager;
 use crate::nodes::TrieNode;
@@ -83,7 +82,7 @@ fn get_from_node<P: PageManager, V: Value>(page_manager: &P, path: Nibbles, node
                     panic!("Path resolves to a branch node, which should not happen");
                 } else {
                     let index = path.at(common_prefix_len);
-                    let child = &branch.children[index as usize];
+                    let child = branch.get_child(index as u8);
                     if child.is_none() {
                         return None;
                     }
@@ -125,13 +124,11 @@ fn print_all_recursive_inner<P: PageManager, V: Value>(page_manager: &P, node: &
         }
         TrieNode::Branch(branch) => {
             println!("{} Branch: {:?}", " ".repeat(path.len() * 2), path.join(&branch.prefix));
-            for (index, child) in branch.children.iter().enumerate() {
-                if child.is_some() {
-                    println!("{} Child: {:?}", " ".repeat((path.len() + 1) * 2), index);
-                    let mut path = path.join(&branch.prefix);
-                    path.push(index as u8);
-                    print_all_recursive::<P, V>(page_manager, child.as_ref().unwrap(), path, page);
-                }
+            for child in branch.children() {
+                println!("{} Child: {:?}", " ".repeat((path.len() + 1) * 2), child.index);
+                let mut path = path.join(&branch.prefix);
+                path.push(child.index as u8);
+                print_all_recursive::<P, V>(page_manager, child, path, page);
             }
         }
         TrieNode::EmptyRoot => {
@@ -149,6 +146,7 @@ fn insert_into_node<'a, P: PageManager, V: Value>(
 ) -> NodeReference {
     match node {
         TrieNode::EmptyRoot => {
+            // replace the empty root with a new leaf
             let leaf = LeafNode::new(path, value);
             page.insert(leaf.into()).expect("Failed to insert new leaf node into page")
         }
@@ -165,28 +163,29 @@ fn insert_into_node<'a, P: PageManager, V: Value>(
                     panic!("New value has a longer path than an existing leaf node");
                 }
             } else {
-                // create a new branch at the common prefix
+                // insert a new branch at the common prefix, containing the old leaf and a new leaf
                 let common_prefix = path.slice(0..common_prefix_len);
                 let old_index = leaf.prefix.at(common_prefix_len);
                 let old_remainder = leaf.prefix.slice(common_prefix_len + 1..);
                 let new_index = path.at(common_prefix_len);
                 let new_remainder = path.slice(common_prefix_len + 1..);
-                let mut new_branch = BranchNode::new(common_prefix);
-                // Insert old leaf first
+
                 let old_leaf = insert_node(
                     page_manager,
                     TrieNode::<V>::from(leaf.with_prefix(old_remainder)),
                     page
                 );
-                new_branch.set_child(old_index as usize, Some(old_leaf));
                 let new_leaf = insert_node(
                     page_manager,
                     LeafNode::new(new_remainder, value).into(),
                     page
                 );
-                new_branch.set_child(new_index as usize, Some(new_leaf));
+
+                let mut parent_branch = BranchNode::new(common_prefix);
+                parent_branch.set_child(old_index as u8, Some(old_leaf));
+                parent_branch.set_child(new_index as u8, Some(new_leaf));
             
-                insert_node::<P, V>(page_manager, new_branch.into(), page)
+                insert_node::<P, V>(page_manager, parent_branch.into(), page)
             }
         }
         TrieNode::Branch(mut branch) => {
@@ -197,38 +196,43 @@ fn insert_into_node<'a, P: PageManager, V: Value>(
                     panic!("New value would be inserted at an existing branch node");
                 } else {
                     // insert into the appropriate child slot of the current branch
-                    let child = mem::take(&mut branch.children[path.at(common_prefix_len) as usize]);
+                    let child = branch.get_child(path.at(common_prefix_len) as u8);
                     if child.is_none() {
+                        // slot is currently empty, insert a new leaf
                         let new_leaf = LeafNode::new(path.slice(common_prefix_len + 1..), value);
                         let node_reference = insert_node(page_manager, new_leaf.into(), page);
-                        branch.children[path.at(common_prefix_len) as usize] = Some(node_reference);
+                        branch.set_child(path.at(common_prefix_len) as u8, Some(node_reference));
                         return insert_node::<P, V>(page_manager, branch.into(), page);
                     }
+                    // slot is currently occupied, recurse into the child
                     let child = child.unwrap();
                     let subtrie_page = if child.page_id == page.page_id {
-                        &mut *page
+                        page
                     } else {
                         let page = page_manager.get_page(child.page_id).expect("Page not found");
                         &mut SubtriePage::from_id_and_page(child.page_id, page)
                     };
                     let dereferenced_node = subtrie_page.pop_node(child.index).expect("Node not found");
                     let new_node = insert_into_node(page_manager, path.slice(common_prefix_len + 1..), value, dereferenced_node, subtrie_page);
-                    branch.children[path.at(common_prefix_len) as usize] = Some(new_node);
+                    branch.set_child(path.at(common_prefix_len) as u8, Some(new_node));
                     return insert_node::<P, V>(page_manager, branch.into(), subtrie_page);
                 }
             } else {
-                // create a new branch at the common prefix
+                // insert a new branch at the common prefix, containing the old branch and a new leaf
                 let common_prefix = path.slice(0..common_prefix_len);
                 let old_index = branch.prefix.at(common_prefix_len);
                 let old_remainder = branch.prefix.slice(common_prefix_len + 1..);
                 let new_index = path.at(common_prefix_len);
                 let new_remainder = path.slice(common_prefix_len + 1..);
-                let mut new_branch = BranchNode::new(common_prefix);
+
                 let old_branch = insert_node(page_manager, TrieNode::<V>::from(branch.with_prefix(old_remainder)), page);
                 let new_leaf = insert_node(page_manager, TrieNode::<V>::from(LeafNode::new(new_remainder, value)), page);
-                new_branch.set_child(old_index as usize, Some(old_branch));
-                new_branch.set_child(new_index as usize, Some(new_leaf));
-                insert_node::<P, V>(page_manager, new_branch.into(), page)
+
+                let mut parent_branch = BranchNode::new(common_prefix);
+                parent_branch.set_child(old_index as u8, Some(old_branch));
+                parent_branch.set_child(new_index as u8, Some(new_leaf));
+
+                insert_node::<P, V>(page_manager, parent_branch.into(), page)
             }
         }
     }
@@ -262,7 +266,7 @@ fn commit_node<'a, P: PageManager, V: Value>(
 
    if node.page_id == page.page_id {
         if let Some(TrieNode::Branch(branch)) = page.get_node::<V>(node.index) {
-            let children: Vec<_> = branch.children.iter().flatten().cloned().collect();
+            let children: Vec<_> = branch.children().collect();
             for child_ref in children {
                 commit_node::<P, V>(page_manager, &child_ref, page);
             }
@@ -271,7 +275,7 @@ fn commit_node<'a, P: PageManager, V: Value>(
         let external_page = page_manager.get_page(node.page_id).expect("Page not found");
         let subtrie_page = SubtriePage::from_id_and_page(node.page_id, external_page);
         if let Some(TrieNode::Branch(branch)) = subtrie_page.get_node::<V>(node.index) {
-            let children: Vec<_> = branch.children.iter().flatten().cloned().collect();
+            let children: Vec<_> = branch.children().collect();
             for child_ref in children {
                 commit_node::<P, V>(page_manager, &child_ref, &subtrie_page);
             }
