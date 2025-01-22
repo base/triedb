@@ -106,6 +106,10 @@ impl<'a> SubtriePage<'a> {
     }
 
     pub fn get_node<V: Value>(&self, index: u8) -> Option<TrieNode<V>> {
+        if index >= self.node_count() {
+            return None;
+        }
+
         let ptr = self.get_ptr(index)?;
         let start_index = (4096 - ptr.offset_from_end) as usize;
         let end_index = start_index + ptr.size as usize;
@@ -113,7 +117,9 @@ impl<'a> SubtriePage<'a> {
         Some(TrieNode::from_bytes(&node_bytes))
     }
 
-    pub fn set_node<V: Value>(&mut self, index: u8, node: TrieNode<V>) -> Option<NodeReference> {
+    pub fn set_node<V: Value>(&mut self, index: u8, node: &TrieNode<V>) -> Option<NodeReference> {
+        assert!(index < self.node_count(), "Index out of bounds");
+
         let mut ptr = self.get_ptr(index)?;
         let node_bytes = node.as_bytes();
 
@@ -142,7 +148,7 @@ impl<'a> SubtriePage<'a> {
         node
     }
 
-    pub fn insert<V: Value>(&mut self, node: TrieNode<V>) -> Option<NodeReference> {
+    pub fn insert<V: Value>(&mut self, node: &TrieNode<V>) -> Option<NodeReference> {
         let size = node.encoded_size();
         let (index, pointer) = self.assign_pointer(size)?;
         self.set_node(index, node)
@@ -158,6 +164,7 @@ impl<'a> SubtriePage<'a> {
             return None;
         }
         let index = self.node_count();
+        // TODO: this is a hack to force nodes to spill over to the next page even with small numbers of nodes
         if index > 2 {
             return None;
         }

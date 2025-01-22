@@ -35,8 +35,8 @@ impl BranchNode {
         self.children[index as usize].as_ref()
     }
 
-    pub fn children(&self) -> impl Iterator<Item = &NodeReference> {
-        self.children.iter().filter_map(|child| child.as_ref())
+    pub fn children(&self) -> impl Iterator<Item = Option<&NodeReference>> {
+        self.children.iter().map(|child| child.as_ref())
     }
 
     pub fn as_bytes(&self) -> Vec<u8> {
