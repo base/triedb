@@ -60,6 +60,10 @@ impl<V: Value> TrieNode<V> {
         self.as_bytes().len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Self::EmptyRoot)
+    }
+
     pub fn as_bytes(&self) -> Vec<u8> {
         match self {
             Self::EmptyRoot => vec![0u8; 0],

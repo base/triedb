@@ -56,7 +56,7 @@ impl<'a> SubtriePage<'a> {
         (self.page_id, self.page)
     }
 
-    pub fn inspect(&self) {
+    pub fn inspect<V: Value>(&self) {
         println!("Page ID: {:?}", self.page_id);
         println!("Dirty: {:?}", self.is_dirty());
         // println!("Page: {:?}", self.page.borrow().data);
@@ -68,10 +68,12 @@ impl<'a> SubtriePage<'a> {
             if ptr.is_removed() {
                 continue;
             }
-            println!("Node {}: {:?}", i, self.get_node::<String>(i as u8));
+            println!("Node {}: {:?}", i, self.get_node::<V>(i as u8));
         }
     }
 
+    // TODO: replace dirty flag with a version number.
+    // A page is dirty if the version number is greater than the last committed version number.
     pub fn is_dirty(&self) -> bool {
         self.page.data[0] == 1
     }
@@ -102,7 +104,7 @@ impl<'a> SubtriePage<'a> {
 
     fn ptrs_iter(&self) -> impl Iterator<Item = NodePointer> + '_ {
         (0..self.node_count())
-            .filter_map(|i| self.get_ptr(i as u8))
+            .filter_map(|i| self.get_ptr(i))
     }
 
     pub fn get_node<V: Value>(&self, index: u8) -> Option<TrieNode<V>> {
@@ -111,6 +113,10 @@ impl<'a> SubtriePage<'a> {
         }
 
         let ptr = self.get_ptr(index)?;
+        if ptr.is_empty() {
+            return None;
+        }
+
         let start_index = (4096 - ptr.offset_from_end) as usize;
         let end_index = start_index + ptr.size as usize;
         let node_bytes = self.page.data[start_index..end_index].to_vec();
@@ -134,7 +140,7 @@ impl<'a> SubtriePage<'a> {
         let end_index = start_index + ptr.size as usize;
         self.page.data[start_index..end_index].copy_from_slice(&node_bytes);
         self.set_dirty(true);
-        Some(NodeReference::new_dirty(self.page_id, index as u8))
+        Some(NodeReference::new_dirty(self.page_id, index))
     }
 
     pub fn pop_node<V: Value>(&mut self, index: u8) -> Option<TrieNode<V>> {

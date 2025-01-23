@@ -1,5 +1,5 @@
 use std::collections::{HashSet, HashMap};
-use crate::page::{Page, PageId, SubtriePage};
+use crate::page::{Page, PageId};
 use crate::value::Value;
 use crate::storage::StorageManager;
 use crate::path::Path;
@@ -77,16 +77,18 @@ impl<'a, V: Value> Batch<'a, V> {
         self.committed = true;
     }
 
-    fn apply_updates<P: PageManager>(&mut self, storage_manager: &mut StorageManager<P>) {
+    fn apply_updates<P: PageManager>(&mut self, storage_manager: &mut StorageManager<P>) -> Result<(), String> {
         for (key, value) in self.updated.iter() {
-            storage_manager.insert(key.clone(), value.clone());
+            storage_manager.insert(key.clone(), value.clone())?;
         }
+        Ok(())
     }
 
-    fn apply_deletes<P: PageManager>(&mut self, storage_manager: &mut StorageManager<P>) {
+    fn apply_deletes<P: PageManager>(&mut self, storage_manager: &mut StorageManager<P>) -> Result<(), String> {
         for key in self.deleted.iter() {
-            storage_manager.delete(key.clone());
+            storage_manager.delete::<V>(key.clone())?;
         }
+        Ok(())
     }
 }
 

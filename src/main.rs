@@ -13,14 +13,6 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use memmap2::MmapMut;
-    use std::fs::OpenOptions;
-    use std::path::Path;
-    use std::fs::File;
-    use std::rc::Rc;
-    use std::sync::Arc;
-    use std::sync::RwLock;
-    use super::*;
 
     // pub struct DB {
     //     file: File,
