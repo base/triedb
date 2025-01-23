@@ -29,7 +29,7 @@ impl<V: Value> LeafNode<V> {
 
     fn rlp(&self) -> RlpNode {
         let mut rlp_vec = Vec::new();
-        LeafNodeRef::new(&self.prefix, self.value.as_bytes().as_slice()).rlp(&mut rlp_vec)
+        LeafNodeRef::new(&self.prefix, self.value.rlp_encode().as_slice()).rlp(&mut rlp_vec)
     }
 
     pub fn as_bytes(&self) -> Vec<u8> {

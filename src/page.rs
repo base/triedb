@@ -1,6 +1,6 @@
 use crate::nodes::TrieNode;
 use crate::nodes::reference::NodeReference;
-use crate::value::{Value, StringValue};
+use crate::value::Value;
 
 pub const PAGE_SIZE: usize = 4096;
 
@@ -56,7 +56,7 @@ impl<'a> SubtriePage<'a> {
         (self.page_id, self.page)
     }
 
-    pub fn inspect(&self) {
+    pub fn inspect<V: Value>(&self) {
         println!("Page ID: {:?}", self.page_id);
         println!("Dirty: {:?}", self.is_dirty());
         // println!("Page: {:?}", self.page.borrow().data);
@@ -68,7 +68,7 @@ impl<'a> SubtriePage<'a> {
             if ptr.is_removed() {
                 continue;
             }
-            println!("Node {}: {:?}", i, self.get_node::<StringValue>(i as u8));
+            println!("Node {}: {:?}", i, self.get_node::<V>(i as u8));
         }
     }
 

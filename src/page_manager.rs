@@ -57,7 +57,9 @@ impl MemoryMappedFilePageManager {
             .open(path)?;
         
         // Ensure file is at least one page
-        file.set_len(PAGE_SIZE as u64)?;
+        if file.metadata()?.len() < PAGE_SIZE as u64 {
+            file.set_len(PAGE_SIZE as u64)?;
+        }
         
         let mmap = unsafe { MmapOptions::new().map_mut(&file)? };
         

@@ -52,7 +52,7 @@ impl<P: PageManager> StorageManager<P> {
             let new_node = insert_into_node(&mut self.page_manager, path, value, node, &mut subtrie_page)?;
             set_or_insert_node(&mut self.page_manager, &mut subtrie_page, &new_node, root_node.index)?
         };
-        self.root_page().inspect();
+        self.root_page().inspect::<V>();
         Ok(())
     }
 
@@ -73,7 +73,7 @@ impl<P: PageManager> StorageManager<P> {
                 set_or_insert_node(&mut self.page_manager, &mut subtrie_page, &new_node, root_node.index)?
             }
         };
-        self.root_page().inspect();
+        self.root_page().inspect::<V>();
         Ok(())
     }
     
@@ -427,7 +427,7 @@ fn commit_node<'a, P: PageManager, V: Value>(
 mod tests {
     use super::*;
     use crate::page_manager::MemoryMappedFilePageManager;
-    use crate::value::StringValue;
+    use crate::value::{AccountValue, StringValue};
 
     #[test]
     fn test_insert_delete_get() -> Result<(), String> {
@@ -483,6 +483,22 @@ mod tests {
         assert_eq!(storage.get(Nibbles::from_nibbles([0x01, 0x02, 0x0f])), Some(Arc::new(StringValue::from("value3".to_string()))));
         assert_eq!(storage.get::<StringValue>(Nibbles::from_nibbles([0x04, 0x05, 0x06])), None);
         storage.print_all::<StringValue>();
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_insert_commit_account() -> Result<(), String> {
+        let page_manager = MemoryMappedFilePageManager::new("test3.db").unwrap();
+        let mut storage = StorageManager::new(page_manager)?;
+        storage.insert(Nibbles::from_nibbles([0x01, 0x02, 0x03]), AccountValue::new_eoa(42, 8675309))?;
+        storage.print_all::<AccountValue>();
+        assert_eq!(storage.get(Nibbles::from_nibbles([0x01, 0x02, 0x03])), Some(Arc::new(AccountValue::new_eoa(42, 8675309))));
+        storage.commit::<AccountValue>()?;
+
+        assert!(!storage.root_page().is_dirty());
+        storage.print_all::<AccountValue>();
+        assert_eq!(storage.get(Nibbles::from_nibbles([0x01, 0x02, 0x03])), Some(Arc::new(AccountValue::new_eoa(42, 8675309))));
 
         Ok(())
     }
