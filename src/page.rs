@@ -113,6 +113,10 @@ impl<'a> SubtriePage<'a> {
         }
 
         let ptr = self.get_ptr(index)?;
+        if ptr.is_empty() {
+            return None;
+        }
+
         let start_index = (4096 - ptr.offset_from_end) as usize;
         let end_index = start_index + ptr.size as usize;
         let node_bytes = self.page.data[start_index..end_index].to_vec();

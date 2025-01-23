@@ -26,22 +26,20 @@ impl<P: PageManager> StorageManager<P> {
 
     fn root_page<'a>(&self) -> SubtriePage<'a> {
         let page = self.page_manager.get_page(self.root_node.page_id).expect("Page not found");
-        let sp = SubtriePage::from_id_and_page(self.root_node.page_id, page);
-        println!("Root page!");
-        sp.inspect();
-        sp
+        SubtriePage::from_id_and_page(self.root_node.page_id, page)
     }
 
     pub fn get<V: Value>(&mut self, path: Nibbles) -> Option<Arc<V>> {
         let root_node_index = self.root_node.index;
 
         let page = self.root_page();
-        let root_node = &page.get_node(root_node_index).expect("Node not found");
+        let root_node = &page.get_node(root_node_index)?;
         get_from_node(&self.page_manager, path, root_node, &page)
     }
 
     pub fn insert<V: Value>(&mut self, path: Nibbles, value: V) -> Result<(), String> {
         // TODO: potentially resize the page manager if there's any risk of running out of space
+        println!("Inserting {:?}!", path);
 
         let mut subtrie_page = self.root_page();
         let root_node = &self.root_node;
@@ -54,13 +52,29 @@ impl<P: PageManager> StorageManager<P> {
             let new_node = insert_into_node(&mut self.page_manager, path, value, node, &mut subtrie_page)?;
             set_or_insert_node(&mut self.page_manager, &mut subtrie_page, &new_node, root_node.index)?
         };
-        println!("Inserted!");
         self.root_page().inspect();
         Ok(())
     }
 
-    pub fn delete(&mut self, path: Nibbles) {
-        todo!()
+    pub fn delete<V: Value>(&mut self, path: Nibbles) -> Result<(), String> {
+        println!("Deleting {:?}!", path);
+
+        let mut subtrie_page = self.root_page();
+        let root_node = &self.root_node;
+        let root_trie_node = subtrie_page.get_node::<V>(root_node.index);
+        self.root_node = if root_trie_node.is_none() {
+            return Err("Path not found".to_string());
+        } else {
+            let new_node = delete_from_node(&mut self.page_manager, path, root_trie_node.unwrap(), &mut subtrie_page)?;
+            if new_node.is_empty() {
+                subtrie_page.pop_node::<V>(root_node.index).ok_or("Failed to remove node from page")?;
+                NodeReference::new_dirty(root_node.page_id, root_node.index)
+            } else {
+                set_or_insert_node(&mut self.page_manager, &mut subtrie_page, &new_node, root_node.index)?
+            }
+        };
+        self.root_page().inspect();
+        Ok(())
     }
     
     pub fn commit<V: Value>(&mut self) -> Result<B256, String> {
@@ -77,7 +91,11 @@ impl<P: PageManager> StorageManager<P> {
     pub fn print_all<V: Value>(&mut self) {
         let root_page = self.root_page();
         println!("Printing from root page: {:?}", root_page.page_id);
-        print_all_recursive::<P, V>(&self.page_manager, &self.root_node, Nibbles::new(), &root_page);
+        if root_page.get_node::<V>(self.root_node.index).is_none() {
+            println!("Empty root!");
+        } else {
+            print_all_recursive::<P, V>(&self.page_manager, &self.root_node, Nibbles::new(), &root_page);
+        }
     }
 }
 
@@ -256,6 +274,85 @@ fn insert_into_node<P: PageManager, V: Value>(
     }
 }
 
+fn delete_from_node<P: PageManager, V: Value>(
+    page_manager: &mut P,
+    path: Nibbles,
+    node: TrieNode<V>,
+    page: &mut SubtriePage<'_>
+) -> Result<TrieNode<V>, String> {
+    match node {
+        TrieNode::EmptyRoot => Err("Path not found".to_string()),
+        TrieNode::Leaf(leaf) => {
+            if leaf.prefix == path {
+                Ok(TrieNode::EmptyRoot)
+            } else {
+                Err("Path not found".to_string())
+            }
+        }
+        TrieNode::Branch(mut branch) => {
+            let common_prefix_len = path.common_prefix_length(&branch.prefix);
+            if common_prefix_len == branch.prefix.len() {
+                let index = path.at(common_prefix_len);
+                let child = branch.get_child(index as u8).ok_or("Path not found")?;
+                let subtrie_page = if child.page_id == page.page_id {
+                    page
+                } else {
+                    let page = page_manager.get_page(child.page_id).expect("Page not found");
+                    &mut SubtriePage::from_id_and_page(child.page_id, page)
+                };
+                let dereferenced_child = subtrie_page.get_node::<V>(child.index).expect("Node not found");
+                let new_node = delete_from_node(page_manager, path.slice(common_prefix_len + 1..), dereferenced_child, subtrie_page)?;
+                match new_node {
+                    TrieNode::EmptyRoot => {
+                        subtrie_page.pop_node::<V>(child.index).ok_or("Failed to remove node from page")?;
+                        branch.set_child(index as u8, None);
+                    }
+                    _ => {
+                        let node_reference = set_or_insert_node(page_manager, subtrie_page, &new_node, child.index)?;
+                        branch.set_child(index as u8, Some(node_reference));
+                    }
+                };
+                if branch.children().filter(|child| child.is_some()).count() < 2 {
+                    // If branch has only one child, replace it with that child
+                    if let Some(only_child) = branch.children().enumerate().find(|(_, child)| child.is_some()) {
+                        let (index, child) = only_child;
+                        let child = child.as_ref().unwrap();
+                        let child_page = if child.page_id == subtrie_page.page_id {
+                            subtrie_page
+                        } else {
+                            let page = page_manager.get_page(child.page_id).expect("Page not found");
+                            &mut SubtriePage::from_id_and_page(child.page_id, page)
+                        };
+                        let child_node = child_page.get_node::<V>(child.index).expect("Node not found");
+                        match child_node {
+                            TrieNode::Leaf(child_leaf) => {
+                                let mut new_prefix = branch.prefix.clone();
+                                new_prefix.push(index as u8);
+                                new_prefix = new_prefix.join(&child_leaf.prefix);
+                                return Ok(TrieNode::Leaf(child_leaf.with_prefix(new_prefix)));
+                            }
+                            TrieNode::Branch(child_branch) => {
+                                let mut new_prefix = branch.prefix.clone();
+                                new_prefix.push(index as u8);
+                                new_prefix = new_prefix.join(&child_branch.prefix);
+                                return Ok(TrieNode::Branch(child_branch.with_prefix(new_prefix)));
+                            }
+                            TrieNode::EmptyRoot => {
+                                panic!("Empty root found in child");
+                            }
+                        }
+                    }
+                    // If branch has no children, replace it with empty root
+                    return Ok(TrieNode::EmptyRoot);
+                }
+                Ok(branch.into())
+            } else {
+                Err("Path not found".to_string())
+            }
+        }
+    }
+}
+
 fn insert_node<P: PageManager, V: Value>(
     page_manager: &mut P,
     node: &TrieNode<V>,
@@ -333,7 +430,7 @@ mod tests {
     use crate::value::StringValue;
 
     #[test]
-    fn test_insert_and_get() -> Result<(), String> {
+    fn test_insert_delete_get() -> Result<(), String> {
         let page_manager = MemoryMappedFilePageManager::new("test1.db").unwrap();
         let mut storage = StorageManager::new(page_manager)?;
         storage.insert(Nibbles::from_nibbles([0x01, 0x02, 0x03]), StringValue::from("value1".to_string()))?;
@@ -351,20 +448,40 @@ mod tests {
         assert_eq!(storage.get(Nibbles::from_nibbles([0x04, 0x05, 0x06])), Some(Arc::new(StringValue::from("value2".to_string()))));
         assert_eq!(storage.get(Nibbles::from_nibbles([0x01, 0x02, 0x0f])), Some(Arc::new(StringValue::from("value3".to_string()))));
 
+        storage.delete::<StringValue>(Nibbles::from_nibbles([0x01, 0x02, 0x0f]))?;
+        storage.print_all::<StringValue>();
+        assert_eq!(storage.get::<StringValue>(Nibbles::from_nibbles([0x01, 0x02, 0x0f])), None);
+        assert_eq!(storage.get::<StringValue>(Nibbles::from_nibbles([0x01, 0x02, 0x03])), Some(Arc::new(StringValue::from("value1".to_string()))));
+        assert_eq!(storage.get::<StringValue>(Nibbles::from_nibbles([0x04, 0x05, 0x06])), Some(Arc::new(StringValue::from("value2".to_string()))));
+
+        storage.delete::<StringValue>(Nibbles::from_nibbles([0x01, 0x02, 0x03]))?;
+        storage.print_all::<StringValue>();
+        assert_eq!(storage.get::<StringValue>(Nibbles::from_nibbles([0x01, 0x02, 0x03])), None);
+        assert_eq!(storage.get::<StringValue>(Nibbles::from_nibbles([0x04, 0x05, 0x06])), Some(Arc::new(StringValue::from("value2".to_string()))));
+
+        storage.delete::<StringValue>(Nibbles::from_nibbles([0x04, 0x05, 0x06]))?;
+        storage.print_all::<StringValue>();
+        assert_eq!(storage.get::<StringValue>(Nibbles::from_nibbles([0x04, 0x05, 0x06])), None);
+
         Ok(())
     }
 
     #[test]
-    fn test_insert_commit_get() -> Result<(), String> {
+    fn test_insert_delete_commit_get() -> Result<(), String> {
         let page_manager = MemoryMappedFilePageManager::new("test2.db").unwrap();
         let mut storage = StorageManager::new(page_manager)?;
         storage.insert(Nibbles::from_nibbles([0x01, 0x02, 0x03]), StringValue::from("value1".to_string()))?;
+        storage.insert(Nibbles::from_nibbles([0x04, 0x05, 0x06]), StringValue::from("value2".to_string()))?;
+        storage.insert(Nibbles::from_nibbles([0x01, 0x02, 0x0f]), StringValue::from("value3".to_string()))?;
+        storage.delete::<StringValue>(Nibbles::from_nibbles([0x04, 0x05, 0x06]))?;
         storage.print_all::<StringValue>();
         assert!(storage.root_page().is_dirty());
         storage.commit::<StringValue>()?;
 
         assert!(!storage.root_page().is_dirty());
         assert_eq!(storage.get(Nibbles::from_nibbles([0x01, 0x02, 0x03])), Some(Arc::new(StringValue::from("value1".to_string()))));
+        assert_eq!(storage.get(Nibbles::from_nibbles([0x01, 0x02, 0x0f])), Some(Arc::new(StringValue::from("value3".to_string()))));
+        assert_eq!(storage.get::<StringValue>(Nibbles::from_nibbles([0x04, 0x05, 0x06])), None);
         storage.print_all::<StringValue>();
 
         Ok(())
