@@ -104,7 +104,7 @@ impl<'a> SubtriePage<'a> {
 
     fn ptrs_iter(&self) -> impl Iterator<Item = NodePointer> + '_ {
         (0..self.node_count())
-            .filter_map(|i| self.get_ptr(i as u8))
+            .filter_map(|i| self.get_ptr(i))
     }
 
     pub fn get_node<V: Value>(&self, index: u8) -> Option<TrieNode<V>> {
@@ -136,7 +136,7 @@ impl<'a> SubtriePage<'a> {
         let end_index = start_index + ptr.size as usize;
         self.page.data[start_index..end_index].copy_from_slice(&node_bytes);
         self.set_dirty(true);
-        Some(NodeReference::new_dirty(self.page_id, index as u8))
+        Some(NodeReference::new_dirty(self.page_id, index))
     }
 
     pub fn pop_node<V: Value>(&mut self, index: u8) -> Option<TrieNode<V>> {

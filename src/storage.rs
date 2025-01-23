@@ -5,7 +5,7 @@ use crate::nodes::TrieNode;
 use crate::nodes::leaf::LeafNode;
 use crate::nodes::branch::BranchNode;
 use crate::nodes::reference::NodeReference;
-use crate::value::{Value, StringValue};
+use crate::value::Value;
 use alloy_primitives::B256;
 use alloy_trie::Nibbles;
 
@@ -74,7 +74,7 @@ impl<P: PageManager> StorageManager<P> {
         Ok(self.root_node.hash)
     }
 
-    pub fn print_all<V: Value>(&mut self) -> () {
+    pub fn print_all<V: Value>(&mut self) {
         let root_page = self.root_page();
         println!("Printing from root page: {:?}", root_page.page_id);
         print_all_recursive::<P, V>(&self.page_manager, &self.root_node, Nibbles::new(), &root_page);
@@ -98,12 +98,8 @@ fn get_from_node<P: PageManager, V: Value>(page_manager: &P, path: Nibbles, node
                     panic!("Path resolves to a branch node, which should not happen");
                 } else {
                     let index = path.at(common_prefix_len);
-                    let child = branch.get_child(index as u8);
-                    if child.is_none() {
-                        return None;
-                    }
+                    let child = branch.get_child(index as u8)?;
 
-                    let child = child.as_ref().unwrap();
                     let subtrie_page = if child.page_id == page.page_id {
                         page
                     } else {
@@ -121,7 +117,7 @@ fn get_from_node<P: PageManager, V: Value>(page_manager: &P, path: Nibbles, node
     }
 }
 
-fn print_all_recursive<P: PageManager, V: Value>(page_manager: &P, node: &NodeReference, path: Nibbles, page: &SubtriePage) -> () {        
+fn print_all_recursive<P: PageManager, V: Value>(page_manager: &P, node: &NodeReference, path: Nibbles, page: &SubtriePage) {
     let page = if node.page_id == page.page_id {
         page
     } else {
@@ -134,7 +130,7 @@ fn print_all_recursive<P: PageManager, V: Value>(page_manager: &P, node: &NodeRe
     print_all_recursive_inner::<P, V>(page_manager, &node, path, page);
 }
 
-fn print_all_recursive_inner<P: PageManager, V: Value>(page_manager: &P, node: &TrieNode<V>, path: Nibbles, page: &SubtriePage) -> () {
+fn print_all_recursive_inner<P: PageManager, V: Value>(page_manager: &P, node: &TrieNode<V>, path: Nibbles, page: &SubtriePage) {
     match node {
         TrieNode::Leaf(leaf) => {
             println!("{} Leaf: {:?} -> {:?}", " ".repeat(path.len() * 2), path.join(&leaf.prefix), leaf.value);
@@ -157,12 +153,12 @@ fn print_all_recursive_inner<P: PageManager, V: Value>(page_manager: &P, node: &
     }
 }
 
-fn insert_into_node<'a, P: PageManager, V: Value>(
+fn insert_into_node<P: PageManager, V: Value>(
     page_manager: &mut P,
     path: Nibbles,
     value: V,
     node: TrieNode<V>,
-    page: &mut SubtriePage<'a>
+    page: &mut SubtriePage<'_>
 ) -> Result<TrieNode<V>, String> {
     match node {
         TrieNode::EmptyRoot => {
@@ -260,10 +256,10 @@ fn insert_into_node<'a, P: PageManager, V: Value>(
     }
 }
 
-fn insert_node<'a, P: PageManager, V: Value>(
+fn insert_node<P: PageManager, V: Value>(
     page_manager: &mut P,
     node: &TrieNode<V>,
-    page: &mut SubtriePage<'a>
+    page: &mut SubtriePage<'_>
 ) -> Result<NodeReference, String> {
     if let Some(node_ref) = page.insert(node) {
         return Ok(node_ref);
@@ -277,9 +273,9 @@ fn insert_node<'a, P: PageManager, V: Value>(
     Ok(node_ref)
 }
 
-fn set_or_insert_node<'a, P: PageManager, V: Value>(
+fn set_or_insert_node<P: PageManager, V: Value>(
     page_manager: &mut P,
-    page: &mut SubtriePage<'a>,
+    page: &mut SubtriePage<'_>,
     node: &TrieNode<V>,
     index: u8
 ) -> Result<NodeReference, String> {
@@ -334,25 +330,26 @@ fn commit_node<'a, P: PageManager, V: Value>(
 mod tests {
     use super::*;
     use crate::page_manager::MemoryMappedFilePageManager;
+    use crate::value::StringValue;
 
     #[test]
     fn test_insert_and_get() -> Result<(), String> {
         let page_manager = MemoryMappedFilePageManager::new("test1.db").unwrap();
         let mut storage = StorageManager::new(page_manager)?;
-        storage.insert(Nibbles::from_nibbles(&[0x01, 0x02, 0x03]), StringValue::from("value1".to_string()))?;
+        storage.insert(Nibbles::from_nibbles([0x01, 0x02, 0x03]), StringValue::from("value1".to_string()))?;
         storage.print_all::<StringValue>();
-        assert_eq!(storage.get(Nibbles::from_nibbles(&[0x01, 0x02, 0x03])), Some(Arc::new(StringValue::from("value1".to_string()))));
+        assert_eq!(storage.get(Nibbles::from_nibbles([0x01, 0x02, 0x03])), Some(Arc::new(StringValue::from("value1".to_string()))));
 
-        storage.insert(Nibbles::from_nibbles(&[0x04, 0x05, 0x06]), StringValue::from("value2".to_string()))?;
+        storage.insert(Nibbles::from_nibbles([0x04, 0x05, 0x06]), StringValue::from("value2".to_string()))?;
         storage.print_all::<StringValue>();
-        assert_eq!(storage.get(Nibbles::from_nibbles(&[0x01, 0x02, 0x03])), Some(Arc::new(StringValue::from("value1".to_string()))));
-        assert_eq!(storage.get(Nibbles::from_nibbles(&[0x04, 0x05, 0x06])), Some(Arc::new(StringValue::from("value2".to_string()))));
+        assert_eq!(storage.get(Nibbles::from_nibbles([0x01, 0x02, 0x03])), Some(Arc::new(StringValue::from("value1".to_string()))));
+        assert_eq!(storage.get(Nibbles::from_nibbles([0x04, 0x05, 0x06])), Some(Arc::new(StringValue::from("value2".to_string()))));
 
-        storage.insert(Nibbles::from_nibbles(&[0x01, 0x02, 0x0f]), StringValue::from("value3".to_string()))?;
+        storage.insert(Nibbles::from_nibbles([0x01, 0x02, 0x0f]), StringValue::from("value3".to_string()))?;
         storage.print_all::<StringValue>();
-        assert_eq!(storage.get(Nibbles::from_nibbles(&[0x01, 0x02, 0x03])), Some(Arc::new(StringValue::from("value1".to_string()))));
-        assert_eq!(storage.get(Nibbles::from_nibbles(&[0x04, 0x05, 0x06])), Some(Arc::new(StringValue::from("value2".to_string()))));
-        assert_eq!(storage.get(Nibbles::from_nibbles(&[0x01, 0x02, 0x0f])), Some(Arc::new(StringValue::from("value3".to_string()))));
+        assert_eq!(storage.get(Nibbles::from_nibbles([0x01, 0x02, 0x03])), Some(Arc::new(StringValue::from("value1".to_string()))));
+        assert_eq!(storage.get(Nibbles::from_nibbles([0x04, 0x05, 0x06])), Some(Arc::new(StringValue::from("value2".to_string()))));
+        assert_eq!(storage.get(Nibbles::from_nibbles([0x01, 0x02, 0x0f])), Some(Arc::new(StringValue::from("value3".to_string()))));
 
         Ok(())
     }
@@ -361,13 +358,13 @@ mod tests {
     fn test_insert_commit_get() -> Result<(), String> {
         let page_manager = MemoryMappedFilePageManager::new("test2.db").unwrap();
         let mut storage = StorageManager::new(page_manager)?;
-        storage.insert(Nibbles::from_nibbles(&[0x01, 0x02, 0x03]), StringValue::from("value1".to_string()))?;
+        storage.insert(Nibbles::from_nibbles([0x01, 0x02, 0x03]), StringValue::from("value1".to_string()))?;
         storage.print_all::<StringValue>();
-        assert_eq!(storage.root_page().is_dirty(), true);
+        assert!(storage.root_page().is_dirty());
         storage.commit::<StringValue>()?;
 
-        assert_eq!(storage.root_page().is_dirty(), false);
-        assert_eq!(storage.get(Nibbles::from_nibbles(&[0x01, 0x02, 0x03])), Some(Arc::new(StringValue::from("value1".to_string()))));
+        assert!(!storage.root_page().is_dirty());
+        assert_eq!(storage.get(Nibbles::from_nibbles([0x01, 0x02, 0x03])), Some(Arc::new(StringValue::from("value1".to_string()))));
         storage.print_all::<StringValue>();
 
         Ok(())

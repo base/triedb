@@ -57,7 +57,7 @@ impl MemoryMappedFilePageManager {
             .open(path)?;
         
         // Ensure file is at least one page
-        file.set_len((PAGE_SIZE * 1) as u64)?;
+        file.set_len(PAGE_SIZE as u64)?;
         
         let mmap = unsafe { MmapOptions::new().map_mut(&file)? };
         
@@ -71,10 +71,10 @@ impl MemoryMappedFilePageManager {
 
 impl PageManager for MemoryMappedFilePageManager {
     fn get_page<'a>(&self, page_id: PageId) -> Option<Page<'a>> {
-        let start = page_id as usize * PAGE_SIZE as usize;
-        if start + PAGE_SIZE as usize <= self.mmap.read().unwrap().len() {
+        let start = page_id as usize * PAGE_SIZE;
+        if start + PAGE_SIZE <= self.mmap.read().unwrap().len() {
             let page_data = unsafe {
-                &mut *(self.mmap.read().unwrap().as_ptr().add(start) as *mut [u8; PAGE_SIZE as usize])
+                &mut *(self.mmap.read().unwrap().as_ptr().add(start) as *mut [u8; PAGE_SIZE])
             };
             Some(Page::from_slice(page_data))
         } else {
@@ -87,7 +87,7 @@ impl PageManager for MemoryMappedFilePageManager {
     fn resize(&mut self, page_id: PageId) -> std::io::Result<()> {
         let file = self.file.write().unwrap();
         let mut mmap = self.mmap.write().unwrap();
-        let required_len = (page_id as usize + 1) * PAGE_SIZE as usize;
+        let required_len = (page_id as usize + 1) * PAGE_SIZE;
         if required_len > mmap.len() {
             // Extend file
             file.set_len(required_len as u64)?;
@@ -101,15 +101,15 @@ impl PageManager for MemoryMappedFilePageManager {
         let page_id = self.next_page_id;
         self.next_page_id += 1;
         
-        let required_len = (page_id as usize + 1) * PAGE_SIZE as usize;
+        let required_len = (page_id as usize + 1) * PAGE_SIZE;
         let mut mmap = self.mmap.write().unwrap();
         if mmap.len() < required_len {
             return Err("Failed to allocate page: not enough space in mmap".to_string());
         }
         
-        let start = page_id as usize * PAGE_SIZE as usize;
+        let start = page_id as usize * PAGE_SIZE;
 
-        let page_slice = &mut mmap[start..start + PAGE_SIZE as usize];
+        let page_slice = &mut mmap[start..start + PAGE_SIZE];
         
         // Initialize page with zeros
         page_slice.fill(0);
@@ -117,7 +117,7 @@ impl PageManager for MemoryMappedFilePageManager {
         let ptr = mmap.as_ptr();
 
         let page_data = unsafe {
-            &mut *(ptr.add(start) as *mut [u8; PAGE_SIZE as usize])
+            &mut *(ptr.add(start) as *mut [u8; PAGE_SIZE])
         };
         let page = Page::new(page_data);
         
@@ -125,8 +125,8 @@ impl PageManager for MemoryMappedFilePageManager {
     }
 
     fn commit_page(&mut self, page_id: PageId) -> Result<(), String> {
-        let start = page_id as usize * PAGE_SIZE as usize;
-        self.mmap.write().unwrap().flush_range(start, PAGE_SIZE as usize).map_err(|e| format!("Failed to flush mmap: {}", e))?;
+        let start = page_id as usize * PAGE_SIZE;
+        self.mmap.write().unwrap().flush_range(start, PAGE_SIZE).map_err(|e| format!("Failed to flush mmap: {}", e))?;
         Ok(())
     }
 }
