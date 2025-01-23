@@ -29,7 +29,7 @@ impl<'a> Page<'a> {
     // }
 }
 
-pub type PageId = u64;
+pub type PageId = u32;
 
 pub type IdentifiedPage<'a> = (PageId, Page<'a>);
 
@@ -68,7 +68,7 @@ impl<'a> SubtriePage<'a> {
             if ptr.is_removed() {
                 continue;
             }
-            println!("Node {}: {:?}", i, self.get_node::<String>(i));
+            println!("Node {}: {:?}", i, self.get_node::<String>(i as u8));
         }
     }
 
@@ -80,32 +80,36 @@ impl<'a> SubtriePage<'a> {
         self.page.data[0] = if dirty { 1 } else { 0 };
     }
 
-    fn set_node_count(&mut self, count: usize) {
-        self.page.data[8..16].copy_from_slice(&count.to_le_bytes());
+    fn set_node_count(&mut self, count: u8) {
+        self.page.data[1] = count;
     }
 
-    fn node_count(&self) -> usize {
-        usize::from_le_bytes(self.page.data[8..16].try_into().expect("Invalid node count"))
+    fn node_count(&self) -> u8 {
+        self.page.data[1]
     }
 
-    fn set_ptr(&mut self, index: usize, ptr: NodePointer) {
-        let start_index = 16 + index * 4;
+    fn set_ptr(&mut self, index: u8, ptr: NodePointer) {
+        let start_index = (16 + index * 4) as usize;
         let end_index = start_index + 4;
         self.page.data[start_index..end_index].copy_from_slice(&ptr.as_bytes());
     }
 
-    fn get_ptr(&self, index: usize) -> Option<NodePointer> {
-        let start_index = 16 + index * 4;
+    fn get_ptr(&self, index: u8) -> Option<NodePointer> {
+        let start_index = (16 + index * 4) as usize;
         let end_index = start_index + 4;
         Some(NodePointer::from_bytes(&self.page.data[start_index..end_index]))
     }
 
     fn ptrs_iter(&self) -> impl Iterator<Item = NodePointer> + '_ {
         (0..self.node_count())
-            .filter_map(|i| self.get_ptr(i))
+            .filter_map(|i| self.get_ptr(i as u8))
     }
 
-    pub fn get_node<V: Value>(&self, index: usize) -> Option<TrieNode<V>> {
+    pub fn get_node<V: Value>(&self, index: u8) -> Option<TrieNode<V>> {
+        if index >= self.node_count() {
+            return None;
+        }
+
         let ptr = self.get_ptr(index)?;
         let start_index = (4096 - ptr.offset_from_end) as usize;
         let end_index = start_index + ptr.size as usize;
@@ -113,7 +117,27 @@ impl<'a> SubtriePage<'a> {
         Some(TrieNode::from_bytes(&node_bytes))
     }
 
-    pub fn pop_node<V: Value>(&mut self, index: usize) -> Option<TrieNode<V>> {
+    pub fn set_node<V: Value>(&mut self, index: u8, node: &TrieNode<V>) -> Option<NodeReference> {
+        assert!(index < self.node_count(), "Index out of bounds");
+
+        let mut ptr = self.get_ptr(index)?;
+        let node_bytes = node.as_bytes();
+
+        if node_bytes.len() > ptr.size as usize {
+            return None;
+        } else if node_bytes.len() < ptr.size as usize {
+            ptr.size = node_bytes.len() as u16;
+            self.set_ptr(index, ptr.clone());
+        }
+
+        let start_index = (4096 - ptr.offset_from_end) as usize;
+        let end_index = start_index + ptr.size as usize;
+        self.page.data[start_index..end_index].copy_from_slice(&node_bytes);
+        self.set_dirty(true);
+        Some(NodeReference::new_dirty(self.page_id, index as u8))
+    }
+
+    pub fn pop_node<V: Value>(&mut self, index: u8) -> Option<TrieNode<V>> {
         let ptr = self.get_ptr(index)?;
         if ptr.is_empty() {
             return None;
@@ -124,20 +148,13 @@ impl<'a> SubtriePage<'a> {
         node
     }
 
-    pub fn insert<V: Value>(&mut self, node: TrieNode<V>) -> Option<NodeReference> {
+    pub fn insert<V: Value>(&mut self, node: &TrieNode<V>) -> Option<NodeReference> {
         let size = node.encoded_size();
         let (index, pointer) = self.assign_pointer(size)?;
-
-        // self.nodes.push(node);
-        self.set_dirty(true);
-        let node_bytes = node.as_bytes();
-        let start_index = (4096 - pointer.offset_from_end) as usize;
-        let end_index = start_index + pointer.size as usize;
-        self.page.data[start_index..end_index].copy_from_slice(&node_bytes);
-        Some(NodeReference { page_id: self.page_id, index, dirty: true })
+        self.set_node(index, node)
     }
 
-    fn assign_pointer(&mut self, size: usize) -> Option<(usize, NodePointer)> {
+    fn assign_pointer(&mut self, size: usize) -> Option<(u8, NodePointer)> {
         // TODO: handle fragmentation instead of only looking at the contiguous free space
 
         let free_space_start = self.free_space_start();
@@ -147,6 +164,7 @@ impl<'a> SubtriePage<'a> {
             return None;
         }
         let index = self.node_count();
+        // TODO: this is a hack to force nodes to spill over to the next page even with small numbers of nodes
         if index > 2 {
             return None;
         }

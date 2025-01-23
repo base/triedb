@@ -1278,6 +1278,7 @@ dependencies = [
 name = "triedb"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "alloy-trie",
  "memmap2",
 ]

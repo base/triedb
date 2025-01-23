@@ -6,10 +6,11 @@ use memmap2::{MmapMut, MmapOptions};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 pub trait PageManager: Debug {
-    fn get_page<'a>(&self, page_id: PageId) -> Option<Page<'a>>;
     // TODO: separate between read-only and read-write page access
-    fn allocate_page(&mut self) -> IdentifiedPage;
-    fn commit_page(&mut self, page_id: PageId);
+    fn get_page<'a>(&self, page_id: PageId) -> Option<Page<'a>>;
+    fn resize(&mut self, page_id: PageId) -> std::io::Result<()>;
+    fn allocate_page<'a>(&mut self) -> Result<IdentifiedPage<'a>, String>;
+    fn commit_page(&mut self, page_id: PageId) -> Result<(), String>;
 }
 
 // #[derive(Debug)]
@@ -66,19 +67,6 @@ impl MemoryMappedFilePageManager {
             next_page_id: 2, // Reserve 0 and 1 for roots
         })
     }
-
-    fn ensure_capacity(&mut self, page_id: PageId) -> std::io::Result<()> {
-        let file = self.file.write().unwrap();
-        let mut mmap = self.mmap.write().unwrap();
-        let required_len = (page_id as usize + 1) * PAGE_SIZE as usize;
-        if required_len > mmap.len() {
-            // Extend file
-            file.set_len(required_len as u64)?;
-            // Remap the file
-            *mmap = unsafe { MmapOptions::new().map_mut(&*file)? };
-        }
-        Ok(())
-    }
 }
 
 impl PageManager for MemoryMappedFilePageManager {
@@ -94,16 +82,33 @@ impl PageManager for MemoryMappedFilePageManager {
         }
     }
 
-    fn allocate_page(&mut self) -> IdentifiedPage {
+    // WARNING: Resizing/remapping the file invalidates all existing mmap views!
+    // This must not be called in the middle of a transaction!
+    fn resize(&mut self, page_id: PageId) -> std::io::Result<()> {
+        let file = self.file.write().unwrap();
+        let mut mmap = self.mmap.write().unwrap();
+        let required_len = (page_id as usize + 1) * PAGE_SIZE as usize;
+        if required_len > mmap.len() {
+            // Extend file
+            file.set_len(required_len as u64)?;
+            // Remap the file
+            *mmap = unsafe { MmapOptions::new().map_mut(&*file)? };
+        }
+        Ok(())
+    }
+
+    fn allocate_page<'a>(&mut self) -> Result<IdentifiedPage<'a>, String> {
         let page_id = self.next_page_id;
         self.next_page_id += 1;
         
-        // Ensure we have space for the new page
-        self.ensure_capacity(page_id).expect("Failed to extend mmap file");
+        let required_len = (page_id as usize + 1) * PAGE_SIZE as usize;
+        let mut mmap = self.mmap.write().unwrap();
+        if mmap.len() < required_len {
+            return Err("Failed to allocate page: not enough space in mmap".to_string());
+        }
         
         let start = page_id as usize * PAGE_SIZE as usize;
 
-        let mut mmap = self.mmap.write().unwrap();
         let page_slice = &mut mmap[start..start + PAGE_SIZE as usize];
         
         // Initialize page with zeros
@@ -116,11 +121,12 @@ impl PageManager for MemoryMappedFilePageManager {
         };
         let page = Page::new(page_data);
         
-        (page_id, page)
+        Ok((page_id, page))
     }
 
-    fn commit_page(&mut self, page_id: PageId) {
+    fn commit_page(&mut self, page_id: PageId) -> Result<(), String> {
         let start = page_id as usize * PAGE_SIZE as usize;
-        self.mmap.write().unwrap().flush_range(start, PAGE_SIZE as usize).expect("Failed to flush mmap");
+        self.mmap.write().unwrap().flush_range(start, PAGE_SIZE as usize).map_err(|e| format!("Failed to flush mmap: {}", e))?;
+        Ok(())
     }
 }
