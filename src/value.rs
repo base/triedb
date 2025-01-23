@@ -74,3 +74,20 @@ impl Value for AccountValue {
         alloy_rlp::encode(self)
     }
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, RlpEncodable)]
+pub struct StorageValue(B256);
+
+impl Value for StorageValue {
+    fn as_bytes(&self) -> Vec<u8> {
+        self.0.to_vec()
+    }
+
+    fn from_bytes(data: &[u8]) -> Self {
+        Self(data.try_into().unwrap())
+    }
+
+    fn rlp_encode(&self) -> Vec<u8> {
+        alloy_rlp::encode(&self.0)
+    }
+}
