@@ -5,7 +5,8 @@ use crate::nodes::TrieNode;
 use crate::nodes::leaf::LeafNode;
 use crate::nodes::branch::BranchNode;
 use crate::nodes::reference::NodeReference;
-use crate::value::Value;
+use crate::value::{Value, StringValue};
+use alloy_primitives::B256;
 use alloy_trie::Nibbles;
 
 pub struct StorageManager<P: PageManager> {
@@ -62,14 +63,15 @@ impl<P: PageManager> StorageManager<P> {
         todo!()
     }
     
-    pub fn commit<V: Value>(&mut self) -> Result<(), String> {
+    pub fn commit<V: Value>(&mut self) -> Result<B256, String> {
         let mut root_page = self.root_page();
         if root_page.is_dirty() {
-            commit_node::<P, V>(&mut self.page_manager, &self.root_node, &mut root_page)?;
+            let root_hash = commit_node::<P, V>(&mut self.page_manager, &mut self.root_node, &mut root_page)?;
             root_page.set_dirty(false);
             self.page_manager.commit_page(root_page.page_id)?;
+            self.root_node.hash = root_hash;
         }
-        Ok(())
+        Ok(self.root_node.hash)
     }
 
     pub fn print_all<V: Value>(&mut self) -> () {
@@ -123,10 +125,11 @@ fn print_all_recursive<P: PageManager, V: Value>(page_manager: &P, node: &NodeRe
     let page = if node.page_id == page.page_id {
         page
     } else {
-        println!("Using page {}", node.page_id);
+        // println!("Using page {}", node.page_id);
         let resolved_page = page_manager.get_page(node.page_id).expect("Page not found");
         &SubtriePage::from_id_and_page(node.page_id, resolved_page)
     };
+    println!("Node reference: {:?}", node);
     let node = page.get_node::<V>(node.index).expect("Node not found");
     print_all_recursive_inner::<P, V>(page_manager, &node, path, page);
 }
@@ -145,7 +148,7 @@ fn print_all_recursive_inner<P: PageManager, V: Value>(page_manager: &P, node: &
                 println!("{} [{:x?}]:", " ".repeat((path.len() + 1) * 2), index);
                 let mut path = path.join(&branch.prefix);
                 path.push(index as u8);
-                print_all_recursive::<P, V>(page_manager, child.unwrap(), path, page);
+                print_all_recursive::<P, V>(page_manager, child.as_ref().unwrap(), path, page);
             }
         }
         TrieNode::EmptyRoot => {
@@ -185,6 +188,9 @@ fn insert_into_node<'a, P: PageManager, V: Value>(
                 let new_index = path.at(common_prefix_len);
                 let new_remainder = path.slice(common_prefix_len + 1..);
 
+                // TODO: these nodes should be inserted into the same page only if their parent is.
+                // This may require knowing the location of the parent node ahead of time.
+                // As the parent previously was a leaf, the replacement branch will be larger and may require a page split.
                 let old_leaf = insert_node(
                     page_manager,
                     &TrieNode::<V>::from(leaf.with_prefix(old_remainder)),
@@ -267,7 +273,7 @@ fn insert_node<'a, P: PageManager, V: Value>(
     let new_page = page_manager.allocate_page()?;
     let mut new_subtrie_page = SubtriePage::from_identified_page(new_page);
     let node_ref = new_subtrie_page.insert(node).expect("Failed to insert node into newly-allocated page");
-    *page = new_subtrie_page;
+    // *page = new_subtrie_page;
     Ok(node_ref)
 }
 
@@ -286,33 +292,42 @@ fn set_or_insert_node<'a, P: PageManager, V: Value>(
 
 fn commit_node<'a, P: PageManager, V: Value>(
     page_manager: &mut P,
-    node: &NodeReference,
-    page: &SubtriePage
-) -> Result<(), String> {
-    if !page.is_dirty() {
-        return Ok(());
+    node_ref: &mut NodeReference,
+    page: &mut SubtriePage
+) -> Result<B256, String> {
+    if !node_ref.is_dirty() {
+        return Ok(node_ref.hash);
     }
 
-   if node.page_id == page.page_id {
-        if let Some(TrieNode::Branch(branch)) = page.get_node::<V>(node.index) {
-            let children: Vec<_> = branch.children().filter_map(|child| child).collect();
-            for child_ref in children {
-                commit_node::<P, V>(page_manager, &child_ref, page)?;
-            }
-        }
-        Ok(())
+    let (subtrie_page, external) = if node_ref.page_id != page.page_id {
+        let external_page = page_manager.get_page(node_ref.page_id).expect("Page not found");
+        (&mut SubtriePage::from_id_and_page(node_ref.page_id, external_page), true)
     } else {
-        let external_page = page_manager.get_page(node.page_id).expect("Page not found");
-        let subtrie_page = SubtriePage::from_id_and_page(node.page_id, external_page);
-        if let Some(TrieNode::Branch(branch)) = subtrie_page.get_node::<V>(node.index) {
-            let children: Vec<_> = branch.children().filter_map(|child| child).collect();
-            for child_ref in children {
-                commit_node::<P, V>(page_manager, &child_ref, &subtrie_page)?;
-            }
+       (page, false)
+    };
+
+    let node = subtrie_page.get_node::<V>(node_ref.index).expect("Node not found");
+    match node {
+        TrieNode::EmptyRoot => {
+            node_ref.hash = B256::ZERO;
         }
-        // page.set_dirty(false);
-        page_manager.commit_page(subtrie_page.page_id)
+        TrieNode::Leaf(leaf) => {
+            node_ref.hash = leaf.hash();
+        }
+        TrieNode::Branch(mut branch) => {
+            let children: Vec<_> = branch.children_mut().filter_map(|child| child.as_mut()).collect();
+            for child_ref in children {
+                child_ref.hash = commit_node::<P, V>(page_manager, child_ref, subtrie_page)?;
+            }
+            node_ref.hash = branch.hash();
+        }
     }
+
+    if external {
+        subtrie_page.set_dirty(false);
+        page_manager.commit_page(subtrie_page.page_id)?;
+    }
+    Ok(node_ref.hash)
 }
 
 #[cfg(test)]
@@ -322,38 +337,38 @@ mod tests {
 
     #[test]
     fn test_insert_and_get() -> Result<(), String> {
-        let page_manager = MemoryMappedFilePageManager::new("test.db").unwrap();
+        let page_manager = MemoryMappedFilePageManager::new("test1.db").unwrap();
         let mut storage = StorageManager::new(page_manager)?;
-        storage.insert(Nibbles::from_nibbles(&[0x01, 0x02, 0x03]), "value1".to_string())?;
-        storage.print_all::<String>();
-        assert_eq!(storage.get(Nibbles::from_nibbles(&[0x01, 0x02, 0x03])), Some(Arc::new("value1".to_string())));
+        storage.insert(Nibbles::from_nibbles(&[0x01, 0x02, 0x03]), StringValue::from("value1".to_string()))?;
+        storage.print_all::<StringValue>();
+        assert_eq!(storage.get(Nibbles::from_nibbles(&[0x01, 0x02, 0x03])), Some(Arc::new(StringValue::from("value1".to_string()))));
 
-        storage.insert(Nibbles::from_nibbles(&[0x04, 0x05, 0x06]), "value2".to_string())?;
-        storage.print_all::<String>();
-        assert_eq!(storage.get(Nibbles::from_nibbles(&[0x01, 0x02, 0x03])), Some(Arc::new("value1".to_string())));
-        assert_eq!(storage.get(Nibbles::from_nibbles(&[0x04, 0x05, 0x06])), Some(Arc::new("value2".to_string())));
+        storage.insert(Nibbles::from_nibbles(&[0x04, 0x05, 0x06]), StringValue::from("value2".to_string()))?;
+        storage.print_all::<StringValue>();
+        assert_eq!(storage.get(Nibbles::from_nibbles(&[0x01, 0x02, 0x03])), Some(Arc::new(StringValue::from("value1".to_string()))));
+        assert_eq!(storage.get(Nibbles::from_nibbles(&[0x04, 0x05, 0x06])), Some(Arc::new(StringValue::from("value2".to_string()))));
 
-        storage.insert(Nibbles::from_nibbles(&[0x01, 0x02, 0x0f]), "value3".to_string())?;
-        storage.print_all::<String>();
-        assert_eq!(storage.get(Nibbles::from_nibbles(&[0x01, 0x02, 0x03])), Some(Arc::new("value1".to_string())));
-        assert_eq!(storage.get(Nibbles::from_nibbles(&[0x04, 0x05, 0x06])), Some(Arc::new("value2".to_string())));
-        assert_eq!(storage.get(Nibbles::from_nibbles(&[0x01, 0x02, 0x0f])), Some(Arc::new("value3".to_string())));
+        storage.insert(Nibbles::from_nibbles(&[0x01, 0x02, 0x0f]), StringValue::from("value3".to_string()))?;
+        storage.print_all::<StringValue>();
+        assert_eq!(storage.get(Nibbles::from_nibbles(&[0x01, 0x02, 0x03])), Some(Arc::new(StringValue::from("value1".to_string()))));
+        assert_eq!(storage.get(Nibbles::from_nibbles(&[0x04, 0x05, 0x06])), Some(Arc::new(StringValue::from("value2".to_string()))));
+        assert_eq!(storage.get(Nibbles::from_nibbles(&[0x01, 0x02, 0x0f])), Some(Arc::new(StringValue::from("value3".to_string()))));
 
         Ok(())
     }
 
     #[test]
     fn test_insert_commit_get() -> Result<(), String> {
-        let page_manager = MemoryMappedFilePageManager::new("test.db").unwrap();
+        let page_manager = MemoryMappedFilePageManager::new("test2.db").unwrap();
         let mut storage = StorageManager::new(page_manager)?;
-        storage.insert(Nibbles::from_nibbles(&[0x01, 0x02, 0x03]), "value1".to_string())?;
-        storage.print_all::<String>();
+        storage.insert(Nibbles::from_nibbles(&[0x01, 0x02, 0x03]), StringValue::from("value1".to_string()))?;
+        storage.print_all::<StringValue>();
         assert_eq!(storage.root_page().is_dirty(), true);
-        storage.commit::<String>()?;
+        storage.commit::<StringValue>()?;
 
         assert_eq!(storage.root_page().is_dirty(), false);
-        assert_eq!(storage.get(Nibbles::from_nibbles(&[0x01, 0x02, 0x03])), Some(Arc::new("value1".to_string())));
-        storage.print_all::<String>();
+        assert_eq!(storage.get(Nibbles::from_nibbles(&[0x01, 0x02, 0x03])), Some(Arc::new(StringValue::from("value1".to_string()))));
+        storage.print_all::<StringValue>();
 
         Ok(())
     }

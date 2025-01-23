@@ -4,6 +4,9 @@ use alloy_primitives::B256;
 pub struct NodeReference {
     pub page_id: PageId,
     pub index: u8,
+    // Note: we can assume that the node's RLP representation is always a 32-byte
+    // hash because the leaf nodes will contain values >= 32 bytes according to
+    // their canonical RLP encoding.
     pub hash: B256,
 }
 

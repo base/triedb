@@ -1,6 +1,6 @@
 use crate::nodes::TrieNode;
 use crate::nodes::reference::NodeReference;
-use crate::value::Value;
+use crate::value::{Value, StringValue};
 
 pub const PAGE_SIZE: usize = 4096;
 
@@ -68,10 +68,12 @@ impl<'a> SubtriePage<'a> {
             if ptr.is_removed() {
                 continue;
             }
-            println!("Node {}: {:?}", i, self.get_node::<String>(i as u8));
+            println!("Node {}: {:?}", i, self.get_node::<StringValue>(i as u8));
         }
     }
 
+    // TODO: replace dirty flag with a version number.
+    // A page is dirty if the version number is greater than the last committed version number.
     pub fn is_dirty(&self) -> bool {
         self.page.data[0] == 1
     }

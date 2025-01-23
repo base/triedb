@@ -1,4 +1,5 @@
-use alloy_trie::Nibbles;
+use alloy_primitives::B256;
+use alloy_trie::{nodes::{BranchNodeRef, ExtensionNodeRef, RlpNode}, Nibbles, TrieMask};
 use crate::nodes::reference::NodeReference;
 
 const BRANCHING_FACTOR: usize = 16;
@@ -35,8 +36,43 @@ impl BranchNode {
         self.children[index as usize].as_ref()
     }
 
-    pub fn children(&self) -> impl Iterator<Item = Option<&NodeReference>> {
-        self.children.iter().map(|child| child.as_ref())
+    pub fn children(&self) -> impl Iterator<Item = &Option<NodeReference>> {
+        self.children.iter()
+    }
+
+    pub fn children_mut(&mut self) -> impl Iterator<Item = &mut Option<NodeReference>> {
+        self.children.iter_mut()
+    }
+
+    pub fn hash(&self) -> B256 {
+        self.rlp().as_hash().unwrap()
+    }
+
+    fn rlp(&self) -> RlpNode {
+        let branch_rlp = self.branch_rlp();
+        if self.prefix.is_empty() {
+            branch_rlp
+        } else {
+            self.extension_rlp(branch_rlp)
+        }
+    }
+
+    fn branch_rlp(&self) -> RlpNode {
+        let mut rlp_vec = Vec::new();
+        let mut stack = Vec::new();
+        let mut child_mask = TrieMask::default();
+        self.children.iter().enumerate().for_each(|(i, child)| {
+            if let Some(child) = child {
+                stack.push(RlpNode::from_raw_rlp(child.hash.as_slice()).unwrap());
+                child_mask.set_bit(i as u8);
+            }
+        });
+        BranchNodeRef::new(&stack, child_mask).rlp(&mut rlp_vec)
+    }
+
+    fn extension_rlp(&self, branch_rlp: RlpNode) -> RlpNode {
+        let mut rlp_vec = Vec::new();
+        ExtensionNodeRef::new(&self.prefix, branch_rlp.as_slice()).rlp(&mut rlp_vec)
     }
 
     pub fn as_bytes(&self) -> Vec<u8> {

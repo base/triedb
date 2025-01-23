@@ -1,4 +1,5 @@
-use alloy_trie::Nibbles;
+use alloy_primitives::B256;
+use alloy_trie::{nodes::LeafNodeRef, Nibbles, nodes::RlpNode};
 use std::sync::Arc;
 use crate::value::Value;
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,6 +21,15 @@ impl<V: Value> LeafNode<V> {
     pub fn with_value(mut self, value: V) -> Self {
         self.value = Arc::new(value);
         self
+    }
+
+    pub fn hash(&self) -> B256 {
+        self.rlp().as_hash().unwrap()
+    }
+
+    fn rlp(&self) -> RlpNode {
+        let mut rlp_vec = Vec::new();
+        LeafNodeRef::new(&self.prefix, self.value.as_bytes().as_slice()).rlp(&mut rlp_vec)
     }
 
     pub fn as_bytes(&self) -> Vec<u8> {
