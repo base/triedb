@@ -1281,6 +1281,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "alloy-trie",
+ "bytes",
  "memmap2",
 ]
 
