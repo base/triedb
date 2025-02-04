@@ -33,7 +33,7 @@ impl OrphanPageManager {
 
     // Adds a collection of page ids to the orphaned page ids for the given snapshot id.
     pub fn add_orphaned_page_ids(&mut self, snapshot_id: SnapshotId, pages: impl IntoIterator<Item = PageId>) {
-        self.orphaned_page_ids.entry(snapshot_id).or_insert(vec![]).extend(pages);
+        self.orphaned_page_ids.entry(snapshot_id).or_default().extend(pages);
     }
 
     // Returns an iterator over all the orphaned page ids.

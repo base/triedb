@@ -1,4 +1,4 @@
-use crate::page::{Page, PageError, PageId, PageManager, PageMut, PAGE_DATA_SIZE};
+use crate::page::{Page, PageError, PageId, PageManager, PageMut, PAGE_DATA_SIZE, ReadablePage, WritablePage};
 use crate::snapshot::SnapshotId;
 use crate::page::orphan::OrphanPageManager;
 
@@ -18,21 +18,21 @@ impl<M: PageManager> OrphanAwarePageManager<M> {
 
 impl<M: PageManager> PageManager for OrphanAwarePageManager<M> {
     // Retrieves a page from the underlying page manager.
-    fn get<'p>(&'p self, snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'p>, PageError> {
+    fn get(&self, snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'_>, PageError> {
         self.manager.get(snapshot_id, page_id)
     }
 
     // Retrieves a mutable page from the underlying page manager.
-    fn get_mut<'p>(&'p mut self, snapshot_id: SnapshotId, page_id: PageId) -> Result<PageMut<'p>, PageError> {
+    fn get_mut(&mut self, snapshot_id: SnapshotId, page_id: PageId) -> Result<PageMut<'_>, PageError> {
         self.manager.get_mut(snapshot_id, page_id)
     }
 
     // Retrieves a mutable clone of a page from the underlying page manager.
     // The original page is marked as orphaned and a new page is allocated, potentially from an orphaned page.
-    fn get_mut_clone<'p>(&'p mut self, snapshot_id: SnapshotId, page_id: PageId) -> Result<PageMut<'p>, PageError> {
+    fn get_mut_clone(&mut self, snapshot_id: SnapshotId, page_id: PageId) -> Result<PageMut<'_>, PageError> {
         let mut buf = [0; PAGE_DATA_SIZE];
-        let original_page_data = self.get(snapshot_id, page_id)?.contents();
-        buf[..].copy_from_slice(original_page_data);
+        let original_page = self.get(snapshot_id, page_id)?;
+        buf[..].copy_from_slice(original_page.contents());
         self.orphan_manager.add_orphaned_page_id(snapshot_id, page_id);
         let mut new_page = self.allocate(snapshot_id)?;
         new_page.contents_mut().copy_from_slice(&buf);
@@ -42,7 +42,7 @@ impl<M: PageManager> PageManager for OrphanAwarePageManager<M> {
     // Allocates a new page from the underlying page manager.
     // If there is an orphaned page available as of the given snapshot id,
     // it is used to allocate a new page instead.
-    fn allocate<'p>(&'p mut self, snapshot_id: SnapshotId) -> Result<PageMut<'p>, PageError> {
+    fn allocate(&mut self, snapshot_id: SnapshotId) -> Result<PageMut<'_>, PageError> {
         let orphaned_page_id = self.orphan_manager.get_orphaned_page_id(snapshot_id-1);
         if let Some(orphaned_page_id) = orphaned_page_id {
             let mut page = self.get_mut(snapshot_id, orphaned_page_id)?;
@@ -55,6 +55,7 @@ impl<M: PageManager> PageManager for OrphanAwarePageManager<M> {
 
     // Commits the underlying page manager to disk.
     fn commit(&mut self, snapshot_id: SnapshotId) -> Result<(), PageError> {
+        // TODO: commit orphaned pages to disk
         self.manager.commit(snapshot_id)
     }
 }
@@ -74,7 +75,7 @@ mod tests {
         let mut orphan_aware_manager = OrphanAwarePageManager::new(manager, orphan_manager);
 
         let mut page = orphan_aware_manager.allocate(1).unwrap();
-        assert_eq!(page.id, 0);
+        assert_eq!(page.page_id(), 0);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 1);
 
@@ -83,19 +84,19 @@ mod tests {
         orphan_aware_manager.commit(1).unwrap();
 
         let page = orphan_aware_manager.get(1, 0).unwrap();
-        assert_eq!(page.id, 0);
+        assert_eq!(page.page_id(), 0);
         assert_eq!(page.contents()[0], 123);
         assert_eq!(page.snapshot_id(), 1);
 
         // cloning a page should allocate a new page and orphan the original page.
         let page = orphan_aware_manager.get_mut_clone(2, 0).unwrap();
-        assert_eq!(page.id, 1);
+        assert_eq!(page.page_id(), 1);
         assert_eq!(page.contents()[0], 123);
         assert_eq!(page.snapshot_id(), 2);
 
         // the next allocation should not come from the orphaned page, as the snapshot id is the same as when the page was orphaned.
         let page = orphan_aware_manager.allocate(2).unwrap();
-        assert_eq!(page.id, 2);
+        assert_eq!(page.page_id(), 2);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 2);
 
@@ -104,7 +105,7 @@ mod tests {
         // the next allocation should come from the orphaned page because the snapshot id has increased.
         // The page data should be zeroed out.
         let page = orphan_aware_manager.allocate(3).unwrap();
-        assert_eq!(page.id, 0);
+        assert_eq!(page.page_id(), 0);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 3);
     }

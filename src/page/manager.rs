@@ -1,7 +1,6 @@
 use std::fmt::Debug;
 use crate::page::{Page, PageMut};
 use crate::snapshot::SnapshotId;
-
 mod mmap;
 mod orphan_aware;
 
@@ -13,6 +12,10 @@ pub type PageId = u32;
 pub enum PageError {
     PageNotFound(PageId),
     OutOfBounds(PageId),
+    InvalidRootPage(PageId),
+    InvalidCellPointer,
+    NoFreeCells,
+    PageIsFull,
     IO(std::io::Error),
     // TODO: add more errors here for other cases.
 }
@@ -20,16 +23,16 @@ pub enum PageError {
 /// Core trait that manages pages in trie db.
 pub trait PageManager: Debug {
     /// Retrieves a page from the given snapshot.
-    fn get<'p>(&'p self, snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'p>, PageError>;
+    fn get(&self, snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'_>, PageError>;
 
     /// Retrieves a mutable page from the given snapshot.
-    fn get_mut<'p>(&'p mut self, snapshot_id: SnapshotId, page_id: PageId) -> Result<PageMut<'p>, PageError>;
+    fn get_mut(&mut self, snapshot_id: SnapshotId, page_id: PageId) -> Result<PageMut<'_>, PageError>;
 
     /// Retrieves a mutable clone of a page from the given snapshot.
-    fn get_mut_clone<'p>(&'p mut self, snapshot_id: SnapshotId, page_id: PageId) -> Result<PageMut<'p>, PageError>;
+    fn get_mut_clone(&mut self, snapshot_id: SnapshotId, page_id: PageId) -> Result<PageMut<'_>, PageError>;
 
     /// Allocates a new page in the given snapshot.
-    fn allocate<'p>(&'p mut self, snapshot_id: SnapshotId) -> Result<PageMut<'p>, PageError>;
+    fn allocate(&mut self, snapshot_id: SnapshotId) -> Result<PageMut<'_>, PageError>;
 
     // /// Merges two pages into a new page.
     // fn merge(
