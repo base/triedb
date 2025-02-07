@@ -10,6 +10,14 @@ pub trait Value<'v>: TryFrom<&'v [u8]> + TryInto<&'v [u8], Error: Debug> + Debug
 
 impl<'v> Value<'v> for &'v [u8] {}
 
+pub trait SlottedStorage<'s, 'v, V> {
+    type Error;
+
+    // Returns the value at the given index.
+    fn get_value(&'v self, index: u8) -> Result<V, Self::Error>
+        where 's: 'v;
+}
+
 // A page that contains a sequence of pointers to variable-length values,
 // where the pointers are stored in a contiguous array of 3-byte cell pointers from the
 // beginning of the page, and the values are added from the end of the page.
@@ -18,20 +26,23 @@ pub struct SlottedPage<'p> {
 }
 
 impl<'p> SlottedPage<'p> {
-    // Returns the value at the given index.
-    pub fn get_value<'v, V: Value<'v>>(&'p self, index: u8) -> Result<V, PageError>
-    where 'p: 'v{
-        get_value(&self.page, index)
-    }
-
     // Returns the number of cells in the page, which may include deleted cells.
-    fn num_cells(&self) -> u8 {
+    fn num_cells(&'p self) -> u8 {
         num_cells(&self.page)
     }
 
     // Returns the cell pointer at the given index.
     fn get_cell_pointer(&self, index: u8) -> Result<CellPointer, PageError> {
         get_cell_pointer(&self.page, index)
+    }
+}
+
+impl<'p, 'v, V: Value<'v>> SlottedStorage<'p, 'v, V> for SlottedPage<'p> {
+    type Error = PageError;
+
+    fn get_value(&'v self, index: u8) -> Result<V, Self::Error>
+    where 'p: 'v {
+        get_value(&self.page, index)
     }
 }
 
@@ -151,23 +162,23 @@ impl<'p> SlottedPageMut<'p> {
     }
 
     // Returns the cell pointer at the given index.
-    fn get_cell_pointer(&self, index: u8) -> Result<CellPointer, PageError> {
+    fn get_cell_pointer(&'p self, index: u8) -> Result<CellPointer, PageError> {
         get_cell_pointer(&self.page, index)
     }
 }
 
 // Returns the number of cells in the page, which may include deleted cells.
-fn num_cells<'p, P: ReadablePage<'p>>(page: &'p P) -> u8 {
+fn num_cells<P: ReadablePage>(page: &P) -> u8 {
     page.contents()[0]
 }
 
 // Sets the number of cells in the page.
-fn set_num_cells<'p, P: WritablePage<'p>>(page: &mut P, num_cells: u8) {
+fn set_num_cells<P: WritablePage>(page: &mut P, num_cells: u8) {
     page.contents_mut()[0] = num_cells;
 }
 
 // Returns the cell pointer at the given index.
-fn get_cell_pointer<'p, P: ReadablePage<'p>>(page: &'p P, index: u8) -> Result<CellPointer<'p>, PageError> {
+fn get_cell_pointer<P: ReadablePage>(page: &P, index: u8) -> Result<CellPointer, PageError> {
     if index >= num_cells(page) {
         return Err(PageError::InvalidCellPointer);
     }
@@ -178,7 +189,7 @@ fn get_cell_pointer<'p, P: ReadablePage<'p>>(page: &'p P, index: u8) -> Result<C
 }
 
 // Returns the value at the given index.
-fn get_value<'p, P: ReadablePage<'p>, V: Value<'p>>(page: &'p P, index: u8) -> Result<V, PageError> {
+fn get_value<'p, P: ReadablePage, V: Value<'p>>(page: &'p P, index: u8) -> Result<V, PageError> {
     let cell_pointer = get_cell_pointer(page, index)?;
     if cell_pointer.is_deleted() {
         return Err(PageError::InvalidCellPointer);

@@ -5,13 +5,13 @@ pub const PAGE_SIZE: usize = 4096;
 pub const HEADER_SIZE: usize = 8;
 pub const PAGE_DATA_SIZE: usize = PAGE_SIZE - HEADER_SIZE;
 
-pub trait ReadablePage<'p> {
+pub trait ReadablePage {
     fn page_id(&self) -> PageId;
     fn snapshot_id(&self) -> SnapshotId;
-    fn contents(&'p self) -> &'p [u8];
+    fn contents(&self) -> &[u8];
 }
 
-pub trait WritablePage<'p> {
+pub trait WritablePage: ReadablePage {
     fn contents_mut(&mut self) -> &mut [u8];
 }
 
@@ -31,7 +31,7 @@ impl<'p> Page<'p> {
     }
 }
 
-impl<'p> ReadablePage<'p> for Page<'p> {
+impl<'p> ReadablePage for Page<'p> {
     fn page_id(&self) -> PageId {
         self.id
     }
@@ -42,7 +42,7 @@ impl<'p> ReadablePage<'p> for Page<'p> {
     }
 
     // Returns the contents of the page without the header
-    fn contents(&'p self) -> &'p [u8] {
+    fn contents(&self) -> &'p [u8] {
         &self.data[HEADER_SIZE..]
     }
 }
@@ -63,7 +63,7 @@ impl<'p> PageMut<'p> {
     }
 }
 
-impl<'p> ReadablePage<'p> for PageMut<'p> {
+impl<'p> ReadablePage for PageMut<'p> {
     fn page_id(&self) -> PageId {
         self.id
     }
@@ -74,12 +74,12 @@ impl<'p> ReadablePage<'p> for PageMut<'p> {
     }
 
     // Returns the contents of the page without the header
-    fn contents(&'p self) -> &'p [u8] {
+    fn contents(&self) -> &[u8] {
         &self.data[HEADER_SIZE..]
     }
 }
 
-impl<'p> WritablePage<'p> for PageMut<'p> {
+impl<'p> WritablePage for PageMut<'p> {
     // Returns a mutable reference to the contents of the page without the header
     fn contents_mut(&mut self) -> &mut [u8] {
         &mut self.data[HEADER_SIZE..]
@@ -89,5 +89,33 @@ impl<'p> WritablePage<'p> for PageMut<'p> {
 impl<'p> From<PageMut<'p>> for Page<'p> {
     fn from(page: PageMut<'p>) -> Self {
         Self::new(page.id, page.data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_page_mut_clone() {
+        let page_id = 42;
+        let snapshot_id = 1337;
+
+        let mut data = [0; PAGE_SIZE];
+        let mut page_mut = PageMut::new(page_id, snapshot_id, &mut data);
+        assert_eq!(page_mut.page_id(), page_id);
+        assert_eq!(page_mut.snapshot_id(), snapshot_id);
+        assert_eq!(page_mut.contents()[0], 0);
+
+        page_mut.contents_mut()[0] = 1;
+        assert_eq!(page_mut.contents_mut()[0], 1);
+        assert_eq!(page_mut.contents()[0], 1);
+
+        let page = Page::from(page_mut);
+        assert_eq!(page.page_id(), page_id);
+        assert_eq!(page.snapshot_id(), snapshot_id);
+        assert_eq!(page.contents()[0], 1);
+
+        assert_eq!(data[HEADER_SIZE], 1);
     }
 }

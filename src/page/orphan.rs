@@ -5,25 +5,33 @@ use crate::page::PageId;
 // Manages a collection of orphaned page ids, grouped by the snapshot id which created them.
 #[derive(Debug)]
 pub struct OrphanPageManager {
-    orphaned_page_ids: BTreeMap<SnapshotId, Vec<PageId>>,
+    unlocked_page_ids: Vec<PageId>,
+    locked_page_ids: BTreeMap<SnapshotId, Vec<PageId>>,
 }
 
 impl OrphanPageManager {
     // Creates a new OrphanPageManager.
     pub fn new() -> Self {
-        Self { orphaned_page_ids: BTreeMap::new() }
+        Self { unlocked_page_ids: Vec::new(), locked_page_ids: BTreeMap::new() }
     }
 
-    // Returns the page id of a page that was orphaned as of the given snapshot id.
-    // If there are no orphaned pages as of the given snapshot id, None is returned.
-    pub fn get_orphaned_page_id(&mut self, max_snapshot_id: SnapshotId) -> Option<PageId> {
-        let (snapshot_id, pages) = self.orphaned_page_ids.iter_mut().find(|(k, _)| **k <= max_snapshot_id)?;
-        let page_id = pages.pop();
-        if pages.is_empty() {
-            let to_remove = *snapshot_id;
-            self.orphaned_page_ids.remove(&to_remove);
+    // Returns an unlocked orphaned page id, if one exists.
+    pub fn get_orphaned_page_id(&mut self) -> Option<PageId> {
+        self.unlocked_page_ids.pop()
+    }
+
+    // Unlocks all pages that were locked as of the given snapshot id.
+    pub fn unlock(&mut self, max_snapshot_id: SnapshotId) {
+        let mut to_remove = Vec::new();
+        for (snapshot_id, pages) in self.locked_page_ids.iter_mut() {
+            if *snapshot_id <= max_snapshot_id {
+                self.unlocked_page_ids.append(pages);
+                to_remove.push(*snapshot_id);
+            }
         }
-        page_id
+        for snapshot_id in to_remove {
+            self.locked_page_ids.remove(&snapshot_id);
+        }
     }
 
     // Adds a single page id to the orphaned page ids for the given snapshot id.
@@ -33,12 +41,12 @@ impl OrphanPageManager {
 
     // Adds a collection of page ids to the orphaned page ids for the given snapshot id.
     pub fn add_orphaned_page_ids(&mut self, snapshot_id: SnapshotId, pages: impl IntoIterator<Item = PageId>) {
-        self.orphaned_page_ids.entry(snapshot_id).or_default().extend(pages);
+        self.locked_page_ids.entry(snapshot_id).or_default().extend(pages);
     }
 
-    // Returns an iterator over all the orphaned page ids.
+    // Returns a flat iterator over all the orphaned page ids, locked and unlocked.
     pub fn iter(&self) -> impl Iterator<Item = &PageId> {
-        self.orphaned_page_ids.values().flat_map(|pages| pages.iter())
+        self.unlocked_page_ids.iter().chain(self.locked_page_ids.values().flat_map(|pages| pages.iter()))
     }
 }
 
@@ -50,18 +58,24 @@ mod tests {
     fn test_get_orphaned_page_id() {
         let mut manager = OrphanPageManager::new();
         manager.add_orphaned_page_id(42, 0);
-        assert_eq!(manager.get_orphaned_page_id(42), Some(0));
-        assert_eq!(manager.get_orphaned_page_id(42), None);
+        assert_eq!(manager.get_orphaned_page_id(), None);
+
+        manager.unlock(42);
+        assert_eq!(manager.get_orphaned_page_id(), Some(0));
+        assert_eq!(manager.get_orphaned_page_id(), None);
     }
 
     #[test]
     fn test_add_orphaned_page_ids() {
         let mut manager = OrphanPageManager::new();
         manager.add_orphaned_page_ids(42, vec![0, 1, 2]);
-        assert_eq!(manager.get_orphaned_page_id(42), Some(2));
-        assert_eq!(manager.get_orphaned_page_id(42), Some(1));
-        assert_eq!(manager.get_orphaned_page_id(42), Some(0));
-        assert_eq!(manager.get_orphaned_page_id(42), None);
+        assert_eq!(manager.get_orphaned_page_id(), None);
+
+        manager.unlock(42);
+        assert_eq!(manager.get_orphaned_page_id(), Some(2));
+        assert_eq!(manager.get_orphaned_page_id(), Some(1));
+        assert_eq!(manager.get_orphaned_page_id(), Some(0));
+        assert_eq!(manager.get_orphaned_page_id(), None);
     }
 
     #[test]
@@ -70,19 +84,30 @@ mod tests {
         manager.add_orphaned_page_id(42, 0);
         manager.add_orphaned_page_id(43, 1);
         manager.add_orphaned_page_id(44, 2);
-        assert_eq!(manager.get_orphaned_page_id(42), Some(0));
-        assert_eq!(manager.get_orphaned_page_id(42), None);
-        assert_eq!(manager.get_orphaned_page_id(43), Some(1));
-        assert_eq!(manager.get_orphaned_page_id(43), None);
+        assert_eq!(manager.get_orphaned_page_id(), None);
+
+        manager.unlock(42);
+        assert_eq!(manager.get_orphaned_page_id(), Some(0));
+        assert_eq!(manager.get_orphaned_page_id(), None);
+
+        manager.unlock(43);
+        assert_eq!(manager.get_orphaned_page_id(), Some(1));
+        assert_eq!(manager.get_orphaned_page_id(), None);
 
         let mut manager = OrphanPageManager::new();
         manager.add_orphaned_page_id(42, 0);
-        manager.add_orphaned_page_id(43, 1);
-        manager.add_orphaned_page_id(44, 2);
-        assert_eq!(manager.get_orphaned_page_id(43), Some(0));
-        assert_eq!(manager.get_orphaned_page_id(43), Some(1));
-        assert_eq!(manager.get_orphaned_page_id(43), None);
-        assert_eq!(manager.get_orphaned_page_id(42), None);
+        manager.add_orphaned_page_id(42, 1);
+        manager.add_orphaned_page_id(43, 2);
+        manager.add_orphaned_page_id(43, 3);
+        manager.add_orphaned_page_id(44, 4);
+        assert_eq!(manager.get_orphaned_page_id(), None);
+
+        manager.unlock(43);
+        assert_eq!(manager.get_orphaned_page_id(), Some(3));
+        assert_eq!(manager.get_orphaned_page_id(), Some(2));
+        assert_eq!(manager.get_orphaned_page_id(), Some(1));
+        assert_eq!(manager.get_orphaned_page_id(), Some(0));
+        assert_eq!(manager.get_orphaned_page_id(), None);
     }
 
     #[test]

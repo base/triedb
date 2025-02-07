@@ -1,8 +1,7 @@
 use std::fmt::Debug;
 use crate::page::{Page, PageMut};
 use crate::snapshot::SnapshotId;
-mod mmap;
-mod orphan_aware;
+pub mod mmap;
 
 /// currently we use 4 bytes for page ids, which implies a maximum of 16TB of data.
 pub type PageId = u32;
@@ -23,16 +22,13 @@ pub enum PageError {
 /// Core trait that manages pages in trie db.
 pub trait PageManager: Debug {
     /// Retrieves a page from the given snapshot.
-    fn get(&self, snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'_>, PageError>;
+    fn get<'p>(&self, snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'p>, PageError>;
 
     /// Retrieves a mutable page from the given snapshot.
-    fn get_mut(&mut self, snapshot_id: SnapshotId, page_id: PageId) -> Result<PageMut<'_>, PageError>;
-
-    /// Retrieves a mutable clone of a page from the given snapshot.
-    fn get_mut_clone(&mut self, snapshot_id: SnapshotId, page_id: PageId) -> Result<PageMut<'_>, PageError>;
+    fn get_mut<'p>(&mut self, snapshot_id: SnapshotId, page_id: PageId) -> Result<PageMut<'p>, PageError>;
 
     /// Allocates a new page in the given snapshot.
-    fn allocate(&mut self, snapshot_id: SnapshotId) -> Result<PageMut<'_>, PageError>;
+    fn allocate<'p>(&mut self, snapshot_id: SnapshotId) -> Result<PageMut<'p>, PageError>;
 
     // /// Merges two pages into a new page.
     // fn merge(
