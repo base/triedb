@@ -7,5 +7,5 @@ mod slotted_page;
 pub use manager::mmap::MmapPageManager;
 pub use manager::{PageError, PageId, PageManager};
 pub use orphan::OrphanPageManager;
-pub use page::{Page, PageMut, ReadablePage, WritablePage, PAGE_DATA_SIZE, PAGE_SIZE};
+pub use page::{Page, PAGE_DATA_SIZE, PAGE_SIZE, RO, RW};
 pub use root::RootPage;

@@ -2,34 +2,24 @@ mod manager;
 
 use std::fmt::Debug;
 
-use crate::{
-    database::Database,
-    page::{PageId, PageManager, ReadablePage},
-    snapshot::SnapshotId,
-};
+use crate::{database::Database, page::PageManager, snapshot::SnapshotId};
 pub use manager::TransactionManager;
+use sealed::sealed;
 
-pub trait TransactionKind: Debug {
-    fn sealed() -> ();
-}
+#[sealed]
+pub trait TransactionKind: Debug {}
 
 #[derive(Debug)]
 pub struct RW {}
 
-impl TransactionKind for RW {
-    fn sealed() -> () {
-        ()
-    }
-}
+#[sealed]
+impl TransactionKind for RW {}
 
 #[derive(Debug)]
 pub struct RO {}
 
-impl TransactionKind for RO {
-    fn sealed() -> () {
-        ()
-    }
-}
+#[sealed]
+impl TransactionKind for RO {}
 
 #[derive(Debug)]
 pub struct Transaction<'db, K: TransactionKind, P: PageManager> {

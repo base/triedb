@@ -1,7 +1,10 @@
 use std::cmp::max;
 use std::fmt::Debug;
 
-use super::{Page, PageError, PageMut, ReadablePage, WritablePage, PAGE_DATA_SIZE};
+use super::{
+    page::{PageKind, RO, RW},
+    Page, PageError, PAGE_DATA_SIZE,
+};
 
 pub mod cell_pointer;
 use cell_pointer::CellPointer;
@@ -22,47 +25,59 @@ pub trait SlottedStorage<'s, 'v, V> {
 // A page that contains a sequence of pointers to variable-length values,
 // where the pointers are stored in a contiguous array of 3-byte cell pointers from the
 // beginning of the page, and the values are added from the end of the page.
-pub struct SlottedPage<'p> {
-    page: Page<'p>,
+pub struct SlottedPage<'p, P: PageKind> {
+    page: Page<'p, P>,
 }
 
-impl<'p> SlottedPage<'p> {
-    // Returns the number of cells in the page, which may include deleted cells.
-    fn num_cells(&'p self) -> u8 {
-        num_cells(&self.page)
+impl<'p, P: PageKind> SlottedPage<'p, P> {
+    // Returns the value at the given index.
+    pub fn get_value<'v, V: Value<'v>>(&'p self, index: u8) -> Result<V, PageError>
+    where
+        'p: 'v,
+    {
+        let cell_pointer = self.get_cell_pointer(index)?;
+        if cell_pointer.is_deleted() {
+            return Err(PageError::InvalidCellPointer);
+        }
+
+        let offset = cell_pointer.offset();
+        let length = cell_pointer.length();
+
+        let start_index = (PAGE_DATA_SIZE as u16 - offset) as usize;
+        let end_index = (PAGE_DATA_SIZE as u16 - offset + length) as usize;
+        let data = &self.page.contents()[start_index..end_index];
+        data.try_into().map_err(|_| PageError::InvalidCellPointer)
     }
 
     // Returns the cell pointer at the given index.
     fn get_cell_pointer(&self, index: u8) -> Result<CellPointer, PageError> {
-        get_cell_pointer(&self.page, index)
+        if index >= self.num_cells() {
+            return Err(PageError::InvalidCellPointer);
+        }
+        let start_index = 1 + 3 * (index as usize);
+        let end_index = start_index + 3;
+        let data = &self.page.contents()[start_index..end_index];
+        Ok(data.try_into()?)
+    }
+
+    // Returns the number of cells in the page, which may include deleted cells.
+    fn num_cells(&self) -> u8 {
+        self.page.contents()[0]
     }
 }
 
-impl<'p, 'v, V: Value<'v>> SlottedStorage<'p, 'v, V> for SlottedPage<'p> {
+impl<'p, 'v, P: PageKind, V: Value<'v>> SlottedStorage<'p, 'v, V> for SlottedPage<'p, P> {
     type Error = PageError;
 
     fn get_value(&'v self, index: u8) -> Result<V, Self::Error>
     where
         'p: 'v,
     {
-        get_value(&self.page, index)
+        self.get_value(index)
     }
 }
 
-// A mutable slotted page.
-pub struct SlottedPageMut<'p> {
-    page: PageMut<'p>,
-}
-
-impl<'p> SlottedPageMut<'p> {
-    // Returns the value at the given index.
-    pub fn get_value<'v, V: Value<'v>>(&'p self, index: u8) -> Result<V, PageError>
-    where
-        'p: 'v,
-    {
-        get_value(&self.page, index)
-    }
-
+impl<'p> SlottedPage<'p, RW> {
     // Sets the value at the given index.
     pub fn set_value<'v, V: Value<'v>>(&mut self, index: u8, value: V) -> Result<(), PageError>
     where
@@ -109,7 +124,7 @@ impl<'p> SlottedPageMut<'p> {
             new_num_cells -= 1;
         }
         if new_num_cells < num_cells {
-            set_num_cells(&mut self.page, new_num_cells);
+            self.set_num_cells(new_num_cells);
         }
         Ok(())
     }
@@ -150,7 +165,7 @@ impl<'p> SlottedPageMut<'p> {
         }
 
         if new_num_cells > num_cells {
-            set_num_cells(&mut self.page, new_num_cells);
+            self.set_num_cells(new_num_cells);
         }
 
         return self.set_cell_pointer(index, offset, length);
@@ -170,74 +185,24 @@ impl<'p> SlottedPageMut<'p> {
         Ok(cell_pointer)
     }
 
-    // Returns the number of cells in the page, which may include deleted cells.
-    fn num_cells(&self) -> u8 {
-        num_cells(&self.page)
-    }
-
-    // Returns the cell pointer at the given index.
-    fn get_cell_pointer(&'p self, index: u8) -> Result<CellPointer, PageError> {
-        get_cell_pointer(&self.page, index)
+    // Sets the number of cells in the page.
+    fn set_num_cells(&mut self, num_cells: u8) {
+        self.page.contents_mut()[0] = num_cells;
     }
 }
 
-// Returns the number of cells in the page, which may include deleted cells.
-fn num_cells<P: ReadablePage>(page: &P) -> u8 {
-    page.contents()[0]
-}
-
-// Sets the number of cells in the page.
-fn set_num_cells<P: WritablePage>(page: &mut P, num_cells: u8) {
-    page.contents_mut()[0] = num_cells;
-}
-
-// Returns the cell pointer at the given index.
-fn get_cell_pointer<P: ReadablePage>(page: &P, index: u8) -> Result<CellPointer, PageError> {
-    if index >= num_cells(page) {
-        return Err(PageError::InvalidCellPointer);
-    }
-    let start_index = 1 + 3 * (index as usize);
-    let end_index = start_index + 3;
-    let data = &page.contents()[start_index..end_index];
-    Ok(data.try_into()?)
-}
-
-// Returns the value at the given index.
-fn get_value<'p, P: ReadablePage, V: Value<'p>>(page: &'p P, index: u8) -> Result<V, PageError> {
-    let cell_pointer = get_cell_pointer(page, index)?;
-    if cell_pointer.is_deleted() {
-        return Err(PageError::InvalidCellPointer);
-    }
-
-    let offset = cell_pointer.offset();
-    let length = cell_pointer.length();
-
-    let start_index = (PAGE_DATA_SIZE as u16 - offset) as usize;
-    let end_index = (PAGE_DATA_SIZE as u16 - offset + length) as usize;
-    let data = &page.contents()[start_index..end_index];
-    data.try_into().map_err(|_| PageError::InvalidCellPointer)
-}
-
-impl<'p> From<SlottedPageMut<'p>> for SlottedPage<'p> {
-    fn from(page: SlottedPageMut<'p>) -> Self {
+impl<'p> From<SlottedPage<'p, RW>> for SlottedPage<'p, RO> {
+    fn from(page: SlottedPage<'p, RW>) -> Self {
         Self {
             page: page.page.into(),
         }
     }
 }
 
-impl<'p> TryFrom<Page<'p>> for SlottedPage<'p> {
+impl<'p, P: PageKind> TryFrom<Page<'p, P>> for SlottedPage<'p, P> {
     type Error = PageError;
 
-    fn try_from(page: Page<'p>) -> Result<Self, Self::Error> {
-        Ok(Self { page })
-    }
-}
-
-impl<'p> TryFrom<PageMut<'p>> for SlottedPageMut<'p> {
-    type Error = PageError;
-
-    fn try_from(page: PageMut<'p>) -> Result<Self, Self::Error> {
+    fn try_from(page: Page<'p, P>) -> Result<Self, Self::Error> {
         Ok(Self { page })
     }
 }
@@ -251,8 +216,8 @@ mod tests {
     #[test]
     fn test_insert_get_value() {
         let mut data = [0; PAGE_SIZE];
-        let page = PageMut::new(42, 123, &mut data);
-        let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
+        let page = Page::new_rw(42, 123, &mut data);
+        let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
         let value: &[u8] = &[1, 2, 3];
         let cell_index = subtrie_page.insert_value(value).unwrap();
 
@@ -263,8 +228,8 @@ mod tests {
     #[test]
     fn test_allocate_get_delete_cell_pointer() {
         let mut data = [0; PAGE_SIZE];
-        let page = PageMut::new(42, 123, &mut data);
-        let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
+        let page = Page::new_rw(42, 123, &mut data);
+        let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
         let cell_index = subtrie_page.insert_value(&[1, 2, 3][..]).unwrap();
         assert_eq!(cell_index, 0);
         assert_eq!(subtrie_page.num_cells(), 1);
