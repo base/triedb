@@ -59,13 +59,21 @@ impl<'db, P: PageManager> Transaction<'db, RW, P> {
     // }
 
     pub fn commit(mut self) -> Result<(), ()> {
-        self.database.commit(self.snapshot_id)?;
+        let mut storage_engine = self.database.inner.storage_engine.write().unwrap();
+        let mut transaction_manager = self.database.inner.transaction_manager.write().unwrap();
+        storage_engine.commit(self.snapshot_id).unwrap();
+        transaction_manager.remove_transaction(self.snapshot_id, true)?;
+
         self.committed = true;
         Ok(())
     }
 
     pub fn rollback(mut self) -> Result<(), ()> {
-        self.database.rollback(self.snapshot_id)?;
+        let mut storage_engine = self.database.inner.storage_engine.write().unwrap();
+        let mut transaction_manager = self.database.inner.transaction_manager.write().unwrap();
+        storage_engine.rollback(self.snapshot_id).unwrap();
+        transaction_manager.remove_transaction(self.snapshot_id, true)?;
+
         self.committed = false;
         Ok(())
     }
@@ -73,6 +81,9 @@ impl<'db, P: PageManager> Transaction<'db, RW, P> {
 
 impl<'db, P: PageManager> Transaction<'db, RO, P> {
     pub fn commit(mut self) -> Result<(), ()> {
+        let mut transaction_manager = self.database.inner.transaction_manager.write().unwrap();
+        transaction_manager.remove_transaction(self.snapshot_id, false)?;
+
         self.committed = true;
         Ok(())
     }

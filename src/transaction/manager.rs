@@ -32,49 +32,64 @@ impl TransactionManager {
     }
 
     // Removes a transaction from the list of open transactions
-    pub(crate) fn remove_transaction(&mut self, snapshot_id: SnapshotId) -> Result<(), ()> {
+    pub(crate) fn remove_transaction(&mut self, snapshot_id: SnapshotId, is_writer: bool) -> Result<(), ()> {
         let index = self.open_txs.binary_search(&snapshot_id).unwrap();
         self.open_txs.remove(index);
+        if is_writer {
+            self.has_writer = false;
+        }
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use memmap2::MmapMut;
-
     use super::*;
-    use crate::page::{MmapPageManager, OrphanPageManager, ReadablePage, RootPage, WritablePage};
+
     #[test]
-    fn test_rw_transaction() {
-        // let mmap = MmapMut::map_anon(10*4096).unwrap();
-        // let mmap_page_manager = MmapPageManager::new(mmap, 2);
-        // let orphan_manager = OrphanPageManager::new();
-        // let manager = TransactionManager::new(StorageEngine::new(0, 0, 0, mmap_page_manager, orphan_manager));
-        // let mut rw_tx = manager.begin_rw().unwrap();
-        // let ro_tx = manager.begin_ro().unwrap();
+    fn test_begin() {
+        let mut manager = TransactionManager::new();
+        let ro_snapshot_id = manager.begin_ro(1).unwrap();
+        let rw_snapshot_id = manager.begin_rw(1).unwrap();
+        assert_eq!(ro_snapshot_id, 1);
+        assert_eq!(rw_snapshot_id, 1);
 
-        // println!("rw_tx: {:?}", rw_tx.storage_engine.snapshot_id());
+        let ro_snapshot_id = manager.begin_ro(2).unwrap();
+        assert_eq!(ro_snapshot_id, 1);
+    }
 
-        // let page0_ro = rw_tx.storage_engine.get_page(0).unwrap();
-        // println!("page0_ro: {:?}", page0_ro.contents()[0]);
+    #[test]
+    #[should_panic]
+    fn test_begin_rw_when_has_writer() {
+        let mut manager = TransactionManager::new();
+        manager.begin_rw(1).unwrap();
+        manager.begin_rw(2).unwrap();
+    }
 
-        // let mut page0_mut = rw_tx.storage_engine.get_mut_page(0).unwrap();
-        // println!("page0_mut: {:?}", page0_mut.contents()[0]);
+    #[test]
+    fn test_remove_transaction() {
+        let mut manager = TransactionManager::new();
+        assert_eq!(manager.begin_rw(1).unwrap(), 1);
+        assert_eq!(manager.begin_ro(2).unwrap(), 1);
+        assert_eq!(manager.begin_ro(3).unwrap(), 1);
 
-        // page0_mut.contents_mut()[0] = 1;
+        assert_eq!(manager.remove_transaction(1, true).unwrap(), ());
+        assert_eq!(manager.begin_ro(4).unwrap(), 2);
+        assert_eq!(manager.begin_rw(5).unwrap(), 2);
 
-        // println!("page0_ro: {:?}", page0_ro.contents()[0]);
-        // println!("page0_mut: {:?}", page0_mut.contents()[0]);
+        assert_eq!(manager.remove_transaction(2, false).unwrap(), ());
+        assert_eq!(manager.remove_transaction(3, false).unwrap(), ());
+        assert_eq!(manager.remove_transaction(4, false).unwrap(), ());
+        assert_eq!(manager.remove_transaction(5, true).unwrap(), ());
 
-        // rw_tx.storage_engine.commit().unwrap();
+        assert_eq!(manager.begin_ro(6).unwrap(), 6);
+        assert_eq!(manager.remove_transaction(6, false).unwrap(), ());
+    }
 
-        // println!("page0_ro: {:?}", page0_ro.contents()[0]);
-        // println!("page0_mut: {:?}", page0_mut.contents()[0]);
-
-        // rw_tx.commit().unwrap();
-
-        // let root_page: RootPage = ro_tx.storage_engine.get_page(1).unwrap().try_into().unwrap();
-        // println!("root_page: {:?} {:?}", root_page.snapshot_id(), root_page.state_root());
+    #[test]
+    #[should_panic]
+    fn test_remove_nonexistent_transaction() {
+        let mut manager = TransactionManager::new();
+        manager.remove_transaction(1, true).unwrap();
     }
 }

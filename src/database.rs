@@ -24,7 +24,7 @@ pub(crate) struct Inner<P: PageManager> {
 }
 
 #[derive(Debug)]
-enum Error {
+pub enum Error {
     PageError(PageError),
 }
 
@@ -72,22 +72,6 @@ impl<P: PageManager> Database<P> {
         let snapshot_id = storage_engine.snapshot_id();
         transaction_manager.begin_ro(snapshot_id)?;
         Ok(Transaction::new(snapshot_id, self))
-    }
-
-    pub(crate) fn commit(&self, snapshot_id: SnapshotId) -> Result<(), ()> {
-        let mut storage_engine = self.inner.storage_engine.write().unwrap();
-        let mut transaction_manager = self.inner.transaction_manager.write().unwrap();
-        storage_engine.commit(snapshot_id).unwrap();
-        transaction_manager.remove_transaction(snapshot_id)?;
-        Ok(())
-    }
-
-    pub(crate) fn rollback(&self, snapshot_id: SnapshotId) -> Result<(), ()> {
-        let mut storage_engine = self.inner.storage_engine.write().unwrap();
-        let mut transaction_manager = self.inner.transaction_manager.write().unwrap();
-        storage_engine.rollback(snapshot_id).unwrap();
-        transaction_manager.remove_transaction(snapshot_id)?;
-        Ok(())
     }
 }
 
