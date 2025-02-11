@@ -34,6 +34,9 @@ pub trait PageManager: Debug {
     /// Allocates a new page in the given snapshot.
     fn allocate<'p>(&mut self, snapshot_id: SnapshotId) -> Result<Page<'p, RW>, PageError>;
 
+    /// Resizes the page manager to the given number of pages.
+    fn resize(&mut self, new_page_count: PageId) -> Result<(), PageError>;
+
     // /// Merges two pages into a new page.
     // fn merge(
     //     &mut self,
