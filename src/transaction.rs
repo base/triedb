@@ -2,7 +2,11 @@ mod manager;
 
 use std::fmt::Debug;
 
-use crate::{database::Database, page::{PageId, PageManager, ReadablePage}, snapshot::SnapshotId};
+use crate::{
+    database::Database,
+    page::{PageId, PageManager, ReadablePage},
+    snapshot::SnapshotId,
+};
 pub use manager::TransactionManager;
 
 pub trait TransactionKind: Debug {
@@ -37,7 +41,12 @@ pub struct Transaction<'db, K: TransactionKind, P: PageManager> {
 
 impl<'db, K: TransactionKind, P: PageManager> Transaction<'db, K, P> {
     pub(crate) fn new(snapshot_id: SnapshotId, database: &'db Database<P>) -> Self {
-        Self { snapshot_id, committed: false, database, _marker: std::marker::PhantomData }
+        Self {
+            snapshot_id,
+            committed: false,
+            database,
+            _marker: std::marker::PhantomData,
+        }
     }
 
     // pub fn get_account(&self, address_path: AddressPath) -> Result<Account, ()> {

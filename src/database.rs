@@ -1,5 +1,3 @@
-use std::sync::Arc;
-use std::sync::RwLock;
 use crate::page::MmapPageManager;
 use crate::page::OrphanPageManager;
 use crate::page::PageError;
@@ -8,9 +6,11 @@ use crate::page::ReadablePage;
 use crate::page::RootPage;
 use crate::snapshot::SnapshotId;
 use crate::storage::engine::StorageEngine;
-use crate::transaction::TransactionManager;
-use crate::transaction::{RW, RO};
 use crate::transaction::Transaction;
+use crate::transaction::TransactionManager;
+use crate::transaction::{RO, RW};
+use std::sync::Arc;
+use std::sync::RwLock;
 
 #[derive(Debug)]
 pub struct Database<P: PageManager> {
@@ -34,7 +34,7 @@ impl Database<MmapPageManager> {
         let orphan_manager = OrphanPageManager::new();
 
         // TODO: parse the root page to determine the correct metadata
-        
+
         let root_page_0 = page_manager.get(0, 0).map_err(Error::PageError)?;
         let root_page_1 = page_manager.get(0, 1).map_err(Error::PageError)?;
 
@@ -47,14 +47,25 @@ impl Database<MmapPageManager> {
             root_1
         };
 
-        let storage_engine = StorageEngine::new(root_page.snapshot_id(), 0, root_page.page_id(), page_manager, orphan_manager);
+        let storage_engine = StorageEngine::new(
+            root_page.snapshot_id(),
+            0,
+            root_page.page_id(),
+            page_manager,
+            orphan_manager,
+        );
         Ok(Database::new(storage_engine))
     }
 }
 
 impl<P: PageManager> Database<P> {
     pub fn new(storage_engine: StorageEngine<P>) -> Self {
-        Self { inner: Arc::new(Inner { storage_engine: RwLock::new(storage_engine), transaction_manager: RwLock::new(TransactionManager::new()) }) }
+        Self {
+            inner: Arc::new(Inner {
+                storage_engine: RwLock::new(storage_engine),
+                transaction_manager: RwLock::new(TransactionManager::new()),
+            }),
+        }
     }
 
     pub fn begin_rw(&self) -> Result<Transaction<'_, RW, P>, ()> {
@@ -74,4 +85,3 @@ impl<P: PageManager> Database<P> {
         Ok(Transaction::new(snapshot_id, self))
     }
 }
-

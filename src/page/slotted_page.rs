@@ -15,7 +15,8 @@ pub trait SlottedStorage<'s, 'v, V> {
 
     // Returns the value at the given index.
     fn get_value(&'v self, index: u8) -> Result<V, Self::Error>
-        where 's: 'v;
+    where
+        's: 'v;
 }
 
 // A page that contains a sequence of pointers to variable-length values,
@@ -41,7 +42,9 @@ impl<'p, 'v, V: Value<'v>> SlottedStorage<'p, 'v, V> for SlottedPage<'p> {
     type Error = PageError;
 
     fn get_value(&'v self, index: u8) -> Result<V, Self::Error>
-    where 'p: 'v {
+    where
+        'p: 'v,
+    {
         get_value(&self.page, index)
     }
 }
@@ -54,13 +57,17 @@ pub struct SlottedPageMut<'p> {
 impl<'p> SlottedPageMut<'p> {
     // Returns the value at the given index.
     pub fn get_value<'v, V: Value<'v>>(&'p self, index: u8) -> Result<V, PageError>
-    where 'p: 'v{
+    where
+        'p: 'v,
+    {
         get_value(&self.page, index)
     }
 
     // Sets the value at the given index.
     pub fn set_value<'v, V: Value<'v>>(&mut self, index: u8, value: V) -> Result<(), PageError>
-    where 'p: 'v{
+    where
+        'p: 'v,
+    {
         let cell_pointer = self.get_cell_pointer(index)?;
         let offset = cell_pointer.offset();
         let length = cell_pointer.length();
@@ -70,10 +77,12 @@ impl<'p> SlottedPageMut<'p> {
         data.copy_from_slice(value.try_into().unwrap());
         Ok(())
     }
-    
+
     // Inserts a value into the page and returns the index of the new value.
     pub fn insert_value<'v, V: Value<'v>>(&mut self, value: V) -> Result<u8, PageError>
-    where 'p: 'v{
+    where
+        'p: 'v,
+    {
         let cell_index = self.next_free_cell_index()?;
         let value_data = value.try_into().unwrap();
         let cell_pointer = self.allocate_cell_pointer(cell_index, value_data.len() as u16)?;
@@ -95,7 +104,7 @@ impl<'p> SlottedPageMut<'p> {
         // iterate over the cells in reverse order, decrementing the number of cells
         for i in (0..num_cells).rev() {
             if !self.get_cell_pointer(i)?.is_deleted() {
-                break
+                break;
             }
             new_num_cells -= 1;
         }
@@ -143,12 +152,17 @@ impl<'p> SlottedPageMut<'p> {
         if new_num_cells > num_cells {
             set_num_cells(&mut self.page, new_num_cells);
         }
-        
+
         return self.set_cell_pointer(index, offset, length);
     }
 
     // Sets the cell pointer at the given index.
-    fn set_cell_pointer(&mut self, index: u8, offset: u16, length: u16) -> Result<CellPointer, PageError> {
+    fn set_cell_pointer(
+        &mut self,
+        index: u8,
+        offset: u16,
+        length: u16,
+    ) -> Result<CellPointer, PageError> {
         let start_index = 1 + 3 * (index as usize);
         let end_index = start_index + 3;
         let data = &mut self.page.contents_mut()[start_index..end_index];
@@ -204,10 +218,11 @@ fn get_value<'p, P: ReadablePage, V: Value<'p>>(page: &'p P, index: u8) -> Resul
     data.try_into().map_err(|_| PageError::InvalidCellPointer)
 }
 
-
 impl<'p> From<SlottedPageMut<'p>> for SlottedPage<'p> {
     fn from(page: SlottedPageMut<'p>) -> Self {
-        Self { page: page.page.into() }
+        Self {
+            page: page.page.into(),
+        }
     }
 }
 
@@ -298,24 +313,42 @@ mod tests {
 
         subtrie_page.delete_value(5).unwrap();
         assert_eq!(subtrie_page.num_cells(), 5);
-        assert!(matches!(subtrie_page.get_cell_pointer(5), Err(PageError::InvalidCellPointer)));
+        assert!(matches!(
+            subtrie_page.get_cell_pointer(5),
+            Err(PageError::InvalidCellPointer)
+        ));
 
         subtrie_page.delete_value(4).unwrap();
         assert_eq!(subtrie_page.num_cells(), 4);
-        assert!(matches!(subtrie_page.get_cell_pointer(4), Err(PageError::InvalidCellPointer)));
+        assert!(matches!(
+            subtrie_page.get_cell_pointer(4),
+            Err(PageError::InvalidCellPointer)
+        ));
 
         subtrie_page.delete_value(3).unwrap();
         assert_eq!(subtrie_page.num_cells(), 3);
-        assert!(matches!(subtrie_page.get_cell_pointer(3), Err(PageError::InvalidCellPointer)));
+        assert!(matches!(
+            subtrie_page.get_cell_pointer(3),
+            Err(PageError::InvalidCellPointer)
+        ));
 
         subtrie_page.delete_value(2).unwrap();
         assert_eq!(subtrie_page.num_cells(), 2);
-        assert!(matches!(subtrie_page.get_cell_pointer(2), Err(PageError::InvalidCellPointer)));
+        assert!(matches!(
+            subtrie_page.get_cell_pointer(2),
+            Err(PageError::InvalidCellPointer)
+        ));
 
         subtrie_page.delete_value(1).unwrap();
         assert_eq!(subtrie_page.num_cells(), 0);
-        assert!(matches!(subtrie_page.get_cell_pointer(1), Err(PageError::InvalidCellPointer)));
-        assert!(matches!(subtrie_page.get_cell_pointer(0), Err(PageError::InvalidCellPointer)));
+        assert!(matches!(
+            subtrie_page.get_cell_pointer(1),
+            Err(PageError::InvalidCellPointer)
+        ));
+        assert!(matches!(
+            subtrie_page.get_cell_pointer(0),
+            Err(PageError::InvalidCellPointer)
+        ));
 
         // after cleaning up all of the cells, we should be able to allocate a maximum sized cell
         // 4088 - 1 - 3 = 4084

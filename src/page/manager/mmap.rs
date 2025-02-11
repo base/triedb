@@ -1,8 +1,8 @@
 use std::fs::File;
 
-use memmap2::MmapMut;
 use crate::page::{Page, PageError, PageId, PageManager, PageMut, PAGE_SIZE};
 use crate::snapshot::SnapshotId;
+use memmap2::MmapMut;
 
 // Manages pages in a memory mapped file.
 #[derive(Debug)]
@@ -34,9 +34,7 @@ impl MmapPageManager {
             return Err(PageError::PageNotFound(page_id));
         }
         let start = page_id as usize * PAGE_SIZE;
-        let page_data = unsafe {
-            &mut *(self.mmap.as_ptr().add(start) as *mut [u8; PAGE_SIZE])
-        };
+        let page_data = unsafe { &mut *(self.mmap.as_ptr().add(start) as *mut [u8; PAGE_SIZE]) };
         Ok(page_data)
     }
 
@@ -63,7 +61,11 @@ impl PageManager for MmapPageManager {
     }
 
     // Retrieves a mutable page from the memory mapped file.
-    fn get_mut<'p>(&mut self, snapshot_id: SnapshotId, page_id: PageId) -> Result<PageMut<'p>, PageError> {
+    fn get_mut<'p>(
+        &mut self,
+        snapshot_id: SnapshotId,
+        page_id: PageId,
+    ) -> Result<PageMut<'p>, PageError> {
         let page_data = self.page_data(page_id)?;
         Ok(PageMut::new(page_id, snapshot_id, page_data))
     }
@@ -87,7 +89,7 @@ mod tests {
 
     #[test]
     fn test_allocate_get() {
-        let mmap = MmapMut::map_anon(10*PAGE_SIZE).unwrap();
+        let mmap = MmapMut::map_anon(10 * PAGE_SIZE).unwrap();
         let mut manager = MmapPageManager::new(mmap, 0);
 
         for i in 0..10 {
@@ -111,7 +113,7 @@ mod tests {
 
     #[test]
     fn test_allocate_get_mut() {
-        let mmap = MmapMut::map_anon(10*PAGE_SIZE).unwrap();
+        let mmap = MmapMut::map_anon(10 * PAGE_SIZE).unwrap();
         let mut manager = MmapPageManager::new(mmap, 0);
 
         let mut page = manager.allocate(42).unwrap();

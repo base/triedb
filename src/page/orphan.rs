@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
-use crate::snapshot::SnapshotId;
 use crate::page::PageId;
+use crate::snapshot::SnapshotId;
+use std::collections::BTreeMap;
 
 // Manages a collection of orphaned page ids, grouped by the snapshot id which created them.
 #[derive(Debug)]
@@ -12,7 +12,10 @@ pub struct OrphanPageManager {
 impl OrphanPageManager {
     // Creates a new OrphanPageManager.
     pub fn new() -> Self {
-        Self { unlocked_page_ids: Vec::new(), locked_page_ids: BTreeMap::new() }
+        Self {
+            unlocked_page_ids: Vec::new(),
+            locked_page_ids: BTreeMap::new(),
+        }
     }
 
     // Returns an unlocked orphaned page id, if one exists.
@@ -40,13 +43,22 @@ impl OrphanPageManager {
     }
 
     // Adds a collection of page ids to the orphaned page ids for the given snapshot id.
-    pub fn add_orphaned_page_ids(&mut self, snapshot_id: SnapshotId, pages: impl IntoIterator<Item = PageId>) {
-        self.locked_page_ids.entry(snapshot_id).or_default().extend(pages);
+    pub fn add_orphaned_page_ids(
+        &mut self,
+        snapshot_id: SnapshotId,
+        pages: impl IntoIterator<Item = PageId>,
+    ) {
+        self.locked_page_ids
+            .entry(snapshot_id)
+            .or_default()
+            .extend(pages);
     }
 
     // Returns a flat iterator over all the orphaned page ids, locked and unlocked.
     pub fn iter(&self) -> impl Iterator<Item = &PageId> {
-        self.unlocked_page_ids.iter().chain(self.locked_page_ids.values().flat_map(|pages| pages.iter()))
+        self.unlocked_page_ids
+            .iter()
+            .chain(self.locked_page_ids.values().flat_map(|pages| pages.iter()))
     }
 }
 

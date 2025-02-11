@@ -5,7 +5,7 @@ pub(crate) struct CellPointer<'p>(&'p [u8; 3]);
 
 #[derive(Debug)]
 pub enum CellPointerError {
-    InvalidLength
+    InvalidLength,
 }
 
 impl From<CellPointerError> for PageError {
@@ -72,22 +72,22 @@ mod tests {
         assert_eq!(cell_pointer.offset(), 0);
         assert_eq!(cell_pointer.length(), 0);
         assert!(cell_pointer.is_deleted());
-        
+
         let cell_pointer = CellPointer(&[0b11111111, 0b11111111, 0b11111111]);
         assert_eq!(cell_pointer.offset(), 4095);
         assert_eq!(cell_pointer.length(), 4095);
         assert!(!cell_pointer.is_deleted());
-        
+
         let cell_pointer = CellPointer(&[0b11111111, 0b11110000, 0b00000000]);
         assert_eq!(cell_pointer.offset(), 4095);
         assert_eq!(cell_pointer.length(), 0);
         assert!(!cell_pointer.is_deleted());
-        
+
         let cell_pointer = CellPointer(&[0b00000000, 0b00001111, 0b11111111]);
         assert_eq!(cell_pointer.offset(), 0);
         assert_eq!(cell_pointer.length(), 4095);
         assert!(!cell_pointer.is_deleted());
-        
+
         let mut data = [0; 3];
         let cell_pointer = CellPointer::new(1234, 567, &mut data);
         assert_eq!(cell_pointer.offset(), 1234);

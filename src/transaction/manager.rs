@@ -1,5 +1,5 @@
-use std::fmt::Debug;
 use crate::snapshot::SnapshotId;
+use std::fmt::Debug;
 
 #[derive(Debug)]
 pub struct TransactionManager {
@@ -9,7 +9,10 @@ pub struct TransactionManager {
 
 impl TransactionManager {
     pub fn new() -> Self {
-        Self { has_writer: false, open_txs: Vec::new() }
+        Self {
+            has_writer: false,
+            open_txs: Vec::new(),
+        }
     }
 
     pub fn begin_rw(&mut self, snapshot_id: SnapshotId) -> Result<SnapshotId, ()> {
@@ -32,7 +35,11 @@ impl TransactionManager {
     }
 
     // Removes a transaction from the list of open transactions
-    pub(crate) fn remove_transaction(&mut self, snapshot_id: SnapshotId, is_writer: bool) -> Result<(), ()> {
+    pub(crate) fn remove_transaction(
+        &mut self,
+        snapshot_id: SnapshotId,
+        is_writer: bool,
+    ) -> Result<(), ()> {
         let index = self.open_txs.binary_search(&snapshot_id).unwrap();
         self.open_txs.remove(index);
         if is_writer {
