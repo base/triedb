@@ -1,6 +1,6 @@
-use std::fmt::Debug;
 use crate::page::{Page, PageMut};
 use crate::snapshot::SnapshotId;
+use std::fmt::Debug;
 pub mod mmap;
 
 /// currently we use 4 bytes for page ids, which implies a maximum of 16TB of data.
@@ -25,7 +25,11 @@ pub trait PageManager: Debug {
     fn get<'p>(&self, snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'p>, PageError>;
 
     /// Retrieves a mutable page from the given snapshot.
-    fn get_mut<'p>(&mut self, snapshot_id: SnapshotId, page_id: PageId) -> Result<PageMut<'p>, PageError>;
+    fn get_mut<'p>(
+        &mut self,
+        snapshot_id: SnapshotId,
+        page_id: PageId,
+    ) -> Result<PageMut<'p>, PageError>;
 
     /// Allocates a new page in the given snapshot.
     fn allocate<'p>(&mut self, snapshot_id: SnapshotId) -> Result<PageMut<'p>, PageError>;

@@ -1,4 +1,7 @@
-use crate::{page::{Page, PageMut}, snapshot::SnapshotId};
+use crate::{
+    page::{Page, PageMut},
+    snapshot::SnapshotId,
+};
 use alloy_primitives::B256;
 
 use super::{PageError, PageId, ReadablePage, WritablePage};
@@ -38,7 +41,10 @@ impl<'p> RootPage<PageMut<'p>> {
     pub fn new(mut page_mut: PageMut<'p>, state_root: B256) -> Self {
         let contents = page_mut.contents_mut();
         contents[0..32].copy_from_slice(state_root.as_slice());
-        Self { page: page_mut, orphan_count: 0 }
+        Self {
+            page: page_mut,
+            orphan_count: 0,
+        }
     }
 
     pub fn add_orphaned_page_id(&mut self, page_id: PageId) -> Result<(), ()> {
@@ -67,6 +73,9 @@ impl<'p> TryFrom<Page<'p>> for RootPage<Page<'p>> {
             return Err(PageError::InvalidRootPage(page.page_id()));
         }
         // TODO: read the orphans from the page contents
-        Ok(Self { page, orphan_count: 0 })
+        Ok(Self {
+            page,
+            orphan_count: 0,
+        })
     }
 }

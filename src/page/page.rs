@@ -1,5 +1,5 @@
-use crate::snapshot::SnapshotId;
 use crate::page::PageId;
+use crate::snapshot::SnapshotId;
 
 pub const PAGE_SIZE: usize = 4096;
 pub const HEADER_SIZE: usize = 8;
@@ -27,7 +27,11 @@ impl<'p> Page<'p> {
     // Creates a new Page with the given id, snapshot id, and data.
     pub fn new(id: PageId, data: &'p [u8; PAGE_SIZE]) -> Self {
         let snapshot_id = u64::from_le_bytes(data[0..8].try_into().unwrap());
-        Self { id, snapshot_id, data }
+        Self {
+            id,
+            snapshot_id,
+            data,
+        }
     }
 }
 
@@ -59,7 +63,11 @@ impl<'p> PageMut<'p> {
     // Creates a new PageMut with the given id, snapshot id, and data.
     pub fn new(id: PageId, snapshot_id: SnapshotId, data: &'p mut [u8; PAGE_SIZE]) -> Self {
         data[0..8].copy_from_slice(&snapshot_id.to_le_bytes());
-        Self { id, snapshot_id, data }
+        Self {
+            id,
+            snapshot_id,
+            data,
+        }
     }
 }
 
