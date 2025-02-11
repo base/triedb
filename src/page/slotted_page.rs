@@ -212,8 +212,8 @@ fn get_value<'p, P: ReadablePage, V: Value<'p>>(page: &'p P, index: u8) -> Resul
     let offset = cell_pointer.offset();
     let length = cell_pointer.length();
 
-    let start_index = (PAGE_DATA_SIZE as u16 - offset - length) as usize;
-    let end_index = (PAGE_DATA_SIZE as u16 - offset) as usize;
+    let start_index = (PAGE_DATA_SIZE as u16 - offset) as usize;
+    let end_index = (PAGE_DATA_SIZE as u16 - offset + length) as usize;
     let data = &page.contents()[start_index..end_index];
     data.try_into().map_err(|_| PageError::InvalidCellPointer)
 }
@@ -247,6 +247,18 @@ mod tests {
     use crate::page::PAGE_SIZE;
 
     use super::*;
+
+    #[test]
+    fn test_insert_get_value() {
+        let mut data = [0; PAGE_SIZE];
+        let page = PageMut::new(42, 123, &mut data);
+        let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
+        let value: &[u8] = &[1, 2, 3];
+        let cell_index = subtrie_page.insert_value(value).unwrap();
+
+        let v: &[u8] = subtrie_page.get_value(cell_index).unwrap();
+        assert_eq!(v, value);
+    }
 
     #[test]
     fn test_allocate_get_delete_cell_pointer() {
