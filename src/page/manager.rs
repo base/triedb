@@ -1,15 +1,20 @@
 use std::fmt::Debug;
+use crate::page::{Page, PageMut};
+use crate::snapshot::SnapshotId;
+pub mod mmap;
 
 /// currently we use 4 bytes for page ids, which implies a maximum of 16TB of data.
 pub type PageId = u32;
-
-/// TODO: potentially use a a more sophisticated snapshotting mechanism that requires a Snapshot struct to carry more context.
-pub type SnapshotId = u64;
 
 /// Represents various errors that might arise from page operations.
 #[derive(Debug)]
 pub enum PageError {
     PageNotFound(PageId),
+    OutOfBounds(PageId),
+    InvalidRootPage(PageId),
+    InvalidCellPointer,
+    NoFreeCells,
+    PageIsFull,
     IO(std::io::Error),
     // TODO: add more errors here for other cases.
 }
@@ -17,34 +22,37 @@ pub enum PageError {
 /// Core trait that manages pages in trie db.
 pub trait PageManager: Debug {
     /// Retrieves a page from the given snapshot.
-    fn get(&self, snapshot_id: SnapshotId, page_id: PageId) -> Result<Page, PageError>;
+    fn get<'p>(&self, snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'p>, PageError>;
+
+    /// Retrieves a mutable page from the given snapshot.
+    fn get_mut<'p>(&mut self, snapshot_id: SnapshotId, page_id: PageId) -> Result<PageMut<'p>, PageError>;
 
     /// Allocates a new page in the given snapshot.
-    fn allocate(&mut self, snapshot_id: SnapshotId) -> Result<PageId, PageError>;
+    fn allocate<'p>(&mut self, snapshot_id: SnapshotId) -> Result<PageMut<'p>, PageError>;
 
-    /// Merges two pages into a new page.
-    fn merge(
-        &mut self,
-        snapshot_id: SnapshotId,
-        page_a: PageId,
-        page_b: PageId,
-        page_out: PageId,
-    ) -> Result<(), PageError>;
+    // /// Merges two pages into a new page.
+    // fn merge(
+    //     &mut self,
+    //     snapshot_id: SnapshotId,
+    //     page_a: PageId,
+    //     page_b: PageId,
+    //     page_out: PageId,
+    // ) -> Result<(), PageError>;
 
-    /// Splits a page into two new pages.
-    fn split(
-        &mut self,
-        snapshot_id: SnapshotId,
-        page_id: PageId,
-    ) -> Result<(PageId, PageId), PageError>;
+    // /// Splits a page into two new pages.
+    // fn split(
+    //     &mut self,
+    //     snapshot_id: SnapshotId,
+    //     page_id: PageId,
+    // ) -> Result<(PageId, PageId), PageError>;
 
-    /// Writes data to a page.
-    fn write(
-        &mut self,
-        snapshot_id: SnapshotId,
-        page_id: PageId,
-        data: &[u8],
-    ) -> Result<(), PageError>;
+    // /// Writes data to a page.
+    // fn write(
+    //     &mut self,
+    //     snapshot_id: SnapshotId,
+    //     page_id: PageId,
+    //     data: &[u8],
+    // ) -> Result<(), PageError>;
 
     /// Commits pages associated with a snapshot to durable storage.
     fn commit(&mut self, snapshot_id: SnapshotId) -> Result<(), PageError>;
