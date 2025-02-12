@@ -1,6 +1,7 @@
 use std::fs::File;
 
-use crate::page::{Page, PageError, PageId, PageManager, PageMut, PAGE_SIZE};
+use crate::page::page::{RO, RW};
+use crate::page::{Page, PageError, PageId, PageManager, PAGE_SIZE};
 use crate::snapshot::SnapshotId;
 use memmap2::MmapMut;
 
@@ -55,9 +56,9 @@ impl MmapPageManager {
 
 impl PageManager for MmapPageManager {
     // Retrieves a page from the memory mapped file.
-    fn get<'p>(&self, snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'p>, PageError> {
+    fn get<'p>(&self, snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'p, RO>, PageError> {
         let page_data = self.page_data(page_id)?;
-        Ok(Page::new(page_id, page_data))
+        Ok(Page::new_ro(page_id, page_data))
     }
 
     // Retrieves a mutable page from the memory mapped file.
@@ -65,15 +66,15 @@ impl PageManager for MmapPageManager {
         &mut self,
         snapshot_id: SnapshotId,
         page_id: PageId,
-    ) -> Result<PageMut<'p>, PageError> {
+    ) -> Result<Page<'p, RW>, PageError> {
         let page_data = self.page_data(page_id)?;
-        Ok(PageMut::new(page_id, snapshot_id, page_data))
+        Ok(Page::new_rw(page_id, snapshot_id, page_data))
     }
 
     // Allocates a new page in the memory mapped file.
-    fn allocate<'p>(&mut self, snapshot_id: SnapshotId) -> Result<PageMut<'p>, PageError> {
+    fn allocate<'p>(&mut self, snapshot_id: SnapshotId) -> Result<Page<'p, RW>, PageError> {
         let (page_id, page_data) = self.allocate_page_data()?;
-        Ok(PageMut::new(page_id, snapshot_id, page_data))
+        Ok(Page::new_rw(page_id, snapshot_id, page_data))
     }
 
     // Commits the memory mapped file to disk.
@@ -85,7 +86,7 @@ impl PageManager for MmapPageManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::page::{page::PAGE_DATA_SIZE, ReadablePage, WritablePage};
+    use crate::page::page::PAGE_DATA_SIZE;
 
     #[test]
     fn test_allocate_get() {

@@ -1,13 +1,8 @@
 use crate::{
-    page::{
-        OrphanPageManager, Page, PageError, PageId, PageManager, PageMut, ReadablePage, RootPage,
-        WritablePage,
-    },
+    page::{OrphanPageManager, Page, PageError, PageId, PageManager, RootPage, RO, RW},
     snapshot::SnapshotId,
 };
 use alloy_trie::EMPTY_ROOT_HASH;
-use std::sync::Arc;
-use std::sync::RwLock;
 
 #[derive(Debug)]
 pub struct StorageEngine<P: PageManager> {
@@ -46,7 +41,7 @@ impl<P: PageManager> StorageEngine<P> {
     // Allocates a new page from the underlying page manager.
     // If there is an orphaned page available as of the given snapshot id,
     // it is used to allocate a new page instead.
-    fn allocate_page<'p>(&mut self) -> Result<PageMut<'p>, Error> {
+    fn allocate_page<'p>(&mut self) -> Result<Page<'p, RW>, Error> {
         let orphaned_page_id = self.orphan_manager.get_orphaned_page_id();
         if let Some(orphaned_page_id) = orphaned_page_id {
             let mut page = self
@@ -63,7 +58,7 @@ impl<P: PageManager> StorageEngine<P> {
 
     // Retrieves a mutable clone of a page from the underlying page manager.
     // The original page is marked as orphaned and a new page is allocated, potentially from an orphaned page.
-    fn get_mut_clone<'p>(&mut self, page_id: PageId) -> Result<PageMut<'p>, Error> {
+    fn get_mut_clone<'p>(&mut self, page_id: PageId) -> Result<Page<'p, RW>, Error> {
         let mut new_page = self.allocate_page()?;
 
         let original_page = self.page_manager.get(self.snapshot_id, page_id)?;
@@ -75,13 +70,13 @@ impl<P: PageManager> StorageEngine<P> {
         Ok(new_page)
     }
 
-    fn get_page<'p>(&self, page_id: PageId) -> Result<Page<'p>, Error> {
+    fn get_page<'p>(&self, page_id: PageId) -> Result<Page<'p, RO>, Error> {
         self.page_manager
             .get(self.snapshot_id, page_id)
             .map_err(|e| e.into())
     }
 
-    fn get_mut_page<'p>(&mut self, page_id: PageId) -> Result<PageMut<'p>, Error> {
+    fn get_mut_page<'p>(&mut self, page_id: PageId) -> Result<Page<'p, RW>, Error> {
         self.page_manager
             .get_mut(self.snapshot_id, page_id)
             .map_err(|e| e.into())

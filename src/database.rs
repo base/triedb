@@ -2,7 +2,6 @@ use crate::page::MmapPageManager;
 use crate::page::OrphanPageManager;
 use crate::page::PageError;
 use crate::page::PageManager;
-use crate::page::ReadablePage;
 use crate::page::RootPage;
 use crate::snapshot::SnapshotId;
 use crate::storage::engine::StorageEngine;
