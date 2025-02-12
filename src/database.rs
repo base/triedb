@@ -11,17 +11,9 @@ use crate::transaction::{RO, RW};
 use std::sync::Arc;
 use std::sync::RwLock;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Database<P: PageManager> {
     pub(crate) inner: Arc<Inner<P>>,
-}
-
-impl<P: PageManager> Clone for Database<P> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
-    }
 }
 
 #[derive(Debug)]
