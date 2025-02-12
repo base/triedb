@@ -10,14 +10,23 @@ env:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
     - name: Build
       run: cargo build --verbose
+  
+  format:
+
+    steps:
+    - uses: actions/checkout@v4
     - name: Format
       run: cargo fmt --check
+  
+  tests:
+
+    steps:
+    - uses: actions/checkout@v4
     - name: Run tests
       run: cargo test --verbose
