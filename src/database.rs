@@ -1,9 +1,9 @@
 use crate::page::MmapPageManager;
 use crate::page::OrphanPageManager;
 use crate::page::PageError;
+use crate::page::PageId;
 use crate::page::PageManager;
 use crate::page::RootPage;
-use crate::snapshot::SnapshotId;
 use crate::storage::engine::StorageEngine;
 use crate::transaction::Transaction;
 use crate::transaction::TransactionManager;
@@ -11,7 +11,7 @@ use crate::transaction::{RO, RW};
 use std::sync::Arc;
 use std::sync::RwLock;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Database<P: PageManager> {
     pub(crate) inner: Arc<Inner<P>>,
 }
@@ -67,20 +67,26 @@ impl<P: PageManager> Database<P> {
         }
     }
 
-    pub fn begin_rw(&self) -> Result<Transaction<'_, RW, P>, ()> {
-        let mut storage_engine = self.inner.storage_engine.write().unwrap();
+    pub fn begin_rw(&self) -> Result<Transaction<'_, RW, P, StorageEngine<P>>, ()> {
+        let storage_engine = self.inner.storage_engine.read().unwrap();
         let mut transaction_manager = self.inner.transaction_manager.write().unwrap();
         let snapshot_id = storage_engine.snapshot_id() + 1;
         let min_snapshot_id = transaction_manager.begin_rw(snapshot_id)?;
         storage_engine.unlock(min_snapshot_id);
-        Ok(Transaction::new(snapshot_id, self))
+        Ok(Transaction::new(snapshot_id, self, None))
     }
 
-    pub fn begin_ro(&self) -> Result<Transaction<'_, RO, P>, ()> {
-        let storage_engine = self.inner.storage_engine.write().unwrap();
+    pub fn begin_ro(&self) -> Result<Transaction<'_, RO, P, StorageEngine<P>>, ()> {
+        let storage_engine = self.inner.storage_engine.read().unwrap();
         let mut transaction_manager = self.inner.transaction_manager.write().unwrap();
         let snapshot_id = storage_engine.snapshot_id();
         transaction_manager.begin_ro(snapshot_id)?;
-        Ok(Transaction::new(snapshot_id, self))
+        Ok(Transaction::new(snapshot_id, self, Some(storage_engine)))
+    }
+
+    pub(crate) fn resize(&self, new_page_count: PageId) -> Result<(), ()> {
+        let mut storage_engine = self.inner.storage_engine.write().unwrap();
+        storage_engine.resize(new_page_count).unwrap();
+        Ok(())
     }
 }

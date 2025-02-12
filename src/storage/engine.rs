@@ -3,12 +3,19 @@ use crate::{
     snapshot::SnapshotId,
 };
 use alloy_trie::EMPTY_ROOT_HASH;
+use std::sync::Arc;
+use std::sync::RwLock;
 
 #[derive(Debug)]
 pub struct StorageEngine<P: PageManager> {
+    inner: Arc<RwLock<Inner<P>>>,
+}
+
+#[derive(Debug)]
+struct Inner<P: PageManager> {
     snapshot_id: SnapshotId,
-    root_subtrie_page_id: PageId,
     root_page_id: PageId,
+    root_subtrie_page_id: PageId,
     page_manager: P,
     orphan_manager: OrphanPageManager,
 }
@@ -22,48 +29,47 @@ impl<P: PageManager> StorageEngine<P> {
         orphan_manager: OrphanPageManager,
     ) -> Self {
         Self {
-            snapshot_id,
-            root_subtrie_page_id,
-            root_page_id,
-            page_manager,
-            orphan_manager,
+            inner: Arc::new(RwLock::new(Inner {
+                snapshot_id,
+                root_page_id,
+                root_subtrie_page_id,
+                page_manager,
+                orphan_manager,
+            })),
         }
     }
 
     pub fn snapshot_id(&self) -> SnapshotId {
-        self.snapshot_id
+        self.inner.read().unwrap().snapshot_id
     }
 
-    pub(crate) fn unlock(&mut self, snapshot_id: SnapshotId) {
-        self.orphan_manager.unlock(snapshot_id);
+    pub(crate) fn unlock(&self, snapshot_id: SnapshotId) {
+        self.inner
+            .write()
+            .unwrap()
+            .orphan_manager
+            .unlock(snapshot_id);
     }
 
     // Allocates a new page from the underlying page manager.
     // If there is an orphaned page available as of the given snapshot id,
     // it is used to allocate a new page instead.
-    fn allocate_page<'p>(&mut self) -> Result<Page<'p, RW>, Error> {
-        let orphaned_page_id = self.orphan_manager.get_orphaned_page_id();
-        if let Some(orphaned_page_id) = orphaned_page_id {
-            let mut page = self
-                .page_manager
-                .get_mut(self.snapshot_id, orphaned_page_id)?;
-            page.contents_mut().fill(0);
-            Ok(page)
-        } else {
-            self.page_manager
-                .allocate(self.snapshot_id)
-                .map_err(|e| e.into())
-        }
+    fn allocate_page<'p>(&self) -> Result<Page<'p, RW>, Error> {
+        let mut inner = self.inner.write().unwrap();
+        inner.allocate_page()
     }
 
     // Retrieves a mutable clone of a page from the underlying page manager.
     // The original page is marked as orphaned and a new page is allocated, potentially from an orphaned page.
-    fn get_mut_clone<'p>(&mut self, page_id: PageId) -> Result<Page<'p, RW>, Error> {
-        let mut new_page = self.allocate_page()?;
+    fn get_mut_clone<'p>(&self, page_id: PageId) -> Result<Page<'p, RW>, Error> {
+        let mut inner = self.inner.write().unwrap();
+        let snapshot_id = inner.snapshot_id;
+        let mut new_page = inner.allocate_page()?;
 
-        let original_page = self.page_manager.get(self.snapshot_id, page_id)?;
-        self.orphan_manager
-            .add_orphaned_page_id(self.snapshot_id, page_id);
+        let original_page = inner.page_manager.get(snapshot_id, page_id)?;
+        inner
+            .orphan_manager
+            .add_orphaned_page_id(snapshot_id, page_id);
         new_page
             .contents_mut()
             .copy_from_slice(original_page.contents());
@@ -71,14 +77,19 @@ impl<P: PageManager> StorageEngine<P> {
     }
 
     fn get_page<'p>(&self, page_id: PageId) -> Result<Page<'p, RO>, Error> {
-        self.page_manager
-            .get(self.snapshot_id, page_id)
+        let inner = self.inner.read().unwrap();
+        inner
+            .page_manager
+            .get(inner.snapshot_id, page_id)
             .map_err(|e| e.into())
     }
 
-    fn get_mut_page<'p>(&mut self, page_id: PageId) -> Result<Page<'p, RW>, Error> {
-        self.page_manager
-            .get_mut(self.snapshot_id, page_id)
+    fn get_mut_page<'p>(&self, page_id: PageId) -> Result<Page<'p, RW>, Error> {
+        let mut inner = self.inner.write().unwrap();
+        let snapshot_id = inner.snapshot_id;
+        inner
+            .page_manager
+            .get_mut(snapshot_id, page_id)
             .map_err(|e| e.into())
     }
 
@@ -98,36 +109,59 @@ impl<P: PageManager> StorageEngine<P> {
     //     todo!()
     // }
 
-    pub fn commit(&mut self, snapshot_id: SnapshotId) -> Result<(), Error> {
-        if snapshot_id <= self.snapshot_id {
+    pub fn commit(&self, snapshot_id: SnapshotId) -> Result<(), Error> {
+        let mut inner = self.inner.write().unwrap();
+        if snapshot_id <= inner.snapshot_id {
             return Err(Error::InvalidSnapshotId);
         }
 
         let state_root = EMPTY_ROOT_HASH;
 
-        self.page_manager.commit(snapshot_id)?;
-        self.snapshot_id = snapshot_id;
+        inner.page_manager.commit(snapshot_id)?;
+        inner.snapshot_id = snapshot_id;
 
-        let root_page_id = (self.root_page_id + 1) % 2;
-        let page_mut = self
+        let root_page_id = (inner.root_page_id + 1) % 2;
+        let page_mut = inner
             .page_manager
-            .get_mut(self.snapshot_id, root_page_id)
+            .get_mut(snapshot_id, root_page_id)
             .unwrap();
         let mut new_root_page = RootPage::new(page_mut, state_root);
-        for orphaned_page_id in self.orphan_manager.iter() {
+        for orphaned_page_id in inner.orphan_manager.iter() {
             new_root_page
                 .add_orphaned_page_id(*orphaned_page_id)
                 .unwrap();
         }
-        self.root_page_id = root_page_id;
+        inner.root_page_id = root_page_id;
 
         // Note: the new root page is not committed to disk yet.
 
         Ok(())
     }
 
-    pub fn rollback(&mut self, snapshot_id: SnapshotId) -> Result<(), Error> {
+    pub fn rollback(&self, snapshot_id: SnapshotId) -> Result<(), Error> {
         todo!()
+    }
+
+    pub fn resize(&mut self, new_page_count: PageId) -> Result<(), Error> {
+        let mut inner = self.inner.write().unwrap();
+        inner.page_manager.resize(new_page_count)?;
+        Ok(())
+    }
+}
+
+impl<P: PageManager> Inner<P> {
+    fn allocate_page<'p>(&mut self) -> Result<Page<'p, RW>, Error> {
+        let snapshot_id = self.snapshot_id;
+        let orphaned_page_id = self.orphan_manager.get_orphaned_page_id();
+        if let Some(orphaned_page_id) = orphaned_page_id {
+            let mut page = self.page_manager.get_mut(snapshot_id, orphaned_page_id)?;
+            page.contents_mut().fill(0);
+            Ok(page)
+        } else {
+            self.page_manager
+                .allocate(snapshot_id)
+                .map_err(|e| e.into())
+        }
     }
 }
 
@@ -148,15 +182,12 @@ impl From<PageError> for Error {
 mod tests {
     use super::*;
     use crate::page::MmapPageManager;
-    use crate::page::PAGE_SIZE;
-    use memmap2::MmapMut;
 
     #[test]
     fn test_allocate_get_mut_clone() {
-        let mmap = MmapMut::map_anon(10 * PAGE_SIZE).unwrap();
-        let manager = MmapPageManager::new(mmap, 2);
+        let manager = MmapPageManager::new_anon(10, 2).unwrap();
         let orphan_manager = OrphanPageManager::new();
-        let mut storage_engine = StorageEngine::new(1, 0, 0, manager, orphan_manager);
+        let storage_engine = StorageEngine::new(1, 0, 0, manager, orphan_manager);
 
         let mut page = storage_engine.allocate_page().unwrap();
         assert_eq!(page.page_id(), 2);
@@ -205,10 +236,9 @@ mod tests {
 
     #[test]
     fn test_shared_page_mutability() {
-        let mmap = MmapMut::map_anon(10 * PAGE_SIZE).unwrap();
-        let manager = MmapPageManager::new(mmap, 2);
+        let manager = MmapPageManager::new_anon(10, 2).unwrap();
         let orphan_manager = OrphanPageManager::new();
-        let mut storage_engine = StorageEngine::new(1, 0, 0, manager, orphan_manager);
+        let storage_engine = StorageEngine::new(1, 0, 0, manager, orphan_manager);
 
         let page1 = storage_engine.get_page(0).unwrap();
 
