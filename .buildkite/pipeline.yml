@@ -1,8 +1,0 @@
-steps:
-
-- label: code check
-  commands:
-  - make format
-  - git diff --exit-code
-  agents:
-    queue: docker
