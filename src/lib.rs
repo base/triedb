@@ -1,6 +1,9 @@
+mod account;
 mod database;
 mod location;
+mod node;
 mod page;
+mod path;
 mod snapshot;
 mod storage;
 mod transaction;

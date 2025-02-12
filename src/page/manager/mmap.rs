@@ -39,7 +39,8 @@ impl MmapPageManager {
         }
     }
 
-    pub fn new_anon(capacity: PageId, next_page_id: PageId) -> Result<Self, PageError> {
+    // Creates a new MmapPageManager with an anonymous memory mapped file.
+    pub(crate) fn new_anon(capacity: PageId, next_page_id: PageId) -> Result<Self, PageError> {
         let mmap = MmapMut::map_anon(capacity as usize * PAGE_SIZE).map_err(PageError::IO)?;
         Ok(Self {
             mmap,
@@ -87,13 +88,13 @@ impl PageManager for MmapPageManager {
         page_id: PageId,
     ) -> Result<Page<'p, RW>, PageError> {
         let page_data = self.page_data(page_id)?;
-        Ok(Page::new_rw(page_id, snapshot_id, page_data))
+        Ok(Page::new_rw(page_id, page_data))
     }
 
     // Allocates a new page in the memory mapped file.
     fn allocate<'p>(&mut self, snapshot_id: SnapshotId) -> Result<Page<'p, RW>, PageError> {
         let (page_id, page_data) = self.allocate_page_data()?;
-        Ok(Page::new_rw(page_id, snapshot_id, page_data))
+        Ok(Page::new_rw_with_snapshot(page_id, snapshot_id, page_data))
     }
 
     // Resizes the memory mapped file to the given number of pages.
