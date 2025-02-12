@@ -1,2 +1,3 @@
-lint:
-	cargo fmt
+# this will modify files in place
+format:
+	@cargo fmt
