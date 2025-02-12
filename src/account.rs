@@ -23,8 +23,8 @@ impl<'a> AccountSlice<'a> {
         storage_root: B256,
         data: &'a mut [u8],
     ) -> Self {
-        data[0..32].copy_from_slice(&balance.as_le_slice());
-        data[32..40].copy_from_slice(&nonce.to_le_bytes());
+        data[0..32].copy_from_slice(&balance.to_be_bytes::<32>());
+        data[32..40].copy_from_slice(&nonce.to_be_bytes());
         data[40..72].copy_from_slice(&code_hash.as_slice());
         data[72..104].copy_from_slice(&storage_root.as_slice());
         Self { data }
@@ -33,11 +33,11 @@ impl<'a> AccountSlice<'a> {
 
 impl<'a> Account<'a> for AccountSlice<'a> {
     fn balance(&self) -> U256 {
-        U256::from_le_slice(&self.data[0..32])
+        U256::from_be_slice(&self.data[0..32])
     }
 
     fn nonce(&self) -> u64 {
-        u64::from_le_bytes(unsafe { *self.data.as_ptr().add(32).cast() })
+        u64::from_be_bytes(self.data[32..40].try_into().expect("nonce is 8 bytes"))
     }
 
     fn code_hash(&self) -> B256 {
