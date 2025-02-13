@@ -32,7 +32,10 @@ pub struct SlottedPage<'p, P: PageKind> {
 
 impl<'p, P: PageKind> SlottedPage<'p, P> {
     // Returns the value at the given index.
-    pub fn get_value<'v, V: Value<'v>>(&self, index: u8) -> Result<V, PageError> {
+    pub fn get_value<'v, V: Value<'v>>(&self, index: u8) -> Result<V, PageError>
+    where
+        'p: 'v,
+    {
         let cell_pointer = self.get_cell_pointer(index)?;
         if cell_pointer.is_deleted() {
             return Err(PageError::InvalidCellPointer);

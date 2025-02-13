@@ -95,7 +95,7 @@ impl<P: PageManager> StorageEngine<P> {
             .map_err(|e| e.into())
     }
 
-    pub fn get_account<'tx, A: Account<'tx>>(
+    pub fn get_account<'a, A: Account<'a>>(
         &self,
         metadata: &Metadata,
         address_path: AddressPath,
