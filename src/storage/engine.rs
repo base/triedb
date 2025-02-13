@@ -1,5 +1,5 @@
 use crate::{
-    account::{Account, AccountSlice},
+    account::Account,
     database::Metadata,
     node::Node,
     page::{

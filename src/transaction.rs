@@ -3,7 +3,7 @@ mod manager;
 use std::{fmt::Debug, sync::RwLockReadGuard};
 
 use crate::{
-    account::{Account, AccountSlice},
+    account::Account,
     database::{Database, Metadata},
     page::PageManager,
     path::AddressPath,
