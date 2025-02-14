@@ -16,6 +16,7 @@ pub enum PageError {
     NoFreeCells,
     PageIsFull,
     IO(std::io::Error),
+    InvalidValue,
     // TODO: add more errors here for other cases.
 }
 

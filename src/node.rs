@@ -1,60 +1,165 @@
 use alloy_trie::Nibbles;
 
 use crate::{
-    location::Location,
-    page::{PageError, Value},
+    pointer::Pointer,
+    storage::value::{self, Value},
 };
 
 #[derive(Debug)]
-pub struct Node<'n> {
-    data: &'n [u8],
+pub enum Node {
+    Leaf {
+        prefix: Nibbles,
+        value: Vec<u8>,
+    },
+    Branch {
+        prefix: Nibbles,
+        children: [Option<Pointer>; 16],
+    },
 }
 
-// TODO: this is a dummy node implementation which inefficiently stores a leaf node.
-impl<'n> Node<'n> {
-    pub fn new(prefix: Nibbles, value: &'n [u8], mut data: &'n mut [u8]) -> Self {
-        data[0] = prefix.len() as u8;
-        data[1..=prefix.len()].copy_from_slice(prefix.as_slice());
-        let value_start = prefix.len() + 1;
-        let value_end = value_start + value.len();
-        data[value_start..value_end].copy_from_slice(value);
-        data = &mut data[..value_end];
-        Self { data }
+#[derive(Debug, PartialEq, Eq)]
+enum NodeType {
+    Leaf,
+    Branch,
+}
+
+impl Node {
+    pub fn new_leaf(prefix: Nibbles, value: &[u8]) -> Self {
+        Self::Leaf {
+            prefix,
+            value: value.to_vec(),
+        }
     }
 
-    pub fn prefix(&self) -> Nibbles {
-        let prefix_length = self.prefix_length();
-        let prefix_data = &self.data[1..=prefix_length as usize];
-        Nibbles::from_nibbles(prefix_data)
+    pub fn new_branch(prefix: Nibbles) -> Self {
+        Self::Branch {
+            prefix,
+            children: [const { None }; 16],
+        }
     }
 
-    pub fn child(&self, index: u8) -> Option<Location> {
-        todo!()
+    pub fn prefix(&self) -> &Nibbles {
+        match self {
+            Self::Leaf { prefix, .. } => prefix,
+            Self::Branch { prefix, .. } => prefix,
+        }
     }
 
-    pub fn value(&self) -> Option<&'n [u8]> {
-        let prefix_length = self.prefix_length();
-        let value_length = self.data.len() - prefix_length as usize - 1;
-        Some(&self.data[prefix_length as usize + 1..prefix_length as usize + value_length + 1])
+    pub fn set_prefix(&mut self, new_prefix: Nibbles) {
+        match self {
+            Self::Leaf { prefix, .. } => *prefix = new_prefix,
+            Self::Branch { prefix, .. } => *prefix = new_prefix,
+        }
     }
 
-    fn prefix_length(&self) -> u8 {
-        self.data[0]
+    pub fn child(&self, index: u8) -> Option<&Pointer> {
+        match self {
+            Self::Branch { children, .. } => children[index as usize].as_ref(),
+            _ => panic!("cannot get child of leaf node"),
+        }
+    }
+
+    pub fn set_child(&mut self, index: u8, child: Pointer) {
+        match self {
+            Self::Branch { children, .. } => children[index as usize] = Some(child),
+            _ => panic!("cannot set child of non-branch node"),
+        }
+    }
+
+    pub fn value(&self) -> Option<&[u8]> {
+        match self {
+            Self::Leaf { value, .. } => Some(value),
+            _ => panic!("cannot get value of non-leaf node"),
+        }
     }
 }
 
-impl<'n> TryFrom<&'n [u8]> for Node<'n> {
-    type Error = PageError;
+impl Value for Node {
+    fn to_bytes(self) -> Vec<u8> {
+        match self {
+            Self::Leaf { prefix, value, .. } => {
+                let mut data = vec![0; prefix.len() + value.len() + 1];
+                data[0] = prefix.len() as u8;
+                data[1..=prefix.len()].copy_from_slice(prefix.as_slice());
+                data[prefix.len() + 1..].copy_from_slice(&value);
+                data
+            }
+            Self::Branch { prefix, children } => {
+                let mut data = vec![0; prefix.len() + 1];
+                data[0] = prefix.len() as u8 | 0b1000_0000;
+                data[1..=prefix.len()].copy_from_slice(prefix.as_slice());
+                for child in children.into_iter() {
+                    if let Some(child) = child {
+                        data.extend_from_slice(&child.to_bytes());
+                    } else {
+                        data.extend_from_slice(&[0; 36]);
+                    }
+                }
+                data
+            }
+        }
+    }
 
-    fn try_from(data: &'n [u8]) -> Result<Self, Self::Error> {
-        Ok(Self { data })
+    fn from_bytes(bytes: &[u8]) -> value::Result<Self> {
+        let first_byte = bytes[0];
+        if first_byte & 0b1000_0000 == 0 {
+            let prefix_length = first_byte as usize & 0b0111_1111;
+            let prefix = Nibbles::from_nibbles(&bytes[1..=prefix_length]);
+            let value = bytes[prefix_length + 1..].to_vec();
+            Ok(Self::Leaf { prefix, value })
+        } else {
+            let prefix_length = first_byte as usize & 0b0111_1111;
+            let prefix = Nibbles::from_nibbles(&bytes[1..=prefix_length]);
+            let mut children = [const { None }; 16];
+            for i in 0..16 {
+                let child_offset = 1 + prefix_length + i * 36;
+                let child_length = bytes[child_offset..child_offset + 36].to_vec();
+                if child_length.iter().all(|b| *b == 0) {
+                    continue;
+                }
+                let child = Pointer::from_bytes(&child_length)?;
+                children[i] = Some(child);
+            }
+            Ok(Self::Branch { prefix, children })
+        }
     }
 }
 
-impl<'n> From<Node<'n>> for &'n [u8] {
-    fn from(node: Node<'n>) -> Self {
-        node.data
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::hex;
+
+    use super::*;
+
+    #[test]
+    fn test_leaf_node_to_bytes() {
+        let node = Node::new_leaf(Nibbles::from_nibbles([0xa, 0xb]), &[4, 5, 6]);
+        let bytes = node.to_bytes();
+        assert_eq!(bytes, hex!("020a0b040506"));
+
+        let node = Node::new_leaf(Nibbles::from_nibbles([0xa, 0xb, 0xc]), &[4, 5, 6, 7]);
+        let bytes = node.to_bytes();
+        assert_eq!(bytes, hex!("030a0b0c04050607"));
+
+        let node = Node::new_leaf(Nibbles::new(), &[0xf, 0xf, 0xf, 0xf]);
+        let bytes = node.to_bytes();
+        assert_eq!(bytes, hex!("000f0f0f0f"));
+    }
+
+    #[test]
+    fn test_branch_node_to_bytes() {
+        let node = Node::new_branch(Nibbles::from_nibbles([0xa, 0xb]));
+        let bytes = node.to_bytes();
+        let mut expected = Vec::from(hex!("820a0b"));
+        expected.extend(vec![0; 36 * 16]);
+        assert_eq!(bytes, expected);
+
+        let mut node = Node::new_branch(Nibbles::from_nibbles([0xa, 0xb]));
+        node.set_child(0, Pointer::new_unhashed(7.into()));
+        let bytes = node.to_bytes();
+        let mut expected = Vec::from(hex!("820a0b"));
+        expected.extend([0, 0, 0, 7]);
+        expected.extend(vec![0; 36 * 16 - 4]);
+        assert_eq!(bytes, expected);
     }
 }
-
-impl<'n> Value<'n> for Node<'n> {}

@@ -1,18 +1,18 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Location(u64);
+pub struct Location(u32);
 
 impl Location {
-    pub fn for_page(page_id: u64) -> Self {
+    pub fn for_page(page_id: u32) -> Self {
         assert!(page_id >= 256);
 
         Self(page_id)
     }
 
     pub fn for_cell(cell_index: u8) -> Self {
-        Self(cell_index as u64)
+        Self(cell_index as u32)
     }
 
-    pub fn page_id(&self) -> Option<u64> {
+    pub fn page_id(&self) -> Option<u32> {
         if self.0 < 256 {
             None
         } else {
@@ -26,6 +26,18 @@ impl Location {
         } else {
             Some(self.0 as u8)
         }
+    }
+}
+
+impl From<u32> for Location {
+    fn from(value: u32) -> Self {
+        Self(value)
+    }
+}
+
+impl From<Location> for u32 {
+    fn from(location: Location) -> Self {
+        location.0
     }
 }
 
