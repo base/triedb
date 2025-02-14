@@ -51,7 +51,7 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
         }
     }
 
-    pub fn get_account<'a, A: Account + Value>(
+    pub fn get_account<A: Account + Value>(
         &'tx self,
         address_path: AddressPath,
     ) -> Result<Option<A>, ()> {
@@ -68,12 +68,12 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
 }
 
 impl<'tx, P: PageManager> Transaction<'tx, RW, P> {
-    pub fn set_account<'a, A: Account + Value>(
+    pub fn set_account<A: Account + Value>(
         &mut self,
         address_path: AddressPath,
         account: Option<A>,
     ) -> Result<(), ()> {
-        let storage_engine = self.database.inner.storage_engine.write().unwrap();
+        let storage_engine = self.database.inner.storage_engine.read().unwrap();
         storage_engine
             .set_account(&mut self.metadata, address_path, account)
             .unwrap();

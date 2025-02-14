@@ -111,14 +111,13 @@ impl Value for Node {
             let prefix_length = first_byte as usize & 0b0111_1111;
             let prefix = Nibbles::from_nibbles(&bytes[1..=prefix_length]);
             let mut children = [const { None }; 16];
-            for i in 0..16 {
+            for (i, child) in children.iter_mut().enumerate() {
                 let child_offset = 1 + prefix_length + i * 36;
                 let child_length = bytes[child_offset..child_offset + 36].to_vec();
                 if child_length.iter().all(|b| *b == 0) {
                     continue;
                 }
-                let child = Pointer::from_bytes(&child_length)?;
-                children[i] = Some(child);
+                *child = Some(Pointer::from_bytes(&child_length)?);
             }
             Ok(Self::Branch { prefix, children })
         }

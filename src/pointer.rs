@@ -54,7 +54,7 @@ impl From<Pointer> for [u8; 36] {
         let mut data = [0; 36];
         let location: u32 = pointer.location().into();
         data[..4].copy_from_slice(&location.to_be_bytes());
-        data[4..].copy_from_slice(&pointer.hash().as_slice());
+        data[4..].copy_from_slice(pointer.hash().as_slice());
         data
     }
 }

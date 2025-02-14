@@ -22,7 +22,6 @@ pub trait SlottedStorage<'s, V> {
 // A page that contains a sequence of pointers to variable-length values,
 // where the pointers are stored in a contiguous array of 3-byte cell pointers from the
 // beginning of the page, and the values are added from the end of the page.
-#[derive(Debug)]
 pub struct SlottedPage<'p, P: PageKind> {
     page: Page<'p, P>,
 }
@@ -76,6 +75,42 @@ impl<'p, P: PageKind> SlottedPage<'p, P> {
     // Returns the number of cells in the page, which may include deleted cells.
     fn num_cells(&self) -> u8 {
         self.page.contents()[0]
+    }
+
+    fn cell_pointers_iter(&self) -> impl Iterator<Item = CellPointer> {
+        self.page.contents()[1..=3 * self.num_cells() as usize]
+            .chunks(3)
+            .map(|chunk| chunk.try_into().unwrap())
+    }
+
+    fn num_free_bytes(&self, num_cells: u8) -> usize {
+        let max_offset = (0..num_cells)
+            .map(|i| self.get_cell_pointer(i).unwrap().offset())
+            .max()
+            .unwrap_or(0);
+        self.page.contents().len() - 1 - 3 * num_cells as usize - max_offset as usize
+    }
+
+    fn num_dead_bytes(&self, num_cells: u8) -> usize {
+        let total_bytes = self.page.contents().len();
+        let free_bytes = self.num_free_bytes(num_cells);
+        let used_bytes: usize = self
+            .cell_pointers_iter()
+            .map(|cp| cp.length() as usize)
+            .sum();
+        total_bytes - free_bytes - used_bytes - 1 - 3 * num_cells as usize
+    }
+}
+
+impl<'p, P: PageKind> std::fmt::Debug for SlottedPage<'p, P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SlottedPage {{ page_id: {}, num_cells: {}, cell_pointers: {:?}, free_bytes: {}, dead_bytes: {} }}",
+            self.page_id(),
+            self.num_cells(),
+            self.cell_pointers_iter().collect::<Vec<CellPointer>>(),
+            self.num_free_bytes(self.num_cells()),
+            self.num_dead_bytes(self.num_cells())
+        )
     }
 }
 

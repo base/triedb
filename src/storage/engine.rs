@@ -131,7 +131,7 @@ impl<P: PageManager> StorageEngine<P> {
             .map_err(|e| e.into())
     }
 
-    pub fn get_account<'a, A: Account + Value>(
+    pub fn get_account<A: Account + Value>(
         &self,
         metadata: &Metadata,
         address_path: AddressPath,
@@ -144,11 +144,11 @@ impl<P: PageManager> StorageEngine<P> {
         self.get_account_from_page::<A>(metadata, address_path.into(), slotted_page, 0)
     }
 
-    fn get_account_from_page<'p, A: Account + Value>(
+    fn get_account_from_page<A: Account + Value>(
         &self,
         metadata: &Metadata,
         path: Nibbles,
-        slotted_page: SlottedPage<'p, RO>,
+        slotted_page: SlottedPage<'_, RO>,
         page_index: u8,
     ) -> Result<Option<A>, Error> {
         trace!("get_account_from_page(): {:?} {:?}", path, page_index);
@@ -156,7 +156,7 @@ impl<P: PageManager> StorageEngine<P> {
         let node: Node = slotted_page.get_value(page_index)?;
         trace!("node.prefix(): {:?}", node.prefix());
 
-        let common_prefix_length = path.common_prefix_length(&node.prefix());
+        let common_prefix_length = path.common_prefix_length(node.prefix());
         let common_prefix = path.slice(0..common_prefix_length);
         trace!("common_prefix: {:?}", common_prefix);
         if common_prefix_length < node.prefix().len() {
@@ -175,31 +175,29 @@ impl<P: PageManager> StorageEngine<P> {
             Some(child_pointer) => {
                 let child_location = child_pointer.location();
                 if child_location.cell_index().is_some() {
-                    return self.get_account_from_page::<A>(
+                    self.get_account_from_page::<A>(
                         metadata,
                         remaining_path.slice(1..),
                         slotted_page,
                         child_location.cell_index().unwrap(),
-                    );
+                    )
                 } else {
                     let child_page_id = child_location.page_id().unwrap();
-                    let child_page = self.get_page(&metadata, child_page_id)?;
+                    let child_page = self.get_page(metadata, child_page_id)?;
                     let child_slotted_page = SlottedPage::try_from(child_page)?;
-                    return self.get_account_from_page::<A>(
+                    self.get_account_from_page::<A>(
                         metadata,
                         remaining_path.slice(1..),
                         child_slotted_page,
                         0,
-                    );
+                    )
                 }
             }
-            None => {
-                return Ok(None);
-            }
+            None => Ok(None),
         }
     }
 
-    pub fn set_account<'tx, A: Account + Value>(
+    pub fn set_account<A: Account + Value>(
         &self,
         metadata: &mut Metadata,
         address_path: AddressPath,
@@ -218,15 +216,15 @@ impl<P: PageManager> StorageEngine<P> {
         let location =
             self.set_account_in_page(metadata, address_path.into(), account, &mut slotted_page, 0)?;
         metadata.root_subtrie_page_id = location.page_id().unwrap();
-        return Ok(());
+        Ok(())
     }
 
-    fn set_account_in_page<'p, A: Account + Value>(
+    fn set_account_in_page<A: Account + Value>(
         &self,
         metadata: &mut Metadata,
         path: Nibbles,
         account: A,
-        slotted_page: &mut SlottedPage<'p, RW>,
+        slotted_page: &mut SlottedPage<'_, RW>,
         page_index: u8,
     ) -> Result<Location, Error> {
         // TODO: handle the case where insertion fails because the page is full.
@@ -242,7 +240,7 @@ impl<P: PageManager> StorageEngine<P> {
         }
 
         let mut node = res.unwrap();
-        let common_prefix_length = path.common_prefix_length(&node.prefix());
+        let common_prefix_length = path.common_prefix_length(node.prefix());
         // find the common prefix between the path and the node prefix.
         let common_prefix = path.slice(0..common_prefix_length);
         if common_prefix_length < node.prefix().len() {
