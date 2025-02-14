@@ -59,8 +59,22 @@ impl<'p> Page<'p, RO> {
 }
 
 impl<'p> Page<'p, RW> {
+    pub fn new_rw(id: PageId, data: &'p mut [u8; PAGE_SIZE]) -> Self {
+        let snapshot_id = u64::from_le_bytes(data[0..8].try_into().unwrap());
+        Self {
+            id,
+            snapshot_id,
+            data,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
     // Creates a new RW Page with the given id, snapshot id, and data.
-    pub fn new_rw(id: PageId, snapshot_id: SnapshotId, data: &'p mut [u8; PAGE_SIZE]) -> Self {
+    pub fn new_rw_with_snapshot(
+        id: PageId,
+        snapshot_id: SnapshotId,
+        data: &'p mut [u8; PAGE_SIZE],
+    ) -> Self {
         data[0..8].copy_from_slice(&snapshot_id.to_le_bytes());
         Self {
             id,
@@ -68,6 +82,11 @@ impl<'p> Page<'p, RW> {
             data,
             _marker: std::marker::PhantomData,
         }
+    }
+
+    pub fn set_snapshot_id(&mut self, snapshot_id: SnapshotId) {
+        self.snapshot_id = snapshot_id;
+        self.data[0..8].copy_from_slice(&snapshot_id.to_le_bytes());
     }
 
     // Returns a mutable reference to the contents of the page without the header
@@ -92,7 +111,7 @@ mod tests {
         let snapshot_id = 1337;
 
         let mut data = [0; PAGE_SIZE];
-        let mut page_mut = Page::new_rw(page_id, snapshot_id, &mut data);
+        let mut page_mut = Page::new_rw_with_snapshot(page_id, snapshot_id, &mut data);
         assert_eq!(page_mut.page_id(), page_id);
         assert_eq!(page_mut.snapshot_id(), snapshot_id);
         assert_eq!(page_mut.contents()[0], 0);

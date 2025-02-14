@@ -4,6 +4,7 @@ use crate::page::PageError;
 use crate::page::PageId;
 use crate::page::PageManager;
 use crate::page::RootPage;
+use crate::snapshot::SnapshotId;
 use crate::storage::engine::StorageEngine;
 use crate::transaction::Transaction;
 use crate::transaction::TransactionManager;
@@ -18,8 +19,26 @@ pub struct Database<P: PageManager> {
 
 #[derive(Debug)]
 pub(crate) struct Inner<P: PageManager> {
+    pub(crate) metadata: RwLock<Metadata>,
     pub(crate) storage_engine: RwLock<StorageEngine<P>>,
     pub(crate) transaction_manager: RwLock<TransactionManager>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Metadata {
+    pub(crate) root_page_id: PageId,
+    pub(crate) root_subtrie_page_id: PageId,
+    pub(crate) snapshot_id: SnapshotId,
+}
+
+impl Metadata {
+    pub fn next(&self) -> Self {
+        Self {
+            snapshot_id: self.snapshot_id + 1,
+            root_page_id: (self.root_page_id + 1) % 2,
+            root_subtrie_page_id: self.root_subtrie_page_id,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -28,11 +47,33 @@ pub enum Error {
 }
 
 impl Database<MmapPageManager> {
+    pub fn create(file_path: &str) -> Result<Self, Error> {
+        // TODO: handle the case where the file already exists.
+        let mut page_manager = MmapPageManager::open(file_path).map_err(Error::PageError)?;
+        let orphan_manager = OrphanPageManager::new();
+
+        page_manager.resize(100).map_err(Error::PageError)?;
+        let _root0 = page_manager.allocate(0).map_err(Error::PageError)?;
+        let _root1 = page_manager.allocate(0).map_err(Error::PageError)?;
+        let _subtrie = page_manager.allocate(0).map_err(Error::PageError)?;
+
+        let metadata = Metadata {
+            snapshot_id: 0,
+            root_page_id: 0,
+            root_subtrie_page_id: 2,
+        };
+
+        let db = Self::new(metadata, StorageEngine::new(page_manager, orphan_manager));
+
+        let tx = db.begin_rw().unwrap();
+        tx.commit().unwrap();
+
+        Ok(db)
+    }
+
     pub fn open(file_path: &str) -> Result<Self, Error> {
         let page_manager = MmapPageManager::open(file_path).map_err(Error::PageError)?;
         let orphan_manager = OrphanPageManager::new();
-
-        // TODO: parse the root page to determine the correct metadata
 
         let root_page_0 = page_manager.get(0, 0).map_err(Error::PageError)?;
         let root_page_1 = page_manager.get(0, 1).map_err(Error::PageError)?;
@@ -46,47 +87,115 @@ impl Database<MmapPageManager> {
             root_1
         };
 
-        let storage_engine = StorageEngine::new(
-            root_page.snapshot_id(),
-            0,
-            root_page.page_id(),
-            page_manager,
-            orphan_manager,
-        );
-        Ok(Database::new(storage_engine))
+        // TODO: parse the root page to determine the correct metadata
+        let metadata = Metadata {
+            snapshot_id: root_page.snapshot_id(),
+            root_page_id: root_page.page_id(),
+            root_subtrie_page_id: 0,
+        };
+
+        let storage_engine = StorageEngine::new(page_manager, orphan_manager);
+        Ok(Database::new(metadata, storage_engine))
     }
 }
 
 impl<P: PageManager> Database<P> {
-    pub fn new(storage_engine: StorageEngine<P>) -> Self {
+    pub fn new(metadata: Metadata, storage_engine: StorageEngine<P>) -> Self {
         Self {
             inner: Arc::new(Inner {
+                metadata: RwLock::new(metadata),
                 storage_engine: RwLock::new(storage_engine),
                 transaction_manager: RwLock::new(TransactionManager::new()),
             }),
         }
     }
 
-    pub fn begin_rw(&self) -> Result<Transaction<'_, RW, P, StorageEngine<P>>, ()> {
-        let storage_engine = self.inner.storage_engine.read().unwrap();
+    pub fn begin_rw<'tx>(&'tx self) -> Result<Transaction<'tx, RW, P>, ()> {
         let mut transaction_manager = self.inner.transaction_manager.write().unwrap();
-        let snapshot_id = storage_engine.snapshot_id() + 1;
-        let min_snapshot_id = transaction_manager.begin_rw(snapshot_id)?;
-        storage_engine.unlock(min_snapshot_id);
-        Ok(Transaction::new(snapshot_id, self, None))
+        let storage_engine = self.inner.storage_engine.read().unwrap();
+        let metadata = self.inner.metadata.read().unwrap().next();
+        let min_snapshot_id = transaction_manager.begin_rw(metadata.snapshot_id)?;
+        storage_engine.unlock(min_snapshot_id - 1);
+        Ok(Transaction::new(metadata, self, None))
     }
 
-    pub fn begin_ro(&self) -> Result<Transaction<'_, RO, P, StorageEngine<P>>, ()> {
-        let storage_engine = self.inner.storage_engine.read().unwrap();
+    pub fn begin_ro<'tx>(&'tx self) -> Result<Transaction<'tx, RO, P>, ()> {
         let mut transaction_manager = self.inner.transaction_manager.write().unwrap();
-        let snapshot_id = storage_engine.snapshot_id();
-        transaction_manager.begin_ro(snapshot_id)?;
-        Ok(Transaction::new(snapshot_id, self, Some(storage_engine)))
+        let storage_engine = self.inner.storage_engine.read().unwrap();
+        let metadata = self.inner.metadata.read().unwrap().clone();
+        transaction_manager.begin_ro(metadata.snapshot_id)?;
+        Ok(Transaction::new(metadata, self, Some(storage_engine)))
     }
 
     pub(crate) fn resize(&self, new_page_count: PageId) -> Result<(), ()> {
         let mut storage_engine = self.inner.storage_engine.write().unwrap();
         storage_engine.resize(new_page_count).unwrap();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::{address, B256, U256};
+
+    use crate::{account::AccountSlice, path::AddressPath};
+
+    use super::*;
+
+    #[test]
+    fn test_set_get_account() {
+        let _ = std::fs::remove_file("test.db");
+        let db = Database::create("test.db").unwrap();
+        let mut tx = db.begin_rw().unwrap();
+
+        let mut account_data = vec![0; 104];
+        let account1 = AccountSlice::new(
+            U256::from(100),
+            1,
+            B256::ZERO,
+            B256::ZERO,
+            &mut account_data,
+        );
+        let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
+        tx.set_account(AddressPath::for_address(address), Some(account1.clone()))
+            .unwrap();
+
+        tx.commit().unwrap();
+
+        let mut account_data = vec![0; 104];
+        let account2 = AccountSlice::new(
+            U256::from(123),
+            456,
+            B256::ZERO,
+            B256::ZERO,
+            &mut account_data,
+        );
+
+        let mut tx = db.begin_rw().unwrap();
+        tx.set_account(AddressPath::for_address(address), Some(account2.clone()))
+            .unwrap();
+
+        let ro_tx = db.begin_ro().unwrap();
+        tx.commit().unwrap();
+
+        // The read transaction was created before the write was committed, so it should not see the changes.
+        let read_account = ro_tx
+            .get_account(AddressPath::for_address(address!(
+                "0xd8da6bf26964af9d7eed9e03e53415d37aa96045"
+            )))
+            .unwrap();
+
+        assert_eq!(account1, read_account);
+
+        // The writer transaction is committed, so the read transaction should see the changes.
+        let ro_tx = db.begin_ro().unwrap();
+
+        let read_account = ro_tx
+            .get_account(AddressPath::for_address(address!(
+                "0xd8da6bf26964af9d7eed9e03e53415d37aa96045"
+            )))
+            .unwrap();
+
+        assert_eq!(account2, read_account);
     }
 }

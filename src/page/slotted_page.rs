@@ -1,3 +1,4 @@
+use core::slice;
 use std::cmp::max;
 use std::fmt::Debug;
 
@@ -31,7 +32,7 @@ pub struct SlottedPage<'p, P: PageKind> {
 
 impl<'p, P: PageKind> SlottedPage<'p, P> {
     // Returns the value at the given index.
-    pub fn get_value<'v, V: Value<'v>>(&'p self, index: u8) -> Result<V, PageError>
+    pub fn get_value<'v, V: Value<'v>>(&self, index: u8) -> Result<V, PageError>
     where
         'p: 'v,
     {
@@ -44,8 +45,13 @@ impl<'p, P: PageKind> SlottedPage<'p, P> {
         let length = cell_pointer.length();
 
         let start_index = (PAGE_DATA_SIZE as u16 - offset) as usize;
-        let end_index = (PAGE_DATA_SIZE as u16 - offset + length) as usize;
-        let data = &self.page.contents()[start_index..end_index];
+
+        let data = unsafe {
+            slice::from_raw_parts(
+                self.page.contents().as_ptr().add(start_index),
+                length as usize,
+            )
+        };
         data.try_into().map_err(|_| PageError::InvalidCellPointer)
     }
 
@@ -84,10 +90,11 @@ impl<'p> SlottedPage<'p, RW> {
         'p: 'v,
     {
         let cell_pointer = self.get_cell_pointer(index)?;
+
         let offset = cell_pointer.offset();
         let length = cell_pointer.length();
-        let start_index = (4096 - offset - length) as usize;
-        let end_index = (4096 - offset) as usize;
+        let start_index = (PAGE_DATA_SIZE as u16 - offset) as usize;
+        let end_index = (PAGE_DATA_SIZE as u16 - offset + length) as usize;
         let data = &mut self.page.contents_mut()[start_index..end_index];
         data.copy_from_slice(value.try_into().unwrap());
         Ok(())
@@ -191,6 +198,12 @@ impl<'p> SlottedPage<'p, RW> {
     }
 }
 
+impl<'p, P: PageKind> From<SlottedPage<'p, P>> for Page<'p, P> {
+    fn from(page: SlottedPage<'p, P>) -> Self {
+        page.page
+    }
+}
+
 impl<'p> From<SlottedPage<'p, RW>> for SlottedPage<'p, RO> {
     fn from(page: SlottedPage<'p, RW>) -> Self {
         Self {
@@ -216,19 +229,55 @@ mod tests {
     #[test]
     fn test_insert_get_value() {
         let mut data = [0; PAGE_SIZE];
-        let page = Page::new_rw(42, 123, &mut data);
+        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
         let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
-        let value: &[u8] = &[1, 2, 3];
-        let cell_index = subtrie_page.insert_value(value).unwrap();
 
-        let v: &[u8] = subtrie_page.get_value(cell_index).unwrap();
-        assert_eq!(v, value);
+        let v1: &[u8] = &[1, 2, 3];
+        let i1 = subtrie_page.insert_value(v1).unwrap();
+        assert_eq!(i1, 0);
+
+        let v: &[u8] = subtrie_page.get_value(i1).unwrap();
+        assert_eq!(v, v1);
+
+        let v2: &[u8] = &[4, 5, 6];
+        let i2 = subtrie_page.insert_value(v2).unwrap();
+        assert_eq!(i2, 1);
+
+        let v: &[u8] = subtrie_page.get_value(i2).unwrap();
+        assert_eq!(v, v2);
+
+        // ensure the first cell is not modified
+        let v: &[u8] = subtrie_page.get_value(i1).unwrap();
+        assert_eq!(v, v1);
+
+        // sanity check the page
+        assert_eq!(subtrie_page.num_cells(), 2);
+    }
+
+    #[test]
+    fn test_insert_set_value() {
+        let mut data = [0; PAGE_SIZE];
+        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
+        let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
+
+        let v1: &[u8] = &[1, 2, 3];
+        let i1 = subtrie_page.insert_value(v1).unwrap();
+        assert_eq!(i1, 0);
+
+        let v: &[u8] = subtrie_page.get_value(i1).unwrap();
+        assert_eq!(v, v1);
+
+        let v2: &[u8] = &[4, 5, 6];
+        subtrie_page.set_value(i1, v2).unwrap();
+
+        let v: &[u8] = subtrie_page.get_value(i1).unwrap();
+        assert_eq!(v, v2);
     }
 
     #[test]
     fn test_allocate_get_delete_cell_pointer() {
         let mut data = [0; PAGE_SIZE];
-        let page = Page::new_rw(42, 123, &mut data);
+        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
         let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
         let cell_index = subtrie_page.insert_value(&[1, 2, 3][..]).unwrap();
         assert_eq!(cell_index, 0);
