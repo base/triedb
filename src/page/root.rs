@@ -46,7 +46,7 @@ impl<'p, P: PageKind> RootPage<'p, P> {
 impl<'p> RootPage<'p, RO> {
     pub fn get_orphaned_page_ids<T: PageManager>(
         &self,
-        page_manager: T,
+        page_manager: &T,
     ) -> Result<Vec<PageId>, PageError> {
         // A "slot" can be thought of as a single orphan page_id which is 4 bytes.
         // We start at slot 10 (byte index 40 == 10*4) because the root page contains metadata before the orphan
@@ -69,7 +69,7 @@ impl<'p> RootPage<'p, RO> {
         page: &Page<'p, RO>,
         mut current_slot_index: usize,
         orphan_page_ids: &mut Vec<PageId>,
-        page_manager: T,
+        page_manager: &T,
     ) -> Result<(), PageError> {
         let contents = page.contents();
 
@@ -180,7 +180,7 @@ mod tests {
 
         /// WHEN: the list of orphan ids are requested
         let root_page_ro: RootPage<RO> = root_page.into();
-        let orphan_page_ids = root_page_ro.get_orphaned_page_ids(page_manager).unwrap();
+        let orphan_page_ids = root_page_ro.get_orphaned_page_ids(&page_manager).unwrap();
 
         /// THEN: the returned list of orphan page ids should match the original list
         assert_eq!(my_orphan_page_ids.to_vec(), orphan_page_ids);
@@ -195,7 +195,7 @@ mod tests {
 
         /// WHEN: the list of orphan ids are requested
         let root_page_ro: RootPage<RO> = root_page.into();
-        let orphan_page_ids = root_page_ro.get_orphaned_page_ids(page_manager).unwrap();
+        let orphan_page_ids = root_page_ro.get_orphaned_page_ids(&page_manager).unwrap();
 
         /// THEN: the returned list of orphan page ids should be empty
         assert_eq!(orphan_page_ids.len(), 0);
@@ -235,7 +235,7 @@ mod tests {
 
         /// WHEN: the list of orphan ids are requested
         let root_page_ro: RootPage<RO> = root_page.into();
-        let orphan_page_ids = root_page_ro.get_orphaned_page_ids(page_manager).unwrap();
+        let orphan_page_ids = root_page_ro.get_orphaned_page_ids(&page_manager).unwrap();
 
         /// THEN: the returned list of orphan page ids should match the original list
         assert_eq!(my_orphan_page_ids, orphan_page_ids);

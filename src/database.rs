@@ -2,6 +2,7 @@ use crate::page::MmapPageManager;
 use crate::page::OrphanPageManager;
 use crate::page::PageError;
 use crate::page::PageId;
+use crate::page::PageKind;
 use crate::page::PageManager;
 use crate::page::RootPage;
 use crate::snapshot::SnapshotId;
@@ -73,7 +74,6 @@ impl Database<MmapPageManager> {
 
     pub fn open(file_path: &str) -> Result<Self, Error> {
         let page_manager = MmapPageManager::open(file_path).map_err(Error::PageError)?;
-        let orphan_manager = OrphanPageManager::new();
 
         let root_page_0 = page_manager.get(0, 0).map_err(Error::PageError)?;
         let root_page_1 = page_manager.get(0, 1).map_err(Error::PageError)?;
@@ -87,12 +87,12 @@ impl Database<MmapPageManager> {
             root_1
         };
 
-        // TODO: parse the root page to determine the correct metadata
-        let metadata = Metadata {
-            snapshot_id: root_page.snapshot_id(),
-            root_page_id: root_page.page_id(),
-            root_subtrie_page_id: 0,
-        };
+        let orphaned_page_ids = root_page
+            .get_orphaned_page_ids(&page_manager)
+            .map_err(Error::PageError)?;
+        let orphan_manager = OrphanPageManager::new_with_unlocked_page_ids(orphaned_page_ids);
+
+        let metadata: Metadata = root_page.into();
 
         let storage_engine = StorageEngine::new(page_manager, orphan_manager);
         Ok(Database::new(metadata, storage_engine))
@@ -131,6 +131,16 @@ impl<P: PageManager> Database<P> {
         let mut storage_engine = self.inner.storage_engine.write().unwrap();
         storage_engine.resize(new_page_count).unwrap();
         Ok(())
+    }
+}
+
+impl<'p, P: PageKind> From<RootPage<'p, P>> for Metadata {
+    fn from(root_page: RootPage<'p, P>) -> Self {
+        Self {
+            root_page_id: root_page.page_id(),
+            root_subtrie_page_id: root_page.root_subtrie_page_id(),
+            snapshot_id: root_page.snapshot_id(),
+        }
     }
 }
 
