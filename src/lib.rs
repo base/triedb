@@ -1,4 +1,5 @@
 mod account;
+mod branch;
 mod database;
 mod location;
 mod node;
