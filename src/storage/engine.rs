@@ -9,6 +9,7 @@ use crate::{
     snapshot::SnapshotId,
 };
 use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
+use std::cmp::max;
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -210,6 +211,11 @@ impl<P: PageManager> StorageEngine<P> {
         inner.resize(new_page_count)
     }
 
+    pub fn size(&self) -> u32 {
+        let inner = self.inner.read().unwrap();
+        inner.page_manager.size()
+    }
+
     pub fn close(&self, metadata: &Metadata) -> Result<(), Error> {
         let mut inner = self.inner.write().unwrap();
 
@@ -222,7 +228,8 @@ impl<P: PageManager> StorageEngine<P> {
             .get(metadata.snapshot_id, metadata.root_page_id)?;
         let root_page = RootPage::try_from(underlying_root_page).map_err(Error::PageError)?;
 
-        let max_page_count = root_page.max_page_number();
+        // there will always be a minimum of 2 root pages
+        let max_page_count = max(root_page.max_page_number(), 2);
         // resize the page manager so that we only store the exact amount of pages we need.
         inner.resize(max_page_count)?;
         // commit all outstanding data to disk.

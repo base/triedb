@@ -147,6 +147,11 @@ impl<P: PageManager> Database<P> {
         storage_engine.resize(new_page_count).unwrap();
         Ok(())
     }
+
+    pub fn size(&self) -> u32 {
+        let storage_engine = self.inner.storage_engine.read().unwrap();
+        storage_engine.size()
+    }
 }
 
 impl<'p, P: PageKind> From<RootPage<'p, P>> for Metadata {
@@ -162,6 +167,7 @@ impl<'p, P: PageKind> From<RootPage<'p, P>> for Metadata {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{address, B256, U256};
+    use std::fs::File;
 
     use crate::{account::AccountSlice, path::AddressPath};
 
@@ -222,5 +228,53 @@ mod tests {
             .unwrap();
 
         assert_eq!(account2, read_account);
+    }
+
+    #[test]
+    fn test_open_resize() {
+        // GIVEN: a database
+        let _ = std::fs::remove_file("test.db");
+        // create the database on disk. currently this
+        // will create a database with N pages (see 'create' for N).
+        Database::create("test.db").unwrap();
+
+        // WHEN: the database is opened
+        let db = Database::open("test.db").unwrap();
+
+        // THEN: the size of the database should be the
+        // max_page_size + buffer
+        let open_size = db.size();
+
+        let max_page_size = 0; // fresh db
+        let buffer = 20;
+        assert_eq!(open_size, max_page_size + 20);
+
+        // cleanup
+        let _ = std::fs::remove_file("test.db");
+    }
+
+    #[test]
+    fn test_close_resize() {
+        // GIVEN: a database
+        let _ = std::fs::remove_file("test.db");
+        // create the database on disk. currently this
+        // will create a database with N pages (see 'create' for N).
+        let db = Database::create("test.db").unwrap();
+        let create_size = db.size();
+
+        assert_eq!(create_size, 100);
+
+        // WHEN: the database is closed
+        db.close().unwrap();
+
+        // THEN: the size of the database should be the
+        // max_page_size
+        let max_page_size = 2; // fresh db so at least 2 pages for the root pages
+        let file = File::options().read(true).open("test.db").unwrap();
+        let file_len = file.metadata().unwrap().len();
+        assert_eq!(file_len, max_page_size * 4096);
+
+        // cleanup
+        let _ = std::fs::remove_file("test.db");
     }
 }

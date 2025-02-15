@@ -37,6 +37,9 @@ pub trait PageManager: Debug {
     /// Resizes the page manager to the given number of pages.
     fn resize(&mut self, new_page_count: PageId) -> Result<(), PageError>;
 
+    /// Returns the total number of pages
+    fn size(&self) -> u32;
+
     // /// Merges two pages into a new page.
     // fn merge(
     //     &mut self,
