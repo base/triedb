@@ -223,6 +223,7 @@ impl<P: PageManager> StorageEngine<P> {
         let root_page = RootPage::try_from(underlying_root_page).map_err(Error::PageError)?;
 
         let max_page_count = root_page.max_page_number();
+        // resize the page manager so that we only store the exact amount of pages we need.
         inner.resize(max_page_count)?;
         inner.commit(metadata)?;
 
