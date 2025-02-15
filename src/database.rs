@@ -6,6 +6,7 @@ use crate::page::PageKind;
 use crate::page::PageManager;
 use crate::page::RootPage;
 use crate::snapshot::SnapshotId;
+use crate::storage::engine;
 use crate::storage::engine::StorageEngine;
 use crate::transaction::Transaction;
 use crate::transaction::TransactionManager;
@@ -45,6 +46,7 @@ impl Metadata {
 #[derive(Debug)]
 pub enum Error {
     PageError(PageError),
+    CloseError(engine::Error),
 }
 
 impl Database<MmapPageManager> {
@@ -87,6 +89,8 @@ impl Database<MmapPageManager> {
             root_1
         };
 
+        let max_page_count = root_page.max_page_number();
+
         let orphaned_page_ids = root_page
             .get_orphaned_page_ids(&page_manager)
             .map_err(Error::PageError)?;
@@ -95,7 +99,18 @@ impl Database<MmapPageManager> {
         let metadata: Metadata = root_page.into();
 
         let storage_engine = StorageEngine::new(page_manager, orphan_manager);
-        Ok(Database::new(metadata, storage_engine))
+        let database = Database::new(metadata, storage_engine);
+        // add a buffer of 20 pages
+        database.resize(max_page_count + 20).unwrap();
+        Ok(database)
+    }
+
+    pub fn close(&self) -> Result<(), Error> {
+        let metadata = self.inner.metadata.read().unwrap();
+        let storage_engine = self.inner.storage_engine.read().unwrap();
+
+        storage_engine.close(&metadata).map_err(Error::CloseError)?;
+        Ok(())
     }
 }
 
