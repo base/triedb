@@ -9,3 +9,6 @@ alloy-rlp = "0.3.11"
 alloy-trie = "0.7.6"
 memmap2 = "0.9.5"
 sealed = "0.6.0"
+
+[dev-dependencies]
+serial_test = "*"

@@ -167,6 +167,7 @@ impl<'p, P: PageKind> From<RootPage<'p, P>> for Metadata {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{address, B256, U256};
+    use serial_test::serial;
     use std::fs::File;
 
     use crate::{account::AccountSlice, path::AddressPath};
@@ -174,6 +175,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[serial]
     fn test_set_get_account() {
         let _ = std::fs::remove_file("test.db");
         let db = Database::create("test.db").unwrap();
@@ -231,6 +233,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_open_resize() {
         // GIVEN: a database
         let _ = std::fs::remove_file("test.db");
@@ -254,6 +257,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_close_resize() {
         // GIVEN: a database
         let _ = std::fs::remove_file("test.db");
