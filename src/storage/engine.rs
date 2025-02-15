@@ -225,6 +225,7 @@ impl<P: PageManager> StorageEngine<P> {
         let max_page_count = root_page.max_page_number();
         // resize the page manager so that we only store the exact amount of pages we need.
         inner.resize(max_page_count)?;
+        // commit all outstanding data to disk.
         inner.commit(metadata)?;
 
         inner.status = Status::Closed;
