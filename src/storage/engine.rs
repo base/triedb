@@ -227,7 +227,7 @@ impl<P: PageManager> StorageEngine<P> {
         inner.resize(max_page_count)?;
         // commit all outstanding data to disk.
         inner.commit(metadata)?;
-
+        // mark engine as closed, causing all operations on engine to return an error.
         inner.status = Status::Closed;
 
         Ok(())
