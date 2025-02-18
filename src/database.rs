@@ -2,9 +2,11 @@ use crate::page::MmapPageManager;
 use crate::page::OrphanPageManager;
 use crate::page::PageError;
 use crate::page::PageId;
+use crate::page::PageKind;
 use crate::page::PageManager;
 use crate::page::RootPage;
 use crate::snapshot::SnapshotId;
+use crate::storage::engine;
 use crate::storage::engine::StorageEngine;
 use crate::transaction::Transaction;
 use crate::transaction::TransactionManager;
@@ -44,6 +46,7 @@ impl Metadata {
 #[derive(Debug)]
 pub enum Error {
     PageError(PageError),
+    CloseError(engine::Error),
 }
 
 impl Database<MmapPageManager> {
@@ -73,7 +76,6 @@ impl Database<MmapPageManager> {
 
     pub fn open(file_path: &str) -> Result<Self, Error> {
         let page_manager = MmapPageManager::open(file_path).map_err(Error::PageError)?;
-        let orphan_manager = OrphanPageManager::new();
 
         let root_page_0 = page_manager.get(0, 0).map_err(Error::PageError)?;
         let root_page_1 = page_manager.get(0, 1).map_err(Error::PageError)?;
@@ -87,15 +89,28 @@ impl Database<MmapPageManager> {
             root_1
         };
 
-        // TODO: parse the root page to determine the correct metadata
-        let metadata = Metadata {
-            snapshot_id: root_page.snapshot_id(),
-            root_page_id: root_page.page_id(),
-            root_subtrie_page_id: 0,
-        };
+        let max_page_count = root_page.max_page_number();
+
+        let orphaned_page_ids = root_page
+            .get_orphaned_page_ids(&page_manager)
+            .map_err(Error::PageError)?;
+        let orphan_manager = OrphanPageManager::new_with_unlocked_page_ids(orphaned_page_ids);
+
+        let metadata: Metadata = root_page.into();
 
         let storage_engine = StorageEngine::new(page_manager, orphan_manager);
-        Ok(Database::new(metadata, storage_engine))
+        let database = Database::new(metadata, storage_engine);
+        // add a buffer of 20 pages
+        database.resize(max_page_count + 20).unwrap();
+        Ok(database)
+    }
+
+    pub fn close(&self) -> Result<(), Error> {
+        let metadata = self.inner.metadata.read().unwrap();
+        let storage_engine = self.inner.storage_engine.read().unwrap();
+
+        storage_engine.close(&metadata).map_err(Error::CloseError)?;
+        Ok(())
     }
 }
 
@@ -132,11 +147,28 @@ impl<P: PageManager> Database<P> {
         storage_engine.resize(new_page_count).unwrap();
         Ok(())
     }
+
+    pub fn size(&self) -> u32 {
+        let storage_engine = self.inner.storage_engine.read().unwrap();
+        storage_engine.size()
+    }
+}
+
+impl<'p, P: PageKind> From<RootPage<'p, P>> for Metadata {
+    fn from(root_page: RootPage<'p, P>) -> Self {
+        Self {
+            root_page_id: root_page.page_id(),
+            root_subtrie_page_id: root_page.root_subtrie_page_id(),
+            snapshot_id: root_page.snapshot_id(),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{address, B256, U256};
+    use std::fs::File;
+    use tempdir::TempDir;
 
     use crate::{account::AccountSlice, path::AddressPath};
 
@@ -144,8 +176,9 @@ mod tests {
 
     #[test]
     fn test_set_get_account() {
-        let _ = std::fs::remove_file("test.db");
-        let db = Database::create("test.db").unwrap();
+        let tmp_dir = TempDir::new("test_db").unwrap();
+        let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
+        let db = Database::create(file_path.as_str()).unwrap();
         let mut tx = db.begin_rw().unwrap();
 
         let mut account_data = vec![0; 104];
@@ -197,5 +230,60 @@ mod tests {
             .unwrap();
 
         assert_eq!(account2, read_account);
+
+        // cleanup
+        tmp_dir.close().unwrap();
+    }
+
+    #[test]
+    fn test_open_resize() {
+        // GIVEN: a database
+        //
+        // create the database on disk. currently this
+        // will create a database with N pages (see 'create' for N).
+        let tmp_dir = TempDir::new("test_db").unwrap();
+        let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
+        let db = Database::create(file_path.as_str()).unwrap();
+
+        // WHEN: the database is opened
+        let db = Database::open(file_path.as_str()).unwrap();
+
+        // THEN: the size of the database should be the
+        // max_page_size + buffer
+        let open_size = db.size();
+
+        let max_page_size = 0; // fresh db
+        let buffer = 20;
+        assert_eq!(open_size, max_page_size + 20);
+
+        // cleanup
+        tmp_dir.close().unwrap();
+    }
+
+    #[test]
+    fn test_close_resize() {
+        // GIVEN: a database
+        //
+        // create the database on disk. currently this
+        // will create a database with N pages (see 'create' for N).
+        let tmp_dir = TempDir::new("test_db").unwrap();
+        let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
+        let db = Database::create(file_path.as_str()).unwrap();
+        let create_size = db.size();
+
+        assert_eq!(create_size, 100);
+
+        // WHEN: the database is closed
+        db.close().unwrap();
+
+        // THEN: the size of the database should be the
+        // max_page_size
+        let max_page_size = 2; // fresh db so at least 2 pages for the root pages
+        let file = File::options().read(true).open(file_path.as_str()).unwrap();
+        let file_len = file.metadata().unwrap().len();
+        assert_eq!(file_len, max_page_size * 4096);
+
+        // cleanup
+        tmp_dir.close().unwrap();
     }
 }

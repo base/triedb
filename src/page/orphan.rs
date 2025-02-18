@@ -18,6 +18,14 @@ impl OrphanPageManager {
         }
     }
 
+    // Creates a new OrphanPageManager with provided unlocked page ids.
+    pub fn new_with_unlocked_page_ids(unlocked_page_ids: Vec<PageId>) -> Self {
+        Self {
+            unlocked_page_ids: unlocked_page_ids,
+            locked_page_ids: BTreeMap::new(),
+        }
+    }
+
     // Returns an unlocked orphaned page id, if one exists.
     pub fn get_orphaned_page_id(&mut self) -> Option<PageId> {
         self.unlocked_page_ids.pop()

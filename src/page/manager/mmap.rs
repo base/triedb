@@ -119,6 +119,10 @@ impl PageManager for MmapPageManager {
         Ok(())
     }
 
+    fn size(&self) -> u32 {
+        (self.mmap.len() / PAGE_SIZE) as u32
+    }
+
     // Commits the memory mapped file to disk.
     fn commit(&mut self, snapshot_id: SnapshotId) -> Result<(), PageError> {
         self.mmap.flush().map_err(PageError::IO)

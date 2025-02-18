@@ -9,6 +9,7 @@ use crate::{
     snapshot::SnapshotId,
 };
 use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
+use std::cmp::max;
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -22,6 +23,13 @@ pub struct StorageEngine<P: PageManager> {
 struct Inner<P: PageManager> {
     page_manager: P,
     orphan_manager: OrphanPageManager,
+    status: Status,
+}
+
+#[derive(Debug)]
+enum Status {
+    Open,
+    Closed,
 }
 
 impl<P: PageManager> StorageEngine<P> {
@@ -30,16 +38,19 @@ impl<P: PageManager> StorageEngine<P> {
             inner: Arc::new(RwLock::new(Inner {
                 page_manager,
                 orphan_manager,
+                status: Status::Open,
             })),
         }
     }
 
     pub(crate) fn unlock(&self, snapshot_id: SnapshotId) {
-        self.inner
-            .write()
-            .unwrap()
-            .orphan_manager
-            .unlock(snapshot_id);
+        let mut inner = self.inner.write().unwrap();
+
+        if inner.isClosed() {
+            return;
+        }
+
+        inner.orphan_manager.unlock(snapshot_id);
     }
 
     // Allocates a new page from the underlying page manager.
@@ -47,6 +58,11 @@ impl<P: PageManager> StorageEngine<P> {
     // it is used to allocate a new page instead.
     fn allocate_page<'p>(&self, metadata: &Metadata) -> Result<Page<'p, RW>, Error> {
         let mut inner = self.inner.write().unwrap();
+
+        if inner.isClosed() {
+            return Err(Error::EngineClosed);
+        }
+
         inner.allocate_page(metadata)
     }
 
@@ -58,6 +74,11 @@ impl<P: PageManager> StorageEngine<P> {
         page_id: PageId,
     ) -> Result<Page<'p, RW>, Error> {
         let mut inner = self.inner.write().unwrap();
+
+        if inner.isClosed() {
+            return Err(Error::EngineClosed);
+        }
+
         let original_page = inner.page_manager.get_mut(metadata.snapshot_id, page_id)?;
         // if the page already has the correct snapshot id, return it without cloning.
         if original_page.snapshot_id() == metadata.snapshot_id {
@@ -77,6 +98,11 @@ impl<P: PageManager> StorageEngine<P> {
 
     fn get_page<'p>(&self, metadata: &Metadata, page_id: PageId) -> Result<Page<'p, RO>, Error> {
         let inner = self.inner.read().unwrap();
+
+        if inner.isClosed() {
+            return Err(Error::EngineClosed);
+        }
+
         inner
             .page_manager
             .get(metadata.snapshot_id, page_id)
@@ -89,6 +115,11 @@ impl<P: PageManager> StorageEngine<P> {
         page_id: PageId,
     ) -> Result<Page<'p, RW>, Error> {
         let mut inner = self.inner.write().unwrap();
+
+        if inner.isClosed() {
+            return Err(Error::EngineClosed);
+        }
+
         inner
             .page_manager
             .get_mut(metadata.snapshot_id, page_id)
@@ -158,27 +189,12 @@ impl<P: PageManager> StorageEngine<P> {
 
     pub fn commit(&self, metadata: &Metadata) -> Result<(), Error> {
         let mut inner = self.inner.write().unwrap();
-        let state_root = EMPTY_ROOT_HASH;
 
-        // First commit to ensure all changes are written before writing the new root page.
-        inner.page_manager.commit(metadata.snapshot_id)?;
-
-        let page_mut = inner
-            .page_manager
-            .get_mut(metadata.snapshot_id, metadata.root_page_id)
-            .unwrap();
-        // TODO: include the metadata in the new root page.
-        let mut new_root_page = RootPage::new(page_mut, state_root);
-        for orphaned_page_id in inner.orphan_manager.iter() {
-            new_root_page
-                .add_orphaned_page_id(*orphaned_page_id)
-                .unwrap();
+        if inner.isClosed() {
+            return Err(Error::EngineClosed);
         }
 
-        // Second commit to ensure the new root page is written to disk.
-        inner.page_manager.commit(metadata.snapshot_id)?;
-
-        Ok(())
+        inner.commit(metadata)
     }
 
     pub fn rollback(&self, metadata: &Metadata) -> Result<(), Error> {
@@ -187,12 +203,52 @@ impl<P: PageManager> StorageEngine<P> {
 
     pub fn resize(&mut self, new_page_count: PageId) -> Result<(), Error> {
         let mut inner = self.inner.write().unwrap();
-        inner.page_manager.resize(new_page_count)?;
+
+        if inner.isClosed() {
+            return Err(Error::EngineClosed);
+        }
+
+        inner.resize(new_page_count)
+    }
+
+    pub fn size(&self) -> u32 {
+        let inner = self.inner.read().unwrap();
+        inner.page_manager.size()
+    }
+
+    pub fn close(&self, metadata: &Metadata) -> Result<(), Error> {
+        let mut inner = self.inner.write().unwrap();
+
+        if inner.isClosed() {
+            return Err(Error::EngineClosed);
+        }
+
+        let underlying_root_page = inner
+            .page_manager
+            .get(metadata.snapshot_id, metadata.root_page_id)?;
+        let root_page = RootPage::try_from(underlying_root_page).map_err(Error::PageError)?;
+
+        // there will always be a minimum of 2 root pages
+        let max_page_count = max(root_page.max_page_number(), 2);
+        // resize the page manager so that we only store the exact amount of pages we need.
+        inner.resize(max_page_count)?;
+        // commit all outstanding data to disk.
+        inner.commit(metadata)?;
+        // mark engine as closed, causing all operations on engine to return an error.
+        inner.status = Status::Closed;
+
         Ok(())
     }
 }
 
 impl<P: PageManager> Inner<P> {
+    fn isClosed(&self) -> bool {
+        match self.status {
+            Status::Closed => true,
+            _ => false,
+        }
+    }
+
     fn allocate_page<'p>(&mut self, metadata: &Metadata) -> Result<Page<'p, RW>, Error> {
         let snapshot_id = metadata.snapshot_id;
         let orphaned_page_id = self.orphan_manager.get_orphaned_page_id();
@@ -207,6 +263,35 @@ impl<P: PageManager> Inner<P> {
                 .map_err(|e| e.into())
         }
     }
+
+    fn resize(&mut self, new_page_count: PageId) -> Result<(), Error> {
+        self.page_manager.resize(new_page_count)?;
+        Ok(())
+    }
+
+    fn commit(&mut self, metadata: &Metadata) -> Result<(), Error> {
+        let state_root = EMPTY_ROOT_HASH;
+
+        // First commit to ensure all changes are written before writing the new root page.
+        self.page_manager.commit(metadata.snapshot_id)?;
+
+        let page_mut = self
+            .page_manager
+            .get_mut(metadata.snapshot_id, metadata.root_page_id)
+            .unwrap();
+        // TODO: include the metadata in the new root page.
+        let mut new_root_page = RootPage::new(page_mut, state_root);
+        for orphaned_page_id in self.orphan_manager.iter() {
+            new_root_page
+                .add_orphaned_page_id(*orphaned_page_id)
+                .unwrap();
+        }
+
+        // Second commit to ensure the new root page is written to disk.
+        self.page_manager.commit(metadata.snapshot_id)?;
+
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -214,6 +299,7 @@ pub enum Error {
     PageError(PageError),
     InvalidPath,
     InvalidSnapshotId,
+    EngineClosed,
 }
 
 impl From<PageError> for Error {
