@@ -1,8 +1,10 @@
+use crate::page::PageId;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Location(u32);
 
 impl Location {
-    pub fn for_page(page_id: u32) -> Self {
+    pub fn for_page(page_id: PageId) -> Self {
         assert!(page_id >= 256);
 
         Self(page_id)
@@ -12,11 +14,11 @@ impl Location {
         Self(cell_index as u32)
     }
 
-    pub fn page_id(&self) -> Option<u32> {
+    pub fn page_id(&self) -> Option<PageId> {
         if self.0 < 256 {
             None
         } else {
-            Some(self.0)
+            Some(self.0 as PageId)
         }
     }
 
