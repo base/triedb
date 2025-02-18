@@ -13,7 +13,7 @@ pub trait Value: Sized + Debug {
     fn to_bytes(self) -> Vec<u8>;
 
     /// Create a value from a byte slice
-    /// Returns None if the bytes don't represent a valid value
+    /// Returns Error::InvalidEncoding if the bytes don't represent a valid value
     fn from_bytes(bytes: &[u8]) -> Result<Self>;
 }
 
@@ -27,7 +27,7 @@ pub trait ValueRef<'v>: Sized + Debug {
     fn to_bytes(self) -> &'v [u8];
 
     /// Create a reference from a byte slice
-    /// Returns None if the bytes don't represent a valid value
+    /// Returns Error::InvalidEncoding if the bytes don't represent a valid value
     fn from_bytes(bytes: &'v [u8]) -> Result<Self>;
 
     /// Convert this reference into an owned value
