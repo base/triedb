@@ -78,16 +78,25 @@ impl Value for Node {
     fn to_bytes(self) -> Vec<u8> {
         match self {
             Self::Leaf { prefix, value, .. } => {
-                let mut data = vec![0; prefix.len() + value.len() + 1];
-                data[0] = prefix.len() as u8;
-                data[1..=prefix.len()].copy_from_slice(prefix.as_slice());
-                data[prefix.len() + 1..].copy_from_slice(&value);
+                let prefix_length = prefix.len();
+                let mut data = vec![0; prefix_length + value.len() + 1];
+                data[0] = prefix_length as u8;
+                data[1..=prefix_length].copy_from_slice(prefix.as_slice());
+                data[prefix_length + 1..].copy_from_slice(&value);
                 data
             }
             Self::Branch { prefix, children } => {
-                let mut data = vec![0; prefix.len() + 1];
-                data[0] = prefix.len() as u8 | 0b1000_0000;
-                data[1..=prefix.len()].copy_from_slice(prefix.as_slice());
+                let prefix_length = prefix.len();
+                let mut data = vec![0; prefix_length + 3];
+                data[0] = prefix_length as u8 | 0b1000_0000;
+                data[1..=prefix_length].copy_from_slice(prefix.as_slice());
+                let children_bitmask = children
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, child)| (child.is_some() as u16) << idx)
+                    .sum::<u16>();
+                data[prefix_length + 1..prefix_length + 3]
+                    .copy_from_slice(&children_bitmask.to_le_bytes());
                 for child in children.into_iter() {
                     if let Some(child) = child {
                         data.extend_from_slice(&child.to_bytes());
@@ -110,13 +119,18 @@ impl Value for Node {
         } else {
             let prefix_length = first_byte as usize & 0b0111_1111;
             let prefix = Nibbles::from_nibbles(&bytes[1..=prefix_length]);
+            let children_bitmask = u16::from_le_bytes(
+                bytes[prefix_length + 1..prefix_length + 3]
+                    .try_into()
+                    .unwrap(),
+            );
             let mut children = [const { None }; 16];
             for (i, child) in children.iter_mut().enumerate() {
-                let child_offset = 1 + prefix_length + i * 36;
-                let child_length = bytes[child_offset..child_offset + 36].to_vec();
-                if child_length.iter().all(|b| *b == 0) {
+                if children_bitmask & (1 << i) == 0 {
                     continue;
                 }
+                let child_offset = 3 + prefix_length + i * 36;
+                let child_length = bytes[child_offset..child_offset + 36].to_vec();
                 *child = Some(Pointer::from_bytes(&child_length)?);
             }
             Ok(Self::Branch { prefix, children })
@@ -150,14 +164,14 @@ mod tests {
         let node = Node::new_branch(Nibbles::from_nibbles([0xa, 0xb]));
         let bytes = node.to_bytes();
         let mut expected = Vec::from(hex!("820a0b"));
-        expected.extend(vec![0; 36 * 16]);
+        expected.extend(vec![0; 36 * 16 + 2]);
         assert_eq!(bytes, expected);
 
         let mut node = Node::new_branch(Nibbles::from_nibbles([0xa, 0xb]));
         node.set_child(0, Pointer::new_unhashed(7.into()));
         let bytes = node.to_bytes();
         let mut expected = Vec::from(hex!("820a0b"));
-        expected.extend([0, 0, 0, 7]);
+        expected.extend([1, 0, 0, 0, 0, 7]);
         expected.extend(vec![0; 36 * 16 - 4]);
         assert_eq!(bytes, expected);
     }
