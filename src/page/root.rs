@@ -41,9 +41,7 @@ impl<'p, P: PageKind> RootPage<'p, P> {
                 .expect("max page number is 4 bytes"),
         )
     }
-}
 
-impl<'p> RootPage<'p, RO> {
     pub fn get_orphaned_page_ids<T: PageManager>(
         &self,
         page_manager: &T,
@@ -55,7 +53,7 @@ impl<'p> RootPage<'p, RO> {
         let mut orphan_page_ids = Vec::new();
 
         self.get_orphaned_page_ids_helper(
-            &self.page,
+            self.page.contents(),
             current_slot_index,
             &mut orphan_page_ids,
             page_manager,
@@ -66,21 +64,19 @@ impl<'p> RootPage<'p, RO> {
 
     fn get_orphaned_page_ids_helper<T: PageManager>(
         &self,
-        page: &Page<'p, RO>,
+        page_contents: &[u8],
         mut current_slot_index: usize,
         orphan_page_ids: &mut Vec<PageId>,
         page_manager: &T,
     ) -> Result<(), PageError> {
-        let contents = page.contents();
-
-        let last_slot_index = (PAGE_DATA_SIZE / 4) - 1;
+        let last_slot_index = (page_contents.len() / 4) - 1;
 
         // Keep reading orphan page ids, across pages, until we encounter an orphan page id
         // that is 0
         loop {
             let current_orphan_page_id_start_index = current_slot_index * 4;
             let orphan_page_id = u32::from_le_bytes(
-                contents
+                page_contents
                     [current_orphan_page_id_start_index..current_orphan_page_id_start_index + 4]
                     .try_into()
                     .expect("orphan page id is 4 bytes"),
@@ -96,7 +92,7 @@ impl<'p> RootPage<'p, RO> {
                 // orphan list continues at the page id stored in the last slot.
                 let next_page = page_manager.get(self.snapshot_id(), orphan_page_id)?;
                 return self.get_orphaned_page_ids_helper(
-                    &next_page,
+                    next_page.contents(),
                     0,
                     orphan_page_ids,
                     page_manager,
