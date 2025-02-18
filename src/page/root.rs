@@ -34,8 +34,8 @@ impl<'p, P: PageKind> RootPage<'p, P> {
         )
     }
 
-    pub fn max_page_number(&self) -> u32 {
-        u32::from_le_bytes(
+    pub fn max_page_number(&self) -> PageId {
+        PageId::from_le_bytes(
             self.page.contents()[36..40]
                 .try_into()
                 .expect("max page number is 4 bytes"),
