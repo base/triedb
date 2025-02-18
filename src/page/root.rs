@@ -3,7 +3,7 @@ use alloy_primitives::B256;
 
 use super::{
     page::{PageKind, RO, RW},
-    PageError, PageId, PageManager, PAGE_DATA_SIZE,
+    PageError, PageId, PageManager,
 };
 
 const MAX_ORPHANS: usize = 1011;

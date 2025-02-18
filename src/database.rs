@@ -167,18 +167,18 @@ impl<'p, P: PageKind> From<RootPage<'p, P>> for Metadata {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{address, B256, U256};
-    use serial_test::serial;
     use std::fs::File;
+    use tempdir::TempDir;
 
     use crate::{account::AccountSlice, path::AddressPath};
 
     use super::*;
 
     #[test]
-    #[serial]
     fn test_set_get_account() {
-        let _ = std::fs::remove_file("test.db");
-        let db = Database::create("test.db").unwrap();
+        let tmp_dir = TempDir::new("test_db").unwrap();
+        let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
+        let db = Database::create(file_path.as_str()).unwrap();
         let mut tx = db.begin_rw().unwrap();
 
         let mut account_data = vec![0; 104];
@@ -230,19 +230,23 @@ mod tests {
             .unwrap();
 
         assert_eq!(account2, read_account);
+
+        // cleanup
+        tmp_dir.close().unwrap();
     }
 
     #[test]
-    #[serial]
     fn test_open_resize() {
         // GIVEN: a database
-        let _ = std::fs::remove_file("test.db");
+        //
         // create the database on disk. currently this
         // will create a database with N pages (see 'create' for N).
-        Database::create("test.db").unwrap();
+        let tmp_dir = TempDir::new("test_db").unwrap();
+        let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
+        let db = Database::create(file_path.as_str()).unwrap();
 
         // WHEN: the database is opened
-        let db = Database::open("test.db").unwrap();
+        let db = Database::open(file_path.as_str()).unwrap();
 
         // THEN: the size of the database should be the
         // max_page_size + buffer
@@ -253,17 +257,18 @@ mod tests {
         assert_eq!(open_size, max_page_size + 20);
 
         // cleanup
-        let _ = std::fs::remove_file("test.db");
+        tmp_dir.close().unwrap();
     }
 
     #[test]
-    #[serial]
     fn test_close_resize() {
         // GIVEN: a database
-        let _ = std::fs::remove_file("test.db");
+        //
         // create the database on disk. currently this
         // will create a database with N pages (see 'create' for N).
-        let db = Database::create("test.db").unwrap();
+        let tmp_dir = TempDir::new("test_db").unwrap();
+        let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
+        let db = Database::create(file_path.as_str()).unwrap();
         let create_size = db.size();
 
         assert_eq!(create_size, 100);
@@ -274,11 +279,11 @@ mod tests {
         // THEN: the size of the database should be the
         // max_page_size
         let max_page_size = 2; // fresh db so at least 2 pages for the root pages
-        let file = File::options().read(true).open("test.db").unwrap();
+        let file = File::options().read(true).open(file_path.as_str()).unwrap();
         let file_len = file.metadata().unwrap().len();
         assert_eq!(file_len, max_page_size * 4096);
 
         // cleanup
-        let _ = std::fs::remove_file("test.db");
+        tmp_dir.close().unwrap();
     }
 }

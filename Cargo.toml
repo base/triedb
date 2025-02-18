@@ -11,4 +11,4 @@ memmap2 = "0.9.5"
 sealed = "0.6.0"
 
 [dev-dependencies]
-serial_test = "*"
+tempdir = "0.3.7"
