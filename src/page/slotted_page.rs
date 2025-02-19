@@ -435,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reuse_deleted_space() {
+    fn test_allocate_reuse_deleted_space() {
         let mut data = [0; PAGE_SIZE];
         let page = Page::new_rw_with_snapshot(42, 123, &mut data);
         let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
@@ -464,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reuse_deleted_spaces() {
+    fn test_allocate_reuse_deleted_spaces() {
         let mut data = [0; PAGE_SIZE];
         let page = Page::new_rw_with_snapshot(42, 123, &mut data);
         let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
