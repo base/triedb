@@ -800,4 +800,34 @@ mod tests {
         assert_eq!(cell_pointer.length(), 100);
         assert_eq!(cell_pointer.offset(), 2720); // 2720 = 2620 + 100
     }
+
+    #[test]
+    fn test_defragment_page() {
+        let mut data = [0; PAGE_SIZE];
+        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
+        let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
+
+        let i0 = subtrie_page.insert_value(&[11; 814][..]).unwrap();
+        assert_eq!(i0, 0);
+
+        let i1 = subtrie_page.insert_value(&[11; 814][..]).unwrap();
+        assert_eq!(i1, 1);
+
+        let i2 = subtrie_page.insert_value(&[11; 814][..]).unwrap();
+        assert_eq!(i2, 2);
+
+        let i3 = subtrie_page.insert_value(&[11; 814][..]).unwrap();
+        assert_eq!(i3, 3);
+
+        let i4 = subtrie_page.insert_value(&[11; 814][..]).unwrap();
+        assert_eq!(i4, 4);
+
+        subtrie_page.delete_value(i1).unwrap();
+        assert_eq!(subtrie_page.num_cells(), 5);
+        subtrie_page.delete_value(i3).unwrap();
+        assert_eq!(subtrie_page.num_cells(), 5);
+
+        let i4 = subtrie_page.insert_value(&[11; 1500][..]).unwrap();
+        assert_eq!(i4, 1);
+    }
 }
