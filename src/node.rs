@@ -52,6 +52,23 @@ impl Node {
         }
     }
 
+    pub fn has_children(&self) -> bool {
+        match self {
+            Self::Branch { .. } => true,
+            _ => false,
+        }
+    }
+
+    pub fn enumerate_children(&self) -> impl Iterator<Item = (u8, &Pointer)> {
+        match self {
+            Self::Branch { children, .. } => children
+                .iter()
+                .enumerate()
+                .filter_map(|(i, child)| child.as_ref().map(|p| (i as u8, p))),
+            _ => panic!("cannot enumerate children of non-branch node"),
+        }
+    }
+
     pub fn child(&self, index: u8) -> Option<&Pointer> {
         match self {
             Self::Branch { children, .. } => children[index as usize].as_ref(),
