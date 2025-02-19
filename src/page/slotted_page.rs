@@ -10,6 +10,8 @@ use super::{
 pub mod cell_pointer;
 use cell_pointer::CellPointer;
 
+const MAX_NUM_CELLS: u8 = 255; // With 1 byte for the number of cells, the maximum number of cells is 255.
+
 pub trait Value<'v>: TryFrom<&'v [u8]> + TryInto<&'v [u8], Error: Debug> + Debug {}
 
 impl<'v> Value<'v> for &'v [u8] {}
@@ -406,5 +408,79 @@ mod tests {
         assert_eq!(subtrie_page.num_cells(), 1);
         assert_eq!(subtrie_page.get_cell_pointer(0).unwrap().length(), 4084);
         assert_eq!(subtrie_page.get_cell_pointer(0).unwrap().offset(), 4084);
+    }
+
+    #[test]
+    fn test_reuse_deleted_space() {
+        let mut data = [0; PAGE_SIZE];
+        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
+        let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
+
+        let i0 = subtrie_page.insert_value(&[11; 1020][..]).unwrap();
+        assert_eq!(i0, 0);
+
+        let i1 = subtrie_page.insert_value(&[11; 1020][..]).unwrap();
+        assert_eq!(i1, 1);
+
+        let i2 = subtrie_page.insert_value(&[11; 1020][..]).unwrap();
+        assert_eq!(i2, 2);
+
+        let i3 = subtrie_page.insert_value(&[11; 1015][..]).unwrap();
+        assert_eq!(i3, 3);
+
+        subtrie_page.delete_value(i1).unwrap();
+        assert_eq!(subtrie_page.num_cells(), 4);
+
+        let i4 = subtrie_page.insert_value(&[11; 1000][..]).unwrap();
+        assert_eq!(i4, 1);
+        assert_eq!(subtrie_page.num_cells(), 4);
+        let cell_pointer = subtrie_page.get_cell_pointer(i4).unwrap();
+        assert_eq!(cell_pointer.length(), 1000);
+        assert_eq!(cell_pointer.offset(), 2020); // 2020 = 1020 + 1000
+    }
+
+    #[test]
+    fn test_reuse_deleted_spaces() {
+        let mut data = [0; PAGE_SIZE];
+        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
+        let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
+
+        let i0 = subtrie_page.insert_value(&[11; 1020][..]).unwrap();
+        assert_eq!(i0, 0);
+
+        let i1 = subtrie_page.insert_value(&[11; 1020][..]).unwrap();
+        assert_eq!(i1, 1);
+
+        let i2 = subtrie_page.insert_value(&[11; 1020][..]).unwrap();
+        assert_eq!(i2, 2);
+
+        let i3 = subtrie_page.insert_value(&[11; 1015][..]).unwrap();
+        assert_eq!(i3, 3);
+
+        subtrie_page.delete_value(i1).unwrap();
+        assert_eq!(subtrie_page.num_cells(), 4);
+        subtrie_page.delete_value(i2).unwrap();
+        assert_eq!(subtrie_page.num_cells(), 4);
+
+        let i4 = subtrie_page.insert_value(&[11; 1500][..]).unwrap();
+        assert_eq!(i4, 1);
+        assert_eq!(subtrie_page.num_cells(), 4);
+        let cell_pointer = subtrie_page.get_cell_pointer(i4).unwrap();
+        assert_eq!(cell_pointer.length(), 1500);
+        assert_eq!(cell_pointer.offset(), 2520); // 2520 = 1020 + 1500
+
+        let i5 = subtrie_page.insert_value(&[11; 100][..]).unwrap();
+        assert_eq!(i5, 2);
+        assert_eq!(subtrie_page.num_cells(), 4);
+        let cell_pointer = subtrie_page.get_cell_pointer(i5).unwrap();
+        assert_eq!(cell_pointer.length(), 100);
+        assert_eq!(cell_pointer.offset(), 2620); // 2620 = 2520 + 100
+
+        let i6 = subtrie_page.insert_value(&[11; 100][..]).unwrap();
+        assert_eq!(i6, 4);
+        assert_eq!(subtrie_page.num_cells(), 5);
+        let cell_pointer = subtrie_page.get_cell_pointer(i6).unwrap();
+        assert_eq!(cell_pointer.length(), 100);
+        assert_eq!(cell_pointer.offset(), 2720); // 2720 = 2620 + 100
     }
 }
