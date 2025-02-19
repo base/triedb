@@ -154,7 +154,7 @@ impl<'p> SlottedPage<'p, RW> {
 
     // Allocates a cell pointer at the given index with the given length and returns the cell pointer.
     fn allocate_cell_pointer(&mut self, index: u8, length: u16) -> Result<CellPointer, PageError> {
-        match self.find_free_space(index, length)? {
+        match self.find_available_slot(index, length)? {
             Some(offset) => {
                 let num_cells = self.num_cells();
                 let new_num_cells = max(num_cells, index + 1);
@@ -171,14 +171,15 @@ impl<'p> SlottedPage<'p, RW> {
         }
     }
 
-    fn find_free_space(&self, index: u8, length: u16) -> Result<Option<u16>, PageError> {
-        match self.find_free_space_in_used_space(length)? {
+    // Finds a free space with length in the page. Returns slotted page offset if found.
+    fn find_available_slot(&self, index: u8, length: u16) -> Result<Option<u16>, PageError> {
+        match self.find_available_slot_in_used_space(length)? {
             Some(offset) => Ok(Some(offset)),
-            None => self.find_free_space_in_remaining_space(index, length),
+            None => self.find_available_slot_in_remaining_space(index, length),
         }
     }
 
-    fn find_free_space_in_used_space(&self, length: u16) -> Result<Option<u16>, PageError> {
+    fn find_available_slot_in_used_space(&self, length: u16) -> Result<Option<u16>, PageError> {
         let num_cells = self.num_cells();
         let mut used_space = (0..num_cells).try_fold(
             Vec::new(),
@@ -202,7 +203,7 @@ impl<'p> SlottedPage<'p, RW> {
         Ok(None)
     }
 
-    fn find_free_space_in_remaining_space(
+    fn find_available_slot_in_remaining_space(
         &self,
         index: u8,
         length: u16,
