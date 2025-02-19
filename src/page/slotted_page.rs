@@ -154,10 +154,32 @@ impl<'p> SlottedPage<'p, RW> {
 
     // Allocates a cell pointer at the given index with the given length and returns the cell pointer.
     fn allocate_cell_pointer(&mut self, index: u8, length: u16) -> Result<CellPointer, PageError> {
-        let num_cells = self.num_cells();
-        let new_num_cells = max(num_cells, index + 1);
+        match self.find_free_space(index, length)? {
+            Some(offset) => {
+                let num_cells = self.num_cells();
+                let new_num_cells = max(num_cells, index + 1);
 
-        // first, find space in the used space
+                if new_num_cells > num_cells {
+                    self.set_num_cells(new_num_cells);
+                }
+                return self.set_cell_pointer(index, offset, length);
+            }
+            None => {
+                // TODO: defragment the page
+                Err(PageError::PageIsFull)
+            }
+        }
+    }
+
+    fn find_free_space(&self, index: u8, length: u16) -> Result<Option<u16>, PageError> {
+        match self.find_free_space_in_used_space(length)? {
+            Some(offset) => Ok(Some(offset)),
+            None => self.find_free_space_in_remaining_space(index, length),
+        }
+    }
+
+    fn find_free_space_in_used_space(&self, length: u16) -> Result<Option<u16>, PageError> {
+        let num_cells = self.num_cells();
         let mut used_space = (0..num_cells).try_fold(
             Vec::new(),
             |mut acc, i| -> Result<Vec<(u16, u16)>, PageError> {
@@ -173,15 +195,20 @@ impl<'p> SlottedPage<'p, RW> {
         if used_space.len() > 1 {
             for i in 0..used_space.len() - 1 {
                 if used_space[i + 1].0 - used_space[i].1 >= length {
-                    if new_num_cells > num_cells {
-                        self.set_num_cells(new_num_cells);
-                    }
-                    return self.set_cell_pointer(index, used_space[i].1 + length, length);
+                    return Ok(Some(used_space[i].1 + length));
                 }
             }
         }
+        Ok(None)
+    }
 
-        // second, find space at the remaining free space
+    fn find_free_space_in_remaining_space(
+        &self,
+        index: u8,
+        length: u16,
+    ) -> Result<Option<u16>, PageError> {
+        let num_cells = self.num_cells();
+        let new_num_cells = max(num_cells, index + 1);
         let mut max_offset = 0;
         for i in 0..num_cells {
             let offset = self.get_cell_pointer(i)?.offset();
@@ -193,15 +220,10 @@ impl<'p> SlottedPage<'p, RW> {
         let offset = max_offset + length;
 
         if offset as usize > self.page.contents().len() - new_num_cells as usize * 3 - 1 {
-            // TODO: defragment the page
-            return Err(PageError::PageIsFull);
+            return Ok(None);
         }
 
-        if new_num_cells > num_cells {
-            self.set_num_cells(new_num_cells);
-        }
-
-        return self.set_cell_pointer(index, offset, length);
+        Ok(Some(offset))
     }
 
     // Sets the cell pointer at the given index.
