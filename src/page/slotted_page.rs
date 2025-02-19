@@ -208,7 +208,8 @@ impl<'p> SlottedPage<'p, RW> {
                 return self.set_cell_pointer(index, offset, length);
             }
             None => {
-                // TODO: defragment the page
+                // if defragmenting is possible, defragment the page
+                // otherwise return PageIsFull
                 Err(PageError::PageIsFull)
             }
         }
@@ -826,6 +827,11 @@ mod tests {
         assert_eq!(subtrie_page.num_cells(), 5);
         subtrie_page.delete_value(i3).unwrap();
         assert_eq!(subtrie_page.num_cells(), 5);
+
+        // should not be able to allocate 2000 bytes
+        let cell_index = subtrie_page.insert_value(&[11; 2000][..]);
+        assert!(cell_index.is_err());
+        assert!(matches!(cell_index, Err(PageError::PageIsFull)));
 
         let i4 = subtrie_page.insert_value(&[11; 1500][..]).unwrap();
         assert_eq!(i4, 1);
