@@ -144,7 +144,7 @@ impl<'p> SlottedPage<'p, RW> {
                 return Ok(i);
             }
         }
-        if num_cells == 255 {
+        if num_cells == MAX_NUM_CELLS {
             return Err(PageError::NoFreeCells);
         }
         Ok(num_cells)
@@ -152,10 +152,33 @@ impl<'p> SlottedPage<'p, RW> {
 
     // Allocates a cell pointer at the given index with the given length and returns the cell pointer.
     fn allocate_cell_pointer(&mut self, index: u8, length: u16) -> Result<CellPointer, PageError> {
-        // TODO: defragment the page if necessary, or attempt to reuse deleted cells
-
-        // for now, always allocate from the contiguous free space
         let num_cells = self.num_cells();
+        let new_num_cells = max(num_cells, index + 1);
+
+        let mut used_space = (0..num_cells).try_fold(
+            Vec::new(),
+            |mut acc, i| -> Result<Vec<(u16, u16)>, PageError> {
+                let x = self.get_cell_pointer(i)?;
+                if !x.is_deleted() {
+                    acc.push((x.offset() - x.length(), x.offset()));
+                }
+                Ok(acc)
+            },
+        )?;
+        used_space.sort_by(|a, b| a.1.cmp(&b.1));
+
+        if used_space.len() > 1 {
+            for i in 0..used_space.len() - 1 {
+                if used_space[i + 1].0 - used_space[i].1 >= length {
+                    if new_num_cells > num_cells {
+                        self.set_num_cells(new_num_cells);
+                    }
+                    return self.set_cell_pointer(index, used_space[i].1 + length, length);
+                }
+            }
+        }
+
+        // second, find space at the remaining free space
         let mut max_offset = 0;
         for i in 0..num_cells {
             let offset = self.get_cell_pointer(i)?.offset();
@@ -164,10 +187,10 @@ impl<'p> SlottedPage<'p, RW> {
             }
         }
 
-        let new_num_cells = max(num_cells, index + 1);
-
         let offset = max_offset + length;
+
         if offset as usize > self.page.contents().len() - new_num_cells as usize * 3 - 1 {
+            // TODO: defragment the page
             return Err(PageError::PageIsFull);
         }
 
