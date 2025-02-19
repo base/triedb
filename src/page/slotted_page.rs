@@ -157,12 +157,13 @@ impl<'p> SlottedPage<'p, RW> {
         let num_cells = self.num_cells();
         let new_num_cells = max(num_cells, index + 1);
 
+        // first, find space in the used space
         let mut used_space = (0..num_cells).try_fold(
             Vec::new(),
             |mut acc, i| -> Result<Vec<(u16, u16)>, PageError> {
-                let x = self.get_cell_pointer(i)?;
-                if !x.is_deleted() {
-                    acc.push((x.offset() - x.length(), x.offset()));
+                let cp = self.get_cell_pointer(i)?;
+                if !cp.is_deleted() {
+                    acc.push((cp.offset() - cp.length(), cp.offset()));
                 }
                 Ok(acc)
             },
