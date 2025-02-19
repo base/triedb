@@ -53,9 +53,14 @@ impl Database<MmapPageManager> {
     pub fn create(file_path: &str) -> Result<Self, Error> {
         // TODO: handle the case where the file already exists.
         let mut page_manager = MmapPageManager::open(file_path).map_err(Error::PageError)?;
+        // allocate the first 256 pages for the root, orphans, and root subtrie
+        page_manager.resize(300).map_err(Error::PageError)?;
+        for _ in 0..256 {
+            let _page = page_manager.allocate(0).map_err(Error::PageError)?;
+        }
+
         let orphan_manager = OrphanPageManager::new();
 
-        page_manager.resize(100).map_err(Error::PageError)?;
         let _root0 = page_manager.allocate(0).map_err(Error::PageError)?;
         let _root1 = page_manager.allocate(0).map_err(Error::PageError)?;
         let _subtrie = page_manager.allocate(0).map_err(Error::PageError)?;
@@ -63,7 +68,7 @@ impl Database<MmapPageManager> {
         let metadata = Metadata {
             snapshot_id: 0,
             root_page_id: 0,
-            root_subtrie_page_id: 2,
+            root_subtrie_page_id: 256,
         };
 
         let db = Self::new(metadata, StorageEngine::new(page_manager, orphan_manager));
@@ -170,7 +175,10 @@ mod tests {
     use std::fs::File;
     use tempdir::TempDir;
 
-    use crate::{account::AccountSlice, path::AddressPath};
+    use crate::{
+        account::{AccountSlice, AccountVec},
+        path::AddressPath,
+    };
 
     use super::*;
 
@@ -179,31 +187,17 @@ mod tests {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
         let db = Database::create(file_path.as_str()).unwrap();
-        let mut tx = db.begin_rw().unwrap();
 
-        let mut account_data = vec![0; 104];
-        let account1 = AccountSlice::new(
-            U256::from(100),
-            1,
-            B256::ZERO,
-            B256::ZERO,
-            &mut account_data,
-        );
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
+
+        let account1 = AccountVec::new(U256::from(100), 1, B256::ZERO, B256::ZERO);
+        let mut tx = db.begin_rw().unwrap();
         tx.set_account(AddressPath::for_address(address), Some(account1.clone()))
             .unwrap();
 
         tx.commit().unwrap();
 
-        let mut account_data = vec![0; 104];
-        let account2 = AccountSlice::new(
-            U256::from(123),
-            456,
-            B256::ZERO,
-            B256::ZERO,
-            &mut account_data,
-        );
-
+        let account2 = AccountVec::new(U256::from(123), 456, B256::ZERO, B256::ZERO);
         let mut tx = db.begin_rw().unwrap();
         tx.set_account(AddressPath::for_address(address), Some(account2.clone()))
             .unwrap();
@@ -213,23 +207,19 @@ mod tests {
 
         // The read transaction was created before the write was committed, so it should not see the changes.
         let read_account = ro_tx
-            .get_account(AddressPath::for_address(address!(
-                "0xd8da6bf26964af9d7eed9e03e53415d37aa96045"
-            )))
+            .get_account(AddressPath::for_address(address))
             .unwrap();
 
-        assert_eq!(account1, read_account);
+        assert_eq!(account1, read_account.unwrap());
 
         // The writer transaction is committed, so the read transaction should see the changes.
         let ro_tx = db.begin_ro().unwrap();
 
         let read_account = ro_tx
-            .get_account(AddressPath::for_address(address!(
-                "0xd8da6bf26964af9d7eed9e03e53415d37aa96045"
-            )))
+            .get_account(AddressPath::for_address(address))
             .unwrap();
 
-        assert_eq!(account2, read_account);
+        assert_eq!(account2, read_account.unwrap());
 
         // cleanup
         tmp_dir.close().unwrap();
@@ -243,7 +233,7 @@ mod tests {
         // will create a database with N pages (see 'create' for N).
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
-        let db = Database::create(file_path.as_str()).unwrap();
+        let _db = Database::create(file_path.as_str()).unwrap();
 
         // WHEN: the database is opened
         let db = Database::open(file_path.as_str()).unwrap();
@@ -253,7 +243,6 @@ mod tests {
         let open_size = db.size();
 
         let max_page_size = 0; // fresh db
-        let buffer = 20;
         assert_eq!(open_size, max_page_size + 20);
 
         // cleanup
@@ -271,7 +260,7 @@ mod tests {
         let db = Database::create(file_path.as_str()).unwrap();
         let create_size = db.size();
 
-        assert_eq!(create_size, 100);
+        assert_eq!(create_size, 300);
 
         // WHEN: the database is closed
         db.close().unwrap();

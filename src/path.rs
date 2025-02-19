@@ -1,11 +1,18 @@
 use alloy_primitives::{keccak256, Address, StorageKey};
 use alloy_trie::Nibbles;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddressPath {
     path: Nibbles,
 }
 
 impl AddressPath {
+    pub fn new(path: Nibbles) -> Self {
+        assert_eq!(path.len(), 64, "Address path must be 64 nibbles long");
+
+        Self { path }
+    }
+
     pub fn for_address(address: Address) -> Self {
         let hash = keccak256(address);
         Self {
@@ -20,6 +27,7 @@ impl From<AddressPath> for Nibbles {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoragePath {
     address: AddressPath,
     slot: Nibbles,

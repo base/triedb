@@ -45,6 +45,17 @@ impl<'p> CellPointer<'p> {
     }
 }
 
+impl<'p> std::fmt::Debug for CellPointer<'p> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "CellPointer {{ offset: {}, length: {} }}",
+            self.offset(),
+            self.length()
+        )
+    }
+}
+
 impl<'p> From<CellPointer<'p>> for &'p [u8; 3] {
     fn from(cell_pointer: CellPointer<'p>) -> Self {
         cell_pointer.0

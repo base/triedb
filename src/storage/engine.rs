@@ -1,18 +1,23 @@
 use crate::{
     account::Account,
     database::Metadata,
+    location::Location,
     node::Node,
     page::{
         OrphanPageManager, Page, PageError, PageId, PageManager, RootPage, SlottedPage, RO, RW,
     },
     path::AddressPath,
+    pointer::Pointer,
     snapshot::SnapshotId,
 };
 use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
+use log::{debug, trace};
 use std::cmp::max;
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::RwLock;
+
+use super::value::Value;
 
 #[derive(Debug)]
 pub struct StorageEngine<P: PageManager> {
@@ -126,40 +131,80 @@ impl<P: PageManager> StorageEngine<P> {
             .map_err(|e| e.into())
     }
 
-    pub fn get_account<'a, A: Account<'a>>(
+    pub fn get_account<A: Account + Value>(
         &self,
         metadata: &Metadata,
         address_path: AddressPath,
-    ) -> Result<A, Error> {
+    ) -> Result<Option<A>, Error> {
         let page = self.get_page(metadata, metadata.root_subtrie_page_id)?;
         let slotted_page = SlottedPage::try_from(page)?;
-        let root_node: Node = slotted_page.get_value(0)?;
-        let mut path: Nibbles = address_path.into();
 
-        println!("path: {:?}", path);
-        println!("root_node.prefix(): {:?}", root_node.prefix());
-        if !path.has_prefix(&root_node.prefix()) {
-            return Err(Error::InvalidPath);
-        }
+        debug!("get_account(): {:?}", address_path);
 
-        path = path.slice(root_node.prefix().len()..);
-        if path.is_empty() {
-            let val: &[u8] = root_node.value().unwrap();
-            return Ok(A::try_from(val).unwrap());
-        }
-
-        // TODO: support path traversal, not just matching the root node exactly.
-        return Err(Error::InvalidPath);
+        self.get_account_from_page::<A>(metadata, address_path.into(), slotted_page, 0)
     }
 
-    pub fn set_account<'tx, A: Account<'tx>>(
+    fn get_account_from_page<A: Account + Value>(
+        &self,
+        metadata: &Metadata,
+        path: Nibbles,
+        slotted_page: SlottedPage<'_, RO>,
+        page_index: u8,
+    ) -> Result<Option<A>, Error> {
+        trace!("get_account_from_page(): {:?} {:?}", path, page_index);
+
+        let node: Node = slotted_page.get_value(page_index)?;
+        trace!("node.prefix(): {:?}", node.prefix());
+
+        let common_prefix_length = path.common_prefix_length(node.prefix());
+        let common_prefix = path.slice(0..common_prefix_length);
+        trace!("common_prefix: {:?}", common_prefix);
+        if common_prefix_length < node.prefix().len() {
+            return Ok(None);
+        }
+
+        let remaining_path = path.slice(common_prefix_length..);
+        trace!("remaining_path: {:?}", remaining_path);
+        if remaining_path.is_empty() {
+            let val: &[u8] = node.value().unwrap();
+            return Ok(Some(A::from_bytes(val).unwrap()));
+        }
+
+        let child_pointer = node.child(remaining_path[0]);
+        match child_pointer {
+            Some(child_pointer) => {
+                let child_location = child_pointer.location();
+                if child_location.cell_index().is_some() {
+                    self.get_account_from_page::<A>(
+                        metadata,
+                        remaining_path.slice(1..),
+                        slotted_page,
+                        child_location.cell_index().unwrap(),
+                    )
+                } else {
+                    let child_page_id = child_location.page_id().unwrap();
+                    let child_page = self.get_page(metadata, child_page_id)?;
+                    let child_slotted_page = SlottedPage::try_from(child_page)?;
+                    self.get_account_from_page::<A>(
+                        metadata,
+                        remaining_path.slice(1..),
+                        child_slotted_page,
+                        0,
+                    )
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn set_account<A: Account + Value>(
         &self,
         metadata: &mut Metadata,
         address_path: AddressPath,
         account: Option<A>,
     ) -> Result<(), Error> {
         if account.is_none() {
-            todo!("handle this case");
+            todo!("support deleting accounts");
         }
 
         let account = account.unwrap();
@@ -167,16 +212,118 @@ impl<P: PageManager> StorageEngine<P> {
         let root_subtrie_page_id = metadata.root_subtrie_page_id;
         let page = self.get_mut_clone(metadata, root_subtrie_page_id)?;
         let mut slotted_page: SlottedPage<'_, RW> = SlottedPage::try_from(page)?;
-        let mut buf = vec![0; 1024];
-        let new_node = Node::new(address_path.into(), account.try_into().unwrap(), &mut buf);
-        if slotted_page.get_value::<Node>(0).is_err() {
-            slotted_page.insert_value(new_node)?;
-        } else {
-            slotted_page.set_value(0, new_node)?;
-        }
-        let page: Page<'_, RW> = slotted_page.into();
-        metadata.root_subtrie_page_id = page.page_id();
+
+        let location =
+            self.set_account_in_page(metadata, address_path.into(), account, &mut slotted_page, 0)?;
+        metadata.root_subtrie_page_id = location.page_id().unwrap();
         Ok(())
+    }
+
+    fn set_account_in_page<A: Account + Value>(
+        &self,
+        metadata: &mut Metadata,
+        path: Nibbles,
+        account: A,
+        slotted_page: &mut SlottedPage<'_, RW>,
+        page_index: u8,
+    ) -> Result<Location, Error> {
+        // TODO: handle the case where insertion fails because the page is full.
+        // We should undo any successful insertions, split the page, and try again.
+
+        let res = slotted_page.get_value::<Node>(page_index);
+        if res.is_err() {
+            // Trie is empty, insert the new account at the root.
+            let new_node = Node::new_leaf(path, account.to_bytes().as_slice());
+            let index = slotted_page.insert_value(new_node)?;
+            assert_eq!(index, 0, "root node must be at index 0");
+            return Ok(Location::for_page(slotted_page.page_id()));
+        }
+
+        let mut node = res.unwrap();
+        let common_prefix_length = path.common_prefix_length(node.prefix());
+        // find the common prefix between the path and the node prefix.
+        let common_prefix = path.slice(0..common_prefix_length);
+        if common_prefix_length < node.prefix().len() {
+            // the path does not match the node prefix, so we need to create a new branch node as its parent.
+            let mut new_parent_branch = Node::new_branch(common_prefix);
+            let child_branch_index = path[common_prefix_length];
+            let remaining_path = path.slice(common_prefix_length + 1..);
+            let new_leaf_node = Node::new_leaf(remaining_path, account.to_bytes().as_slice());
+            // update the prefix of the existing node and insert it into the page
+            let node_branch_index = node.prefix()[common_prefix_length];
+            node.set_prefix(node.prefix().slice(common_prefix_length + 1..));
+            let location = Location::for_cell(slotted_page.insert_value(node)?);
+            new_parent_branch.set_child(node_branch_index, Pointer::new_unhashed(location));
+            let location = Location::for_cell(slotted_page.insert_value(new_leaf_node)?);
+            new_parent_branch.set_child(child_branch_index, Pointer::new_unhashed(location));
+            slotted_page.set_value(page_index, new_parent_branch)?;
+
+            return Ok(self.node_location(slotted_page.page_id(), page_index));
+        }
+
+        if common_prefix_length == path.len() {
+            // the path matches the node prefix exactly, so we can update the value.
+            let new_node = Node::new_leaf(path, account.to_bytes().as_slice());
+            slotted_page.set_value(page_index, new_node)?;
+
+            return Ok(self.node_location(slotted_page.page_id(), page_index));
+        }
+
+        // the path is a prefix of the node prefix, so we need to traverse the node's children.
+        let child_index = path[common_prefix_length];
+        let remaining_path = path.slice(common_prefix_length + 1..);
+        let child_pointer = node.child(child_index);
+        match child_pointer {
+            Some(child_pointer) => {
+                // the child node exists, so we need to traverse it.
+                let child_location = child_pointer.location();
+                if let Some(child_cell_index) = child_location.cell_index() {
+                    let location = self.set_account_in_page::<A>(
+                        metadata,
+                        remaining_path,
+                        account,
+                        slotted_page,
+                        child_cell_index,
+                    )?;
+                    node.set_child(child_index, Pointer::new_unhashed(location));
+                    slotted_page.set_value(page_index, node)?;
+
+                    Ok(self.node_location(slotted_page.page_id(), page_index))
+                } else {
+                    let child_page_id = child_location.page_id().unwrap();
+                    let child_page = self.get_mut_clone(metadata, child_page_id)?;
+                    let mut child_slotted_page = SlottedPage::try_from(child_page)?;
+                    let location = self.set_account_in_page::<A>(
+                        metadata,
+                        remaining_path,
+                        account,
+                        &mut child_slotted_page,
+                        0,
+                    )?;
+                    node.set_child(child_index, Pointer::new_unhashed(location));
+                    slotted_page.set_value(page_index, node)?;
+
+                    Ok(self.node_location(slotted_page.page_id(), page_index))
+                }
+            }
+            None => {
+                // the child node does not exist, so we need to create a new leaf node with the remaining path.
+                let new_node = Node::new_leaf(remaining_path, account.to_bytes().as_slice());
+                let location = Location::for_cell(slotted_page.insert_value(new_node)?);
+                node.set_child(child_index, Pointer::new_unhashed(location));
+                slotted_page.set_value(page_index, node)?;
+
+                Ok(self.node_location(slotted_page.page_id(), page_index))
+            }
+        }
+    }
+
+    fn node_location(&self, page_id: PageId, page_index: u8) -> Location {
+        if page_index == 0 {
+            Location::for_page(page_id)
+        } else {
+            Location::for_cell(page_index)
+        }
     }
 
     // pub fn get_storage(&self, storage_path: StoragePath) -> Result<StorageValue, Error> {
@@ -310,8 +457,10 @@ impl From<PageError> for Error {
 
 #[cfg(test)]
 mod tests {
+    use alloy_primitives::{address, hex, B256, U256};
+
     use super::*;
-    use crate::page::MmapPageManager;
+    use crate::{account::AccountVec, page::MmapPageManager};
 
     #[test]
     fn test_allocate_get_mut_clone() {
@@ -392,5 +541,203 @@ mod tests {
 
         assert_eq!(page1.contents()[0], 123);
         assert_eq!(page2.contents()[0], 123);
+    }
+
+    #[test]
+    fn test_set_get_account() {
+        let manager = MmapPageManager::new_anon(300, 257).unwrap();
+        let orphan_manager = OrphanPageManager::new();
+        let mut metadata = Metadata {
+            snapshot_id: 1,
+            root_page_id: 0,
+            root_subtrie_page_id: 256,
+        };
+        let storage_engine = StorageEngine::new(manager, orphan_manager);
+
+        let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
+        let account = AccountVec::new(U256::from(100), 1, B256::ZERO, B256::ZERO);
+        storage_engine
+            .set_account(
+                &mut metadata,
+                AddressPath::for_address(address),
+                Some(account.clone()),
+            )
+            .unwrap();
+        assert_eq!(metadata.root_subtrie_page_id, 257);
+
+        let read_account = storage_engine
+            .get_account::<AccountVec>(&metadata, AddressPath::for_address(address))
+            .unwrap();
+        assert_eq!(read_account, Some(account.clone()));
+
+        let address2 = address!("0x4200000000000000000000000000000000000015");
+        let read_account = storage_engine
+            .get_account::<AccountVec>(&metadata, AddressPath::for_address(address2))
+            .unwrap();
+        assert_eq!(read_account, None);
+
+        let account2 = AccountVec::new(U256::from(123), 456, B256::ZERO, B256::ZERO);
+        storage_engine
+            .set_account(
+                &mut metadata,
+                AddressPath::for_address(address2),
+                Some(account2.clone()),
+            )
+            .unwrap();
+
+        let read_account = storage_engine
+            .get_account::<AccountVec>(&metadata, AddressPath::for_address(address2))
+            .unwrap();
+        assert_eq!(read_account, Some(account2.clone()));
+
+        let address3 = address!("0x4200000000000000000000000000000000000016");
+        let read_account = storage_engine
+            .get_account::<AccountVec>(&metadata, AddressPath::for_address(address3))
+            .unwrap();
+        assert_eq!(read_account, None);
+
+        let account3 = AccountVec::new(U256::from(999), 999, B256::ZERO, B256::ZERO);
+        storage_engine
+            .set_account(
+                &mut metadata,
+                AddressPath::for_address(address3),
+                Some(account3.clone()),
+            )
+            .unwrap();
+
+        let address4 = address!("0x4200000000000000000000000000000000000002");
+        let account4 = AccountVec::new(U256::from(1000), 1000, B256::ZERO, B256::ZERO);
+        storage_engine
+            .set_account(
+                &mut metadata,
+                AddressPath::for_address(address4),
+                Some(account4.clone()),
+            )
+            .unwrap();
+
+        let address5 = address!("0x4200000000000000000000000000000000000000");
+        let account5 = AccountVec::new(U256::from(1001), 1001, B256::ZERO, B256::ZERO);
+        storage_engine
+            .set_account(
+                &mut metadata,
+                AddressPath::for_address(address5),
+                Some(account5.clone()),
+            )
+            .unwrap();
+
+        // assert 1 through 5 are in the trie
+        let read_account = storage_engine
+            .get_account::<AccountVec>(&metadata, AddressPath::for_address(address))
+            .unwrap();
+        assert_eq!(read_account, Some(account));
+
+        let read_account = storage_engine
+            .get_account::<AccountVec>(&metadata, AddressPath::for_address(address2))
+            .unwrap();
+        assert_eq!(read_account, Some(account2));
+
+        let read_account = storage_engine
+            .get_account::<AccountVec>(&metadata, AddressPath::for_address(address3))
+            .unwrap();
+        assert_eq!(read_account, Some(account3));
+
+        let read_account = storage_engine
+            .get_account::<AccountVec>(&metadata, AddressPath::for_address(address4))
+            .unwrap();
+        assert_eq!(read_account, Some(account4));
+
+        let read_account = storage_engine
+            .get_account::<AccountVec>(&metadata, AddressPath::for_address(address5))
+            .unwrap();
+        assert_eq!(read_account, Some(account5));
+    }
+
+    #[test]
+    fn test_set_get_account_common_prefix() {
+        let manager = MmapPageManager::new_anon(300, 257).unwrap();
+        let orphan_manager = OrphanPageManager::new();
+        let mut metadata = Metadata {
+            snapshot_id: 1,
+            root_page_id: 0,
+            root_subtrie_page_id: 256,
+        };
+        let storage_engine = StorageEngine::new(manager, orphan_manager);
+
+        let path = AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001")));
+        let account = AccountVec::new(U256::from(100), 1, B256::ZERO, B256::ZERO);
+        storage_engine
+            .set_account(&mut metadata, path.clone(), Some(account.clone()))
+            .unwrap();
+        assert_eq!(metadata.root_subtrie_page_id, 257);
+
+        let read_account = storage_engine
+            .get_account::<AccountVec>(&metadata, path.clone())
+            .unwrap();
+        assert_eq!(read_account, Some(account.clone()));
+
+        let path2 = AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002")));
+        let read_account = storage_engine
+            .get_account::<AccountVec>(&metadata, path2.clone())
+            .unwrap();
+        assert_eq!(read_account, None);
+
+        let account2 = AccountVec::new(U256::from(123), 456, B256::ZERO, B256::ZERO);
+        storage_engine
+            .set_account(&mut metadata, path2.clone(), Some(account2.clone()))
+            .unwrap();
+
+        let read_account = storage_engine
+            .get_account::<AccountVec>(&metadata, path2.clone())
+            .unwrap();
+        assert_eq!(read_account, Some(account2.clone()));
+
+        let path3 = AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003")));
+        let read_account = storage_engine
+            .get_account::<AccountVec>(&metadata, path3.clone())
+            .unwrap();
+        assert_eq!(read_account, None);
+
+        let account3 = AccountVec::new(U256::from(999), 999, B256::ZERO, B256::ZERO);
+        storage_engine
+            .set_account(&mut metadata, path3.clone(), Some(account3.clone()))
+            .unwrap();
+
+        let path4 = AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000004")));
+        let account4 = AccountVec::new(U256::from(1000), 1000, B256::ZERO, B256::ZERO);
+        storage_engine
+            .set_account(&mut metadata, path4.clone(), Some(account4.clone()))
+            .unwrap();
+
+        let path5 = AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000030000000000000000000000000000000005")));
+        let account5 = AccountVec::new(U256::from(1001), 1001, B256::ZERO, B256::ZERO);
+        storage_engine
+            .set_account(&mut metadata, path5.clone(), Some(account5.clone()))
+            .unwrap();
+
+        // assert 1 through 5 are in the trie
+        let read_account = storage_engine
+            .get_account::<AccountVec>(&metadata, path)
+            .unwrap();
+        assert_eq!(read_account, Some(account));
+
+        let read_account = storage_engine
+            .get_account::<AccountVec>(&metadata, path2)
+            .unwrap();
+        assert_eq!(read_account, Some(account2));
+
+        let read_account = storage_engine
+            .get_account::<AccountVec>(&metadata, path3)
+            .unwrap();
+        assert_eq!(read_account, Some(account3));
+
+        let read_account = storage_engine
+            .get_account::<AccountVec>(&metadata, path4)
+            .unwrap();
+        assert_eq!(read_account, Some(account4));
+
+        let read_account = storage_engine
+            .get_account::<AccountVec>(&metadata, path5)
+            .unwrap();
+        assert_eq!(read_account, Some(account5));
     }
 }
