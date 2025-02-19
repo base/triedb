@@ -629,40 +629,54 @@ mod tests {
     use super::*;
     use crate::{account::AccountVec, page::MmapPageManager};
 
-    #[test]
-    fn test_allocate_get_mut_clone() {
-        let manager = MmapPageManager::new_anon(10, 2).unwrap();
+    fn create_test_engine(
+        page_count: u32,
+        root_subtrie_page_id: PageId,
+    ) -> (StorageEngine<MmapPageManager>, Metadata) {
+        let manager = MmapPageManager::new_anon(page_count, root_subtrie_page_id + 1).unwrap();
         let orphan_manager = OrphanPageManager::new();
-        let mut metadata = Metadata {
+        let metadata = Metadata {
             snapshot_id: 1,
             root_page_id: 0,
-            root_subtrie_page_id: 0,
+            root_subtrie_page_id,
         };
         let storage_engine = StorageEngine::new(manager, orphan_manager);
+        (storage_engine, metadata)
+    }
 
+    fn create_test_account(balance: u64, nonce: u64) -> AccountVec {
+        AccountVec::new(U256::from(balance), nonce, B256::ZERO, B256::ZERO)
+    }
+
+    #[test]
+    fn test_allocate_get_mut_clone() {
+        let (storage_engine, mut metadata) = create_test_engine(10, 1);
+
+        // Initial allocation
         let mut page = storage_engine.allocate_page(&metadata).unwrap();
         assert_eq!(page.page_id(), 2);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 1);
 
+        // mutation
         page.contents_mut()[0] = 123;
-
         storage_engine.commit(&metadata).unwrap();
         metadata = metadata.next();
 
+        // reading mutated page
         let page = storage_engine.get_page(&metadata, 2).unwrap();
         assert_eq!(page.page_id(), 2);
         assert_eq!(page.contents()[0], 123);
         assert_eq!(page.snapshot_id(), 1);
 
-        // cloning a page should allocate a new page and orphan the original page.
+        // cloning a page should allocate a new page and orphan the original page
         let cloned_page = storage_engine.get_mut_clone(&metadata, 2).unwrap();
         assert_eq!(cloned_page.page_id(), 3);
         assert_eq!(cloned_page.contents()[0], 123);
         assert_eq!(cloned_page.snapshot_id(), 2);
         assert_ne!(cloned_page.page_id(), page.page_id());
 
-        // the next allocation should not come from the orphaned page, as the snapshot id is the same as when the page was orphaned.
+        // the next allocation should not come from the orphaned page, as the snapshot id is the same as when the page was orphaned
         let page = storage_engine.allocate_page(&metadata).unwrap();
         assert_eq!(page.page_id(), 4);
         assert_eq!(page.contents()[0], 0);
@@ -670,7 +684,8 @@ mod tests {
 
         storage_engine.commit(&metadata).unwrap();
         metadata = metadata.next();
-        // the next allocation should not come from the orphaned page, as the snapshot has not been unlocked yet.
+
+        // the next allocation should not come from the orphaned page, as the snapshot has not been unlocked yet
         let page = storage_engine.allocate_page(&metadata).unwrap();
         assert_eq!(page.page_id(), 5);
         assert_eq!(page.contents()[0], 0);
@@ -688,17 +703,9 @@ mod tests {
 
     #[test]
     fn test_shared_page_mutability() {
-        let manager = MmapPageManager::new_anon(10, 2).unwrap();
-        let orphan_manager = OrphanPageManager::new();
-        let metadata = Metadata {
-            snapshot_id: 1,
-            root_page_id: 0,
-            root_subtrie_page_id: 0,
-        };
-        let storage_engine = StorageEngine::new(manager, orphan_manager);
+        let (storage_engine, metadata) = create_test_engine(10, 1);
 
         let page1 = storage_engine.get_page(&metadata, 1).unwrap();
-
         assert_eq!(page1.contents()[0], 0);
 
         let mut page2 = storage_engine.get_mut_page(&metadata, 1).unwrap();
@@ -712,17 +719,10 @@ mod tests {
 
     #[test]
     fn test_set_get_account() {
-        let manager = MmapPageManager::new_anon(300, 257).unwrap();
-        let orphan_manager = OrphanPageManager::new();
-        let mut metadata = Metadata {
-            snapshot_id: 1,
-            root_page_id: 0,
-            root_subtrie_page_id: 256,
-        };
-        let storage_engine = StorageEngine::new(manager, orphan_manager);
+        let (storage_engine, mut metadata) = create_test_engine(300, 256);
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
-        let account = AccountVec::new(U256::from(100), 1, B256::ZERO, B256::ZERO);
+        let account = create_test_account(100, 1);
         storage_engine
             .set_account(
                 &mut metadata,
@@ -732,403 +732,190 @@ mod tests {
             .unwrap();
         assert_eq!(metadata.root_subtrie_page_id, 257);
 
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, AddressPath::for_address(address))
-            .unwrap();
-        assert_eq!(read_account, Some(account.clone()));
+        let test_cases = vec![
+            (
+                address!("0x4200000000000000000000000000000000000015"),
+                create_test_account(123, 456),
+            ),
+            (
+                address!("0x4200000000000000000000000000000000000016"),
+                create_test_account(999, 999),
+            ),
+            (
+                address!("0x4200000000000000000000000000000000000002"),
+                create_test_account(1000, 1000),
+            ),
+            (
+                address!("0x4200000000000000000000000000000000000000"),
+                create_test_account(1001, 1001),
+            ),
+        ];
 
-        let address2 = address!("0x4200000000000000000000000000000000000015");
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, AddressPath::for_address(address2))
-            .unwrap();
-        assert_eq!(read_account, None);
+        // Insert accounts and verify they don't exist before insertion
+        for (address, account) in &test_cases {
+            let path = AddressPath::for_address(*address);
 
-        let account2 = AccountVec::new(U256::from(123), 456, B256::ZERO, B256::ZERO);
-        storage_engine
-            .set_account(
-                &mut metadata,
-                AddressPath::for_address(address2),
-                Some(account2.clone()),
-            )
-            .unwrap();
+            let read_account = storage_engine
+                .get_account::<AccountVec>(&metadata, path.clone())
+                .unwrap();
+            assert_eq!(read_account, None);
 
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, AddressPath::for_address(address2))
-            .unwrap();
-        assert_eq!(read_account, Some(account2.clone()));
+            storage_engine
+                .set_account(&mut metadata, path, Some(account.clone()))
+                .unwrap();
+        }
 
-        let address3 = address!("0x4200000000000000000000000000000000000016");
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, AddressPath::for_address(address3))
-            .unwrap();
-        assert_eq!(read_account, None);
-
-        let account3 = AccountVec::new(U256::from(999), 999, B256::ZERO, B256::ZERO);
-        storage_engine
-            .set_account(
-                &mut metadata,
-                AddressPath::for_address(address3),
-                Some(account3.clone()),
-            )
-            .unwrap();
-
-        let address4 = address!("0x4200000000000000000000000000000000000002");
-        let account4 = AccountVec::new(U256::from(1000), 1000, B256::ZERO, B256::ZERO);
-        storage_engine
-            .set_account(
-                &mut metadata,
-                AddressPath::for_address(address4),
-                Some(account4.clone()),
-            )
-            .unwrap();
-
-        let address5 = address!("0x4200000000000000000000000000000000000000");
-        let account5 = AccountVec::new(U256::from(1001), 1001, B256::ZERO, B256::ZERO);
-        storage_engine
-            .set_account(
-                &mut metadata,
-                AddressPath::for_address(address5),
-                Some(account5.clone()),
-            )
-            .unwrap();
-
-        // assert 1 through 5 are in the trie
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, AddressPath::for_address(address))
-            .unwrap();
-        assert_eq!(read_account, Some(account));
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, AddressPath::for_address(address2))
-            .unwrap();
-        assert_eq!(read_account, Some(account2));
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, AddressPath::for_address(address3))
-            .unwrap();
-        assert_eq!(read_account, Some(account3));
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, AddressPath::for_address(address4))
-            .unwrap();
-        assert_eq!(read_account, Some(account4));
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, AddressPath::for_address(address5))
-            .unwrap();
-        assert_eq!(read_account, Some(account5));
+        // Verify all accounts exist after insertion
+        for (address, account) in &test_cases {
+            let read_account = storage_engine
+                .get_account::<AccountVec>(&metadata, AddressPath::for_address(*address))
+                .unwrap();
+            assert_eq!(read_account, Some(account.clone()));
+        }
     }
 
     #[test]
     fn test_set_get_account_common_prefix() {
-        let manager = MmapPageManager::new_anon(300, 257).unwrap();
-        let orphan_manager = OrphanPageManager::new();
-        let mut metadata = Metadata {
-            snapshot_id: 1,
-            root_page_id: 0,
-            root_subtrie_page_id: 256,
-        };
-        let storage_engine = StorageEngine::new(manager, orphan_manager);
+        let (storage_engine, mut metadata) = create_test_engine(300, 256);
 
-        let path = AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001")));
-        let account = AccountVec::new(U256::from(100), 1, B256::ZERO, B256::ZERO);
-        storage_engine
-            .set_account(&mut metadata, path.clone(), Some(account.clone()))
-            .unwrap();
-        assert_eq!(metadata.root_subtrie_page_id, 257);
+        let test_accounts = vec![
+            (hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001"), create_test_account(100, 1)),
+            (hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002"), create_test_account(123, 456)),
+            (hex!("00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003"), create_test_account(999, 999)),
+            (hex!("00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000004"), create_test_account(1000, 1000)),
+            (hex!("00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000030000000000000000000000000000000005"), create_test_account(1001, 1001)),
+        ];
 
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path.clone())
-            .unwrap();
-        assert_eq!(read_account, Some(account.clone()));
+        // Insert all accounts
+        for (nibbles, account) in test_accounts.iter() {
+            let path = AddressPath::new(Nibbles::from_nibbles(*nibbles));
+            storage_engine
+                .set_account(&mut metadata, path, Some(account.clone()))
+                .unwrap();
+        }
 
-        let path2 = AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002")));
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path2.clone())
-            .unwrap();
-        assert_eq!(read_account, None);
-
-        let account2 = AccountVec::new(U256::from(123), 456, B256::ZERO, B256::ZERO);
-        storage_engine
-            .set_account(&mut metadata, path2.clone(), Some(account2.clone()))
-            .unwrap();
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path2.clone())
-            .unwrap();
-        assert_eq!(read_account, Some(account2.clone()));
-
-        let path3 = AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003")));
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path3.clone())
-            .unwrap();
-        assert_eq!(read_account, None);
-
-        let account3 = AccountVec::new(U256::from(999), 999, B256::ZERO, B256::ZERO);
-        storage_engine
-            .set_account(&mut metadata, path3.clone(), Some(account3.clone()))
-            .unwrap();
-
-        let path4 = AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000004")));
-        let account4 = AccountVec::new(U256::from(1000), 1000, B256::ZERO, B256::ZERO);
-        storage_engine
-            .set_account(&mut metadata, path4.clone(), Some(account4.clone()))
-            .unwrap();
-
-        let path5 = AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000030000000000000000000000000000000005")));
-        let account5 = AccountVec::new(U256::from(1001), 1001, B256::ZERO, B256::ZERO);
-        storage_engine
-            .set_account(&mut metadata, path5.clone(), Some(account5.clone()))
-            .unwrap();
-
-        // assert 1 through 5 are in the trie
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path)
-            .unwrap();
-        assert_eq!(read_account, Some(account));
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path2)
-            .unwrap();
-        assert_eq!(read_account, Some(account2));
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path3)
-            .unwrap();
-        assert_eq!(read_account, Some(account3));
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path4)
-            .unwrap();
-        assert_eq!(read_account, Some(account4));
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path5)
-            .unwrap();
-        assert_eq!(read_account, Some(account5));
+        // Verify all accounts exist
+        for (nibbles, account) in test_accounts {
+            let path = AddressPath::new(Nibbles::from_nibbles(nibbles));
+            let read_account = storage_engine
+                .get_account::<AccountVec>(&metadata, path)
+                .unwrap();
+            assert_eq!(read_account, Some(account));
+        }
     }
 
     #[test]
     fn test_split_page() {
-        let manager = MmapPageManager::new_anon(300, 257).unwrap();
-        let orphan_manager = OrphanPageManager::new();
-        let mut metadata = Metadata {
-            snapshot_id: 1,
-            root_page_id: 0,
-            root_subtrie_page_id: 256,
-        };
-        let storage_engine = StorageEngine::new(manager, orphan_manager);
+        let (storage_engine, mut metadata) = create_test_engine(300, 256);
 
-        let path = AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001")));
-        let account = AccountVec::new(U256::from(100), 1, B256::ZERO, B256::ZERO);
-        storage_engine
-            .set_account(&mut metadata, path.clone(), Some(account.clone()))
-            .unwrap();
-        assert_eq!(metadata.root_subtrie_page_id, 257);
+        let test_accounts = vec![
+            (hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001"), create_test_account(100, 1)),
+            (hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002"), create_test_account(123, 456)),
+            (hex!("00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003"), create_test_account(999, 999)),
+            (hex!("00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000004"), create_test_account(1000, 1000)),
+            (hex!("00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000030000000000000000000000000000000005"), create_test_account(1001, 1001)),
+        ];
 
-        let path2 = AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002")));
-        let account2 = AccountVec::new(U256::from(123), 456, B256::ZERO, B256::ZERO);
-        storage_engine
-            .set_account(&mut metadata, path2.clone(), Some(account2.clone()))
-            .unwrap();
+        // Insert accounts
+        for (nibbles, account) in test_accounts.iter() {
+            let path = AddressPath::new(Nibbles::from_nibbles(*nibbles));
+            storage_engine
+                .set_account(&mut metadata, path, Some(account.clone()))
+                .unwrap();
+        }
 
-        let path3 = AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003")));
-        let account3 = AccountVec::new(U256::from(999), 999, B256::ZERO, B256::ZERO);
-        storage_engine
-            .set_account(&mut metadata, path3.clone(), Some(account3.clone()))
-            .unwrap();
-
-        let path4 = AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000004")));
-        let account4 = AccountVec::new(U256::from(1000), 1000, B256::ZERO, B256::ZERO);
-        storage_engine
-            .set_account(&mut metadata, path4.clone(), Some(account4.clone()))
-            .unwrap();
-
-        let path5 = AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000030000000000000000000000000000000005")));
-        let account5 = AccountVec::new(U256::from(1001), 1001, B256::ZERO, B256::ZERO);
-        storage_engine
-            .set_account(&mut metadata, path5.clone(), Some(account5.clone()))
-            .unwrap();
-        assert_eq!(metadata.root_subtrie_page_id, 257);
-
-        // assert 1 through 5 are in the trie
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path.clone())
-            .unwrap();
-        assert_eq!(read_account, Some(account.clone()));
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path2.clone())
-            .unwrap();
-        assert_eq!(read_account, Some(account2.clone()));
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path3.clone())
-            .unwrap();
-        assert_eq!(read_account, Some(account3.clone()));
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path4.clone())
-            .unwrap();
-        assert_eq!(read_account, Some(account4.clone()));
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path5.clone())
-            .unwrap();
-        assert_eq!(read_account, Some(account5.clone()));
-
+        // Split the page
         let page = storage_engine.get_mut_page(&metadata, 257).unwrap();
         let mut slotted_page = SlottedPage::try_from(page).unwrap();
-
-        println!("before split: {:?}", slotted_page);
         let new_page_id = storage_engine
             .split_page(&mut metadata, &mut slotted_page)
             .unwrap();
-        println!("after split: {:?}", slotted_page);
-        println!("new page id: {:?}", new_page_id);
         metadata.root_subtrie_page_id = new_page_id;
 
-        let page = storage_engine.get_mut_page(&metadata, new_page_id).unwrap();
-        let slotted_page = SlottedPage::try_from(page).unwrap();
-        println!("new page: {:?}", slotted_page);
-
-        // ensure all values still exist
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path)
-            .unwrap();
-        assert_eq!(read_account, Some(account));
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path2)
-            .unwrap();
-        assert_eq!(read_account, Some(account2));
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path3)
-            .unwrap();
-        assert_eq!(read_account, Some(account3));
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path4)
-            .unwrap();
-        assert_eq!(read_account, Some(account4));
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path5)
-            .unwrap();
-        assert_eq!(read_account, Some(account5));
+        // Verify all accounts still exist after split
+        for (nibbles, account) in test_accounts {
+            let path = AddressPath::new(Nibbles::from_nibbles(nibbles));
+            let read_account = storage_engine
+                .get_account::<AccountVec>(&metadata, path)
+                .unwrap();
+            assert_eq!(read_account, Some(account));
+        }
     }
 
     #[test]
     fn test_insert_until_split() {
-        let manager = MmapPageManager::new_anon(300, 257).unwrap();
-        let orphan_manager = OrphanPageManager::new();
-        let mut metadata = Metadata {
-            snapshot_id: 1,
-            root_page_id: 0,
-            root_subtrie_page_id: 256,
-        };
-        let storage_engine = StorageEngine::new(manager, orphan_manager);
+        let (storage_engine, mut metadata) = create_test_engine(300, 256);
 
-        let path = AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000")));
-        let account = AccountVec::new(U256::from(100), 1, B256::ZERO, B256::ZERO);
-        storage_engine
-            .set_account(&mut metadata, path.clone(), Some(account.clone()))
-            .unwrap();
-        assert_eq!(metadata.root_subtrie_page_id, 257);
+        struct TestCase {
+            path: AddressPath,
+            account: AccountVec,
+            expected_page_id: PageId,
+        }
 
-        let path2 = AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010100000000000000000000000000000000000000000000000000000000000000")));
-        let account2 = AccountVec::new(U256::from(123), 456, B256::ZERO, B256::ZERO);
-        storage_engine
-            .set_account(&mut metadata, path2.clone(), Some(account2.clone()))
-            .unwrap();
-        assert_eq!(metadata.root_subtrie_page_id, 257);
+        let test_cases = vec![
+            TestCase {
+                path: AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000"))),
+                account: create_test_account(100, 1),
+                expected_page_id: 257,
+            },
+            TestCase {
+                path: AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010100000000000000000000000000000000000000000000000000000000000000"))),
+                account: create_test_account(123, 456),
+                expected_page_id: 257,
+            },
+            TestCase {
+                path: AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010101000000000000000000000000000000000000000000000000000000000000"))),
+                account: create_test_account(999, 999),
+                expected_page_id: 257,
+            },
+            TestCase {
+                path: AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010101010000000000000000000000000000000000000000000000000000000000"))),
+                account: create_test_account(1000, 1000),
+                expected_page_id: 257,
+            },
+            TestCase {
+                path: AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010101010100000000000000000000000000000000000000000000000000000000"))),
+                account: create_test_account(1001, 1001),
+                expected_page_id: 257,
+            },
+            TestCase {
+                path: AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010101010101000000000000000000000000000000000000000000000000000000"))),
+                account: create_test_account(1002, 1002),
+                expected_page_id: 257,
+            },
+            TestCase {
+                path: AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010101010101010000000000000000000000000000000000000000000000000000"))),
+                account: create_test_account(1003, 1003),
+                expected_page_id: 258, // increases due to split
+            },
+        ];
 
-        let path3 = AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010101000000000000000000000000000000000000000000000000000000000000")));
-        let account3 = AccountVec::new(U256::from(999), 999, B256::ZERO, B256::ZERO);
-        storage_engine
-            .set_account(&mut metadata, path3.clone(), Some(account3.clone()))
-            .unwrap();
-        assert_eq!(metadata.root_subtrie_page_id, 257);
+        for test_case in &test_cases {
+            storage_engine
+                .set_account(
+                    &mut metadata,
+                    test_case.path.clone(),
+                    Some(test_case.account.clone()),
+                )
+                .unwrap();
+            assert_eq!(metadata.root_subtrie_page_id, test_case.expected_page_id);
+        }
 
-        let path4 = AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010101010000000000000000000000000000000000000000000000000000000000")));
-        let account4 = AccountVec::new(U256::from(1000), 1000, B256::ZERO, B256::ZERO);
-        storage_engine
-            .set_account(&mut metadata, path4.clone(), Some(account4.clone()))
-            .unwrap();
-        assert_eq!(metadata.root_subtrie_page_id, 257);
-
-        let path5 = AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010101010100000000000000000000000000000000000000000000000000000000")));
-        let account5 = AccountVec::new(U256::from(1001), 1001, B256::ZERO, B256::ZERO);
-        storage_engine
-            .set_account(&mut metadata, path5.clone(), Some(account5.clone()))
-            .unwrap();
-        assert_eq!(metadata.root_subtrie_page_id, 257);
-
-        let path6 = AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010101010101000000000000000000000000000000000000000000000000000000")));
-        let account6 = AccountVec::new(U256::from(1002), 1002, B256::ZERO, B256::ZERO);
-        storage_engine
-            .set_account(&mut metadata, path6.clone(), Some(account6.clone()))
-            .unwrap();
-        // this changed due to the split
-        assert_eq!(metadata.root_subtrie_page_id, 258);
-
-        // let page = storage_engine.get_mut_page(&metadata, 257).unwrap();
-        // let mut slotted_page = SlottedPage::try_from(page).unwrap();
-
-        // println!("before split: {:?}", slotted_page);
-
-        // let page = storage_engine.get_mut_page(&metadata, 258).unwrap();
-        // let mut slotted_page = SlottedPage::try_from(page).unwrap();
-
-        // println!("after split: {:?}", slotted_page);
-
-        // ensure all values still exist
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path)
-            .unwrap();
-        assert_eq!(read_account, Some(account));
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path2)
-            .unwrap();
-        assert_eq!(read_account, Some(account2));
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path3)
-            .unwrap();
-        assert_eq!(read_account, Some(account3));
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path4)
-            .unwrap();
-        assert_eq!(read_account, Some(account4));
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path5)
-            .unwrap();
-        assert_eq!(read_account, Some(account5));
-
-        let read_account = storage_engine
-            .get_account::<AccountVec>(&metadata, path6)
-            .unwrap();
-        assert_eq!(read_account, Some(account6));
+        for test_case in &test_cases {
+            let read_account = storage_engine
+                .get_account::<AccountVec>(&metadata, test_case.path.clone())
+                .unwrap();
+            assert_eq!(read_account, Some(test_case.account.clone()));
+        }
     }
 
     #[test]
     fn test_insert_get_1000_accounts() {
-        let manager = MmapPageManager::new_anon(5000, 257).unwrap();
-        let orphan_manager = OrphanPageManager::new();
-        let mut metadata = Metadata {
-            snapshot_id: 1,
-            root_page_id: 0,
-            root_subtrie_page_id: 256,
-        };
-        let storage_engine = StorageEngine::new(manager, orphan_manager);
+        let (storage_engine, mut metadata) = create_test_engine(5000, 256);
 
         for i in 0..1000 {
             let path = address_path_for_idx(i);
-            let account = AccountVec::new(U256::from(i), i, B256::ZERO, B256::ZERO);
+            let account = create_test_account(i, i);
             storage_engine
                 .set_account(&mut metadata, path.clone(), Some(account.clone()))
                 .unwrap();
@@ -1141,10 +928,7 @@ mod tests {
             let account = storage_engine
                 .get_account::<AccountVec>(&metadata, path.clone())
                 .unwrap();
-            assert_eq!(
-                account,
-                Some(AccountVec::new(U256::from(i), i, B256::ZERO, B256::ZERO))
-            );
+            assert_eq!(account, Some(create_test_account(i, i)));
         }
     }
 
