@@ -10,6 +10,8 @@ use super::{
 pub mod cell_pointer;
 use cell_pointer::CellPointer;
 
+const MAX_NUM_CELLS: u8 = 255; // With 1 byte for the number of cells, the maximum number of cells is 255.
+
 pub trait Value<'v>: TryFrom<&'v [u8]> + TryInto<&'v [u8], Error: Debug> + Debug {}
 
 impl<'v> Value<'v> for &'v [u8] {}
@@ -144,7 +146,7 @@ impl<'p> SlottedPage<'p, RW> {
                 return Ok(i);
             }
         }
-        if num_cells == 255 {
+        if num_cells == MAX_NUM_CELLS {
             return Err(PageError::NoFreeCells);
         }
         Ok(num_cells)
@@ -152,10 +154,62 @@ impl<'p> SlottedPage<'p, RW> {
 
     // Allocates a cell pointer at the given index with the given length and returns the cell pointer.
     fn allocate_cell_pointer(&mut self, index: u8, length: u16) -> Result<CellPointer, PageError> {
-        // TODO: defragment the page if necessary, or attempt to reuse deleted cells
+        match self.find_available_slot(index, length)? {
+            Some(offset) => {
+                let num_cells = self.num_cells();
+                let new_num_cells = max(num_cells, index + 1);
 
-        // for now, always allocate from the contiguous free space
+                if new_num_cells > num_cells {
+                    self.set_num_cells(new_num_cells);
+                }
+                return self.set_cell_pointer(index, offset, length);
+            }
+            None => {
+                // TODO: defragment the page
+                Err(PageError::PageIsFull)
+            }
+        }
+    }
+
+    // Finds a free space with length in the page. Returns slotted page offset if found.
+    fn find_available_slot(&self, index: u8, length: u16) -> Result<Option<u16>, PageError> {
+        match self.find_available_slot_in_used_space(length)? {
+            Some(offset) => Ok(Some(offset)),
+            None => self.find_available_slot_in_remaining_space(index, length),
+        }
+    }
+
+    fn find_available_slot_in_used_space(&self, length: u16) -> Result<Option<u16>, PageError> {
         let num_cells = self.num_cells();
+        let mut used_space = (0..num_cells).try_fold(
+            Vec::new(),
+            |mut acc, i| -> Result<Vec<(u16, u16)>, PageError> {
+                let cp = self.get_cell_pointer(i)?;
+                if !cp.is_deleted() {
+                    acc.push((cp.offset() - cp.length(), cp.offset()));
+                }
+                Ok(acc)
+            },
+        )?;
+        used_space.sort_by(|a, b| a.1.cmp(&b.1));
+
+        if used_space.len() > 1 {
+            for i in 0..used_space.len() - 1 {
+                if used_space[i + 1].0 - used_space[i].1 >= length {
+                    return Ok(Some(used_space[i].1 + length));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn find_available_slot_in_remaining_space(
+        &self,
+        index: u8,
+        length: u16,
+    ) -> Result<Option<u16>, PageError> {
+        let num_cells = self.num_cells();
+        let new_num_cells = max(num_cells, index + 1);
         let mut max_offset = 0;
         for i in 0..num_cells {
             let offset = self.get_cell_pointer(i)?.offset();
@@ -164,18 +218,13 @@ impl<'p> SlottedPage<'p, RW> {
             }
         }
 
-        let new_num_cells = max(num_cells, index + 1);
-
         let offset = max_offset + length;
+
         if offset as usize > self.page.contents().len() - new_num_cells as usize * 3 - 1 {
-            return Err(PageError::PageIsFull);
+            return Ok(None);
         }
 
-        if new_num_cells > num_cells {
-            self.set_num_cells(new_num_cells);
-        }
-
-        return self.set_cell_pointer(index, offset, length);
+        Ok(Some(offset))
     }
 
     // Sets the cell pointer at the given index.
@@ -383,5 +432,79 @@ mod tests {
         assert_eq!(subtrie_page.num_cells(), 1);
         assert_eq!(subtrie_page.get_cell_pointer(0).unwrap().length(), 4084);
         assert_eq!(subtrie_page.get_cell_pointer(0).unwrap().offset(), 4084);
+    }
+
+    #[test]
+    fn test_allocate_reuse_deleted_space() {
+        let mut data = [0; PAGE_SIZE];
+        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
+        let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
+
+        let i0 = subtrie_page.insert_value(&[11; 1020][..]).unwrap();
+        assert_eq!(i0, 0);
+
+        let i1 = subtrie_page.insert_value(&[11; 1020][..]).unwrap();
+        assert_eq!(i1, 1);
+
+        let i2 = subtrie_page.insert_value(&[11; 1020][..]).unwrap();
+        assert_eq!(i2, 2);
+
+        let i3 = subtrie_page.insert_value(&[11; 1015][..]).unwrap();
+        assert_eq!(i3, 3);
+
+        subtrie_page.delete_value(i1).unwrap();
+        assert_eq!(subtrie_page.num_cells(), 4);
+
+        let i4 = subtrie_page.insert_value(&[11; 1000][..]).unwrap();
+        assert_eq!(i4, 1);
+        assert_eq!(subtrie_page.num_cells(), 4);
+        let cell_pointer = subtrie_page.get_cell_pointer(i4).unwrap();
+        assert_eq!(cell_pointer.length(), 1000);
+        assert_eq!(cell_pointer.offset(), 2020); // 2020 = 1020 + 1000
+    }
+
+    #[test]
+    fn test_allocate_reuse_deleted_spaces() {
+        let mut data = [0; PAGE_SIZE];
+        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
+        let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
+
+        let i0 = subtrie_page.insert_value(&[11; 1020][..]).unwrap();
+        assert_eq!(i0, 0);
+
+        let i1 = subtrie_page.insert_value(&[11; 1020][..]).unwrap();
+        assert_eq!(i1, 1);
+
+        let i2 = subtrie_page.insert_value(&[11; 1020][..]).unwrap();
+        assert_eq!(i2, 2);
+
+        let i3 = subtrie_page.insert_value(&[11; 1015][..]).unwrap();
+        assert_eq!(i3, 3);
+
+        subtrie_page.delete_value(i1).unwrap();
+        assert_eq!(subtrie_page.num_cells(), 4);
+        subtrie_page.delete_value(i2).unwrap();
+        assert_eq!(subtrie_page.num_cells(), 4);
+
+        let i4 = subtrie_page.insert_value(&[11; 1500][..]).unwrap();
+        assert_eq!(i4, 1);
+        assert_eq!(subtrie_page.num_cells(), 4);
+        let cell_pointer = subtrie_page.get_cell_pointer(i4).unwrap();
+        assert_eq!(cell_pointer.length(), 1500);
+        assert_eq!(cell_pointer.offset(), 2520); // 2520 = 1020 + 1500
+
+        let i5 = subtrie_page.insert_value(&[11; 100][..]).unwrap();
+        assert_eq!(i5, 2);
+        assert_eq!(subtrie_page.num_cells(), 4);
+        let cell_pointer = subtrie_page.get_cell_pointer(i5).unwrap();
+        assert_eq!(cell_pointer.length(), 100);
+        assert_eq!(cell_pointer.offset(), 2620); // 2620 = 2520 + 100
+
+        let i6 = subtrie_page.insert_value(&[11; 100][..]).unwrap();
+        assert_eq!(i6, 4);
+        assert_eq!(subtrie_page.num_cells(), 5);
+        let cell_pointer = subtrie_page.get_cell_pointer(i6).unwrap();
+        assert_eq!(cell_pointer.length(), 100);
+        assert_eq!(cell_pointer.offset(), 2720); // 2720 = 2620 + 100
     }
 }
