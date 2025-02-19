@@ -130,8 +130,8 @@ impl Value for Node {
                     continue;
                 }
                 let child_offset = 3 + prefix_length + i * 36;
-                let child_length = bytes[child_offset..child_offset + 36].to_vec();
-                *child = Some(Pointer::from_bytes(&child_length)?);
+                let child_bytes = bytes[child_offset..child_offset + 36].to_vec();
+                *child = Some(Pointer::from_bytes(&child_bytes)?);
             }
             Ok(Self::Branch { prefix, children })
         }
