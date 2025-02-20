@@ -209,7 +209,7 @@ impl<'p> SlottedPage<'p, RW> {
             }
             None => {
                 // if defragmenting is possible, defragment the page
-                if self.defragment(length)? {
+                if self.defragment(index, length)? {
                     return self.allocate_cell_pointer(index, length);
                 }
                 // otherwise return PageIsFull
@@ -218,7 +218,7 @@ impl<'p> SlottedPage<'p, RW> {
         }
     }
 
-    fn defragment(&mut self, additional_slot_length: u16) -> Result<bool, PageError> {
+    fn defragment(&mut self, index: u8, additional_slot_length: u16) -> Result<bool, PageError> {
         let num_cells = self.num_cells();
 
         let total_occupied_space =
@@ -230,8 +230,10 @@ impl<'p> SlottedPage<'p, RW> {
                 Ok(size)
             })?;
 
-        // TODO: need to add header length
-        if (total_occupied_space + additional_slot_length) as usize > PAGE_DATA_SIZE {
+        let new_num_cells = max(num_cells, index + 1);
+        if (total_occupied_space + additional_slot_length + new_num_cells as u16 * 3 + 1) as usize
+            > PAGE_DATA_SIZE
+        {
             return Ok(false);
         }
 
