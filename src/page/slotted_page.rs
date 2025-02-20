@@ -209,10 +209,64 @@ impl<'p> SlottedPage<'p, RW> {
             }
             None => {
                 // if defragmenting is possible, defragment the page
+                if self.defragment(length)? {
+                    return self.allocate_cell_pointer(index, length);
+                }
                 // otherwise return PageIsFull
                 Err(PageError::PageIsFull)
             }
         }
+    }
+
+    fn defragment(&mut self, additional_slot_length: u16) -> Result<bool, PageError> {
+        let num_cells = self.num_cells();
+
+        let total_occupied_space =
+            (0..num_cells).try_fold(0, |mut size, i| -> Result<u16, PageError> {
+                let cp = self.get_cell_pointer(i)?;
+                if !cp.is_deleted() {
+                    size += cp.length();
+                }
+                Ok(size)
+            })?;
+
+        // TODO: need to add header length
+        if (total_occupied_space + additional_slot_length) as usize > PAGE_DATA_SIZE {
+            return Ok(false);
+        }
+
+        let mut last_start = 0;
+        let mut last_offset = 0;
+        for i in 0..num_cells {
+            let cp = self.get_cell_pointer(i)?;
+            if cp.is_deleted() {
+                continue;
+            }
+            // current cell pointer
+            let len = cp.length();
+            let offset = cp.offset();
+            let start = offset - len;
+            if start == last_start {
+                last_offset = offset;
+                continue;
+            }
+
+            let start_index = (PAGE_DATA_SIZE as u16 - offset) as usize;
+            let end_index = (PAGE_DATA_SIZE as u16 - offset + len) as usize;
+            let data = &self.page.contents()[start_index..end_index].to_vec();
+
+            let new_offset = last_offset + len;
+            self.set_cell_pointer(i, new_offset, len)?;
+
+            let start_index = (PAGE_DATA_SIZE as u16 - new_offset) as usize;
+            let end_index = (PAGE_DATA_SIZE as u16 - new_offset + len) as usize;
+            self.page.contents_mut()[start_index..end_index].copy_from_slice(&data);
+
+            last_start = new_offset - len;
+            last_offset = new_offset;
+        }
+
+        Ok(true)
     }
 
     // Finds a free space with length in the page. Returns slotted page offset if found.
@@ -811,16 +865,16 @@ mod tests {
         let i0 = subtrie_page.insert_value(&[11; 814][..]).unwrap();
         assert_eq!(i0, 0);
 
-        let i1 = subtrie_page.insert_value(&[11; 814][..]).unwrap();
+        let i1 = subtrie_page.insert_value(&[12; 814][..]).unwrap();
         assert_eq!(i1, 1);
 
-        let i2 = subtrie_page.insert_value(&[11; 814][..]).unwrap();
+        let i2 = subtrie_page.insert_value(&[13; 814][..]).unwrap();
         assert_eq!(i2, 2);
 
-        let i3 = subtrie_page.insert_value(&[11; 814][..]).unwrap();
+        let i3 = subtrie_page.insert_value(&[14; 814][..]).unwrap();
         assert_eq!(i3, 3);
 
-        let i4 = subtrie_page.insert_value(&[11; 814][..]).unwrap();
+        let i4 = subtrie_page.insert_value(&[15; 814][..]).unwrap();
         assert_eq!(i4, 4);
 
         subtrie_page.delete_value(i1).unwrap();
@@ -833,7 +887,20 @@ mod tests {
         assert!(cell_index.is_err());
         assert!(matches!(cell_index, Err(PageError::PageIsFull)));
 
-        let i4 = subtrie_page.insert_value(&[11; 1500][..]).unwrap();
-        assert_eq!(i4, 1);
+        // should be able to allocate 1500 bytes (< 814 + 814)
+        let i5 = subtrie_page.insert_value(&[16; 1500][..]).unwrap();
+        assert_eq!(i5, 1);
+
+        assert_eq!(subtrie_page.get_value::<&[u8]>(i0).unwrap(), &[11; 814][..]);
+        assert_eq!(
+            subtrie_page.get_value::<&[u8]>(i1).unwrap(),
+            &[16; 1500][..]
+        );
+        assert_eq!(subtrie_page.get_value::<&[u8]>(i2).unwrap(), &[13; 814][..]);
+        let v = subtrie_page.get_value::<&[u8]>(i3);
+        assert!(v.is_err());
+        assert!(matches!(v, Err(PageError::InvalidCellPointer)));
+
+        assert_eq!(subtrie_page.get_value::<&[u8]>(i4).unwrap(), &[15; 814][..]);
     }
 }
