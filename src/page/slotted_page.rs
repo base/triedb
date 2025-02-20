@@ -865,19 +865,29 @@ mod tests {
         let page = Page::new_rw_with_snapshot(42, 123, &mut data);
         let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
 
-        let i0 = subtrie_page.insert_value(&[11; 814][..]).unwrap();
+        let i0 = subtrie_page
+            .insert_value(String::from_iter(&['a'; 814]))
+            .unwrap();
         assert_eq!(i0, 0);
 
-        let i1 = subtrie_page.insert_value(&[12; 814][..]).unwrap();
+        let i1 = subtrie_page
+            .insert_value(String::from_iter(&['b'; 814]))
+            .unwrap();
         assert_eq!(i1, 1);
 
-        let i2 = subtrie_page.insert_value(&[13; 814][..]).unwrap();
+        let i2 = subtrie_page
+            .insert_value(String::from_iter(&['c'; 814]))
+            .unwrap();
         assert_eq!(i2, 2);
 
-        let i3 = subtrie_page.insert_value(&[14; 814][..]).unwrap();
+        let i3 = subtrie_page
+            .insert_value(String::from_iter(&['d'; 814]))
+            .unwrap();
         assert_eq!(i3, 3);
 
-        let i4 = subtrie_page.insert_value(&[15; 814][..]).unwrap();
+        let i4 = subtrie_page
+            .insert_value(String::from_iter(&['e'; 814]))
+            .unwrap();
         assert_eq!(i4, 4);
 
         subtrie_page.delete_value(i1).unwrap();
@@ -886,24 +896,35 @@ mod tests {
         assert_eq!(subtrie_page.num_cells(), 5);
 
         // should not be able to allocate anything larger than 1630 bytes (4088 - 1 - 3*5 - 814 - 814 - 814 = 1630)
-        let cell_index = subtrie_page.insert_value(&[16; 1631][..]);
+        let cell_index = subtrie_page.insert_value(String::from_iter(&['f'; 1631]));
         assert!(cell_index.is_err());
         assert!(matches!(cell_index, Err(PageError::PageIsFull)));
 
         // should be able to allocate 1630 bytes
-        let i5 = subtrie_page.insert_value(&[17; 1630][..]).unwrap();
+        let i5 = subtrie_page
+            .insert_value(String::from_iter(&['g'; 1630]))
+            .unwrap();
         assert_eq!(i5, 1);
 
-        assert_eq!(subtrie_page.get_value::<&[u8]>(i0).unwrap(), &[11; 814][..]);
         assert_eq!(
-            subtrie_page.get_value::<&[u8]>(i1).unwrap(),
-            &[17; 1630][..]
+            subtrie_page.get_value::<String>(i0).unwrap(),
+            String::from_iter(&['a'; 814])
         );
-        assert_eq!(subtrie_page.get_value::<&[u8]>(i2).unwrap(), &[13; 814][..]);
-        let v = subtrie_page.get_value::<&[u8]>(i3);
+        assert_eq!(
+            subtrie_page.get_value::<String>(i1).unwrap(),
+            String::from_iter(&['g'; 1630])
+        );
+        assert_eq!(
+            subtrie_page.get_value::<String>(i2).unwrap(),
+            String::from_iter(&['c'; 814])
+        );
+        let v = subtrie_page.get_value::<String>(i3);
         assert!(v.is_err());
         assert!(matches!(v, Err(PageError::InvalidCellPointer)));
 
-        assert_eq!(subtrie_page.get_value::<&[u8]>(i4).unwrap(), &[15; 814][..]);
+        assert_eq!(
+            subtrie_page.get_value::<String>(i4).unwrap(),
+            String::from_iter(&['e'; 814])
+        );
     }
 }
