@@ -207,14 +207,10 @@ impl<'p> SlottedPage<'p, RW> {
                 }
                 return self.set_cell_pointer(index, offset, length);
             }
-            None => {
-                // if defragmenting is possible, defragment the page
-                if self.defragment(index, length)? {
-                    return self.allocate_cell_pointer(index, length);
-                }
-                // otherwise return PageIsFull
-                Err(PageError::PageIsFull)
-            }
+            None => match self.defragment(index, length)? {
+                true => return self.allocate_cell_pointer(index, length),
+                false => return Err(PageError::PageIsFull),
+            },
         }
     }
 
