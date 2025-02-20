@@ -255,6 +255,7 @@ impl<'p> SlottedPage<'p, RW> {
 
             let start_index = (PAGE_DATA_SIZE as u16 - offset) as usize;
             let end_index = (PAGE_DATA_SIZE as u16 - offset + len) as usize;
+            // is there safe way to copy data within a same slice without copying?
             let data = &self.page.contents()[start_index..end_index].to_vec();
 
             let new_offset = last_offset + len;
@@ -884,19 +885,19 @@ mod tests {
         subtrie_page.delete_value(i3).unwrap();
         assert_eq!(subtrie_page.num_cells(), 5);
 
-        // should not be able to allocate 2000 bytes
-        let cell_index = subtrie_page.insert_value(&[11; 2000][..]);
+        // should not be able to allocate anything larger than 1630 bytes (4088 - 1 - 3*5 - 814 - 814 - 814 = 1630)
+        let cell_index = subtrie_page.insert_value(&[16; 1631][..]);
         assert!(cell_index.is_err());
         assert!(matches!(cell_index, Err(PageError::PageIsFull)));
 
-        // should be able to allocate 1500 bytes (< 814 + 814)
-        let i5 = subtrie_page.insert_value(&[16; 1500][..]).unwrap();
+        // should be able to allocate 1630 bytes
+        let i5 = subtrie_page.insert_value(&[17; 1630][..]).unwrap();
         assert_eq!(i5, 1);
 
         assert_eq!(subtrie_page.get_value::<&[u8]>(i0).unwrap(), &[11; 814][..]);
         assert_eq!(
             subtrie_page.get_value::<&[u8]>(i1).unwrap(),
-            &[16; 1500][..]
+            &[17; 1630][..]
         );
         assert_eq!(subtrie_page.get_value::<&[u8]>(i2).unwrap(), &[13; 814][..]);
         let v = subtrie_page.get_value::<&[u8]>(i3);
