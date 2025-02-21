@@ -9,4 +9,4 @@ pub use manager::{PageError, PageId, PageManager};
 pub use orphan::OrphanPageManager;
 pub use page::{Page, PageKind, PAGE_DATA_SIZE, PAGE_SIZE, RO, RW};
 pub use root::RootPage;
-pub use slotted_page::{SlottedPage, Value};
+pub use slotted_page::SlottedPage;

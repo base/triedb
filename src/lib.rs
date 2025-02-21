@@ -4,6 +4,7 @@ mod location;
 mod node;
 mod page;
 mod path;
+mod pointer;
 mod snapshot;
 mod storage;
 mod transaction;
