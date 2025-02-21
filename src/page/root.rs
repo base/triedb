@@ -628,4 +628,43 @@ mod tests {
             assert_eq!(orphan_page_id, my_orphan_page_ids_for_page_256[i])
         }
     }
+
+    #[test]
+    fn test_orphan_list_shrinks_to_empty() {
+        // GIVEN: 256 pages with PageIds [0-255]
+        let mut page_manager = MmapPageManager::new_anon(257, 0).unwrap();
+        let page = page_manager.allocate(42).unwrap();
+        assert_eq!(page.page_id(), 0);
+        let mut root_page = RootPage::new(page, B256::default());
+
+        // page 0 allocated. allocate 255 more pages
+        for _ in 1..256 {
+            page_manager.allocate(42).unwrap();
+        }
+
+        // WHEN: Pages 2-255 are filled with orphan ids and all orphan ids are popped off and used
+        // with no new orphan ids
+        //
+        // The root page can hold 1011 orphan page ids and all the reserved pages
+        // can hold 1021 (remember the last 4 bytes are reserved for the next page id
+        // and the first 8 bytes are the header).
+        // So total orphan pages is 1011 + (1021 * 254) == 260345
+        let expected_orphan_page_ids: Vec<PageId> = (1..260346).map(|x| x as PageId).collect();
+        root_page
+            .add_orphaned_page_ids(&expected_orphan_page_ids, 0, &mut page_manager)
+            .unwrap();
+
+        let empty_new_orphan_ids = Vec::new();
+        root_page
+            .add_orphaned_page_ids(
+                &empty_new_orphan_ids,
+                expected_orphan_page_ids.len(),
+                &mut page_manager,
+            )
+            .unwrap();
+
+        // THEN: No orphan ids should be returned
+        let orphan_page_ids = root_page.get_orphaned_page_ids(&page_manager).unwrap();
+        assert_eq!(orphan_page_ids.len(), 0)
+    }
 }
