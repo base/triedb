@@ -245,18 +245,18 @@ impl<P: PageManager> StorageEngine<P> {
                 // Re-clone the page, split it, and try again. This orphans the first clone.
                 // TODO: it's probably better if we can proactively split the page instead of needing this fallback behavior.
                 // This would also allow us to avoid cloning the path and account.
-                let mut inner = self.inner.write().unwrap();
-                inner
-                    .orphan_manager
-                    .add_orphaned_page_id(metadata.snapshot_id, new_slotted_page.page_id());
-                drop(inner);
+                {
+                    self.inner
+                        .write()
+                        .unwrap()
+                        .orphan_manager
+                        .add_orphaned_page_id(metadata.snapshot_id, new_slotted_page.page_id());
+                }
                 let page = self.get_mut_clone(metadata, page_id)?;
                 let mut new_slotted_page = SlottedPage::try_from(page)?;
-                let new_page_id = self
+                self
                     .split_page(metadata, &mut new_slotted_page)
                     .expect("split page should succeed");
-                let page = self.get_mut_page(metadata, new_page_id)?;
-                let mut new_slotted_page = SlottedPage::try_from(page)?;
                 let location = self
                     .set_account_in_cloned_page(
                         metadata,
@@ -377,16 +377,12 @@ impl<P: PageManager> StorageEngine<P> {
         }
     }
 
-    // Split the page into two new pages, moving the largest immediate subtrie of the root node to the child page
-    // and the remaining nodes to the parent page.
-    // TODO: only create one new page for the child once the parent can be defragmented.
+    // Split the page into two, moving the largest immediate subtrie of the root node to a new child page.
     fn split_page(
         &self,
         metadata: &mut Metadata,
         page: &mut SlottedPage<'_, RW>,
-    ) -> Result<PageId, Error> {
-        let parent_page = self.allocate_page(metadata)?;
-        let mut parent_slotted_page = SlottedPage::try_from(parent_page)?;
+    ) -> Result<(), Error> {
         let child_page = self.allocate_page(metadata)?;
         let mut child_slotted_page = SlottedPage::try_from(child_page)?;
 
@@ -422,11 +418,7 @@ impl<P: PageManager> StorageEngine<P> {
             page.set_value(0, root_node)?;
         }
 
-        // Move the root node to the new page in order to defragment the page.
-        // This won't be necessary once the slotted page can auto-compact.
-        self.move_subtrie_nodes(page, 0, &mut parent_slotted_page)?;
-
-        Ok(parent_slotted_page.page_id())
+        Ok(())
     }
 
     // Helper function to count nodes in a subtrie on the given page
@@ -827,10 +819,9 @@ mod tests {
         // Split the page
         let page = storage_engine.get_mut_page(&metadata, 257).unwrap();
         let mut slotted_page = SlottedPage::try_from(page).unwrap();
-        let new_page_id = storage_engine
+        storage_engine
             .split_page(&mut metadata, &mut slotted_page)
             .unwrap();
-        metadata.root_subtrie_page_id = new_page_id;
 
         // Verify all accounts still exist after split
         for (nibbles, account) in test_accounts {
@@ -839,73 +830,6 @@ mod tests {
                 .get_account::<AccountVec>(&metadata, path)
                 .unwrap();
             assert_eq!(read_account, Some(account));
-        }
-    }
-
-    #[test]
-    fn test_insert_until_split() {
-        let (storage_engine, mut metadata) = create_test_engine(300, 256);
-
-        struct TestCase {
-            path: AddressPath,
-            account: AccountVec,
-            expected_page_id: PageId,
-        }
-
-        let test_cases = vec![
-            TestCase {
-                path: AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000"))),
-                account: create_test_account(100, 1),
-                expected_page_id: 257,
-            },
-            TestCase {
-                path: AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010100000000000000000000000000000000000000000000000000000000000000"))),
-                account: create_test_account(123, 456),
-                expected_page_id: 257,
-            },
-            TestCase {
-                path: AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010101000000000000000000000000000000000000000000000000000000000000"))),
-                account: create_test_account(999, 999),
-                expected_page_id: 257,
-            },
-            TestCase {
-                path: AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010101010000000000000000000000000000000000000000000000000000000000"))),
-                account: create_test_account(1000, 1000),
-                expected_page_id: 257,
-            },
-            TestCase {
-                path: AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010101010100000000000000000000000000000000000000000000000000000000"))),
-                account: create_test_account(1001, 1001),
-                expected_page_id: 257,
-            },
-            TestCase {
-                path: AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010101010101000000000000000000000000000000000000000000000000000000"))),
-                account: create_test_account(1002, 1002),
-                expected_page_id: 257,
-            },
-            TestCase {
-                path: AddressPath::new(Nibbles::from_nibbles(hex!("00000000000000000000000000000000000000000000000000000000000000010101010101010000000000000000000000000000000000000000000000000000"))),
-                account: create_test_account(1003, 1003),
-                expected_page_id: 258, // increases due to split
-            },
-        ];
-
-        for test_case in &test_cases {
-            storage_engine
-                .set_account(
-                    &mut metadata,
-                    test_case.path.clone(),
-                    Some(test_case.account.clone()),
-                )
-                .unwrap();
-            assert_eq!(metadata.root_subtrie_page_id, test_case.expected_page_id);
-        }
-
-        for test_case in &test_cases {
-            let read_account = storage_engine
-                .get_account::<AccountVec>(&metadata, test_case.path.clone())
-                .unwrap();
-            assert_eq!(read_account, Some(test_case.account.clone()));
         }
     }
 
