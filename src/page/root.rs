@@ -163,10 +163,10 @@ impl<'p> RootPage<'p, RW> {
             );
 
             if current_slot_index == last_slot_index {
-                let mut next_page: Page<'p, RW>;
-                //
                 // the last slot is a special case that, if non-zero, indicates that the
                 // orphan list continues at the page id stored in the last slot.
+
+                let mut next_page: Page<'p, RW>;
 
                 if current_orphan_page_id == 0 {
                     // we are at the end of the orphan list on disk but we have more elements
