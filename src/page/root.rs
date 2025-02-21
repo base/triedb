@@ -467,7 +467,7 @@ mod tests {
 
     #[test]
     fn test_orphan_list_writes_reserved_pages() {
-        // GIVEN: 2 root pages with PageId 1 and PageId 2
+        // GIVEN: 2 root pages with PageId 0 and PageId 1
         let mut page_manager = MmapPageManager::new_anon(20, 0).unwrap();
         let page = page_manager.allocate(42).unwrap();
         assert_eq!(page.page_id(), 0);
@@ -476,13 +476,16 @@ mod tests {
         let page2 = page_manager.allocate(42).unwrap();
         assert_eq!(page2.page_id(), 1);
 
+        let first_reserved_page_for_orphan_id = page_manager.allocate(42).unwrap();
+        assert_eq!(first_reserved_page_for_orphan_id.page_id(), 2);
+
         // WHEN: The remainder of the root page is maxed out with orphan page ids
         let orphan_page_ids = (1..1012).map(|x| x as PageId).collect();
         root_page
             .add_orphaned_page_ids(&orphan_page_ids, 0, &mut page_manager)
             .unwrap();
 
-        // THEN: Adding more orphan page ids should spill over to page 1
+        // THEN: Adding more orphan page ids should spill over to page 2
         let my_orphan_page_ids_for_page_2: &[PageId] = &[1012, 1013, 1014, 1015];
         root_page
             .add_orphaned_page_ids(
@@ -495,7 +498,7 @@ mod tests {
         let mut orphan_page_ids_page_2 = Vec::new();
         root_page
             .get_orphaned_page_ids_helper(
-                page2.contents(),
+                first_reserved_page_for_orphan_id.contents(),
                 0,
                 &mut orphan_page_ids_page_2,
                 &page_manager,
