@@ -240,7 +240,6 @@ impl<'p> SlottedPage<'p, RW> {
             if cp.is_deleted() {
                 continue;
             }
-            // current cell pointer
             let len = cp.length();
             let offset = cp.offset();
             let start = offset - len;
@@ -250,16 +249,15 @@ impl<'p> SlottedPage<'p, RW> {
             }
 
             let start_index = (PAGE_DATA_SIZE as u16 - offset) as usize;
-            let end_index = (PAGE_DATA_SIZE as u16 - offset + len) as usize;
-            // is there safe way to copy data within a same slice without copying?
-            let data = &self.page.contents()[start_index..end_index].to_vec();
+            let end_index = start_index + len as usize;
 
             let new_offset = last_offset + len;
             self.set_cell_pointer(i, new_offset, len)?;
 
-            let start_index = (PAGE_DATA_SIZE as u16 - new_offset) as usize;
-            let end_index = (PAGE_DATA_SIZE as u16 - new_offset + len) as usize;
-            self.page.contents_mut()[start_index..end_index].copy_from_slice(&data);
+            let new_start_index = (PAGE_DATA_SIZE as u16 - new_offset) as usize;
+            self.page
+                .contents_mut()
+                .copy_within(start_index..end_index, new_start_index);
 
             last_start = new_offset - len;
             last_offset = new_offset;
