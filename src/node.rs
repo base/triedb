@@ -5,7 +5,6 @@ use alloy_trie::{
 };
 
 use crate::{
-    account::Account,
     pointer::Pointer,
     storage::value::{self, Value},
 };
@@ -100,7 +99,7 @@ impl<V> Node<V> {
     }
 }
 
-impl<V: Account + Value + Encodable> Node<V> {
+impl<V: Value + Encodable> Node<V> {
     pub fn rlp_encode(&self) -> RlpNode {
         RlpNode::from_rlp(&encode(&self))
     }
@@ -171,14 +170,14 @@ impl<V: Value> Value for Node<V> {
     }
 }
 
-impl<V: Account + Value + Encodable> Encodable for Node<V> {
+impl<V: Value + Encodable> Encodable for Node<V> {
     fn encode(&self, out: &mut dyn BufMut) {
         match self {
             Self::Leaf { prefix, value } => {
                 let value_rlp = encode(&value);
                 LeafNodeRef {
                     key: prefix,
-                    value: value_rlp.as_slice(),
+                    value: &value_rlp,
                 }
                 .encode(out);
             }
