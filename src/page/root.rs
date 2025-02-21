@@ -338,7 +338,7 @@ mod tests {
             my_orphan_page_ids.push(*i);
         }
 
-        // add the id of page2 to the last slot (4 bytes) of root page 1.
+        // add the id of page2 to the last slot (4 bytes) of root page 0.
         // this will indicate that the orphan page list continues into page2
         let mut page0 = page_manager.get_mut(42, 0).unwrap();
         let data = page0.contents_mut();
