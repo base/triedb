@@ -251,8 +251,7 @@ impl<'p> RootPage<'p, RW> {
         // mark the end of the list.
         //
         // Note: it should be safe to always write the next slot at this point since our
-        // last orphan page id write should always at least be before
-        // the last slot index.
+        // last orphan page id write should always at least be before the last slot index.
         let current_orphan_page_id_start_index = current_slot_index * 4;
         page_contents[current_orphan_page_id_start_index..current_orphan_page_id_start_index + 4]
             .copy_from_slice(&0_u32.to_le_bytes());
