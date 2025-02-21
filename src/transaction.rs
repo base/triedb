@@ -68,7 +68,7 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
 }
 
 impl<'tx, P: PageManager> Transaction<'tx, RW, P> {
-    pub fn set_account<A: Account + Value>(
+    pub fn set_account<A: Account + Value + Clone>(
         &mut self,
         address_path: AddressPath,
         account: Option<A>,
