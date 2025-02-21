@@ -230,6 +230,8 @@ impl<'p> SlottedPage<'p, RW> {
             return Ok(false);
         }
 
+        let mut page_buf = [0; PAGE_DATA_SIZE];
+        page_buf.copy_from_slice(self.page.contents());
         let mut last_start = 0;
         let mut last_offset = 0;
         for i in 0..num_cells {
@@ -252,13 +254,16 @@ impl<'p> SlottedPage<'p, RW> {
             self.set_cell_pointer(i, new_offset, len)?;
 
             let new_start_index = (PAGE_DATA_SIZE as u16 - new_offset) as usize;
-            self.page
-                .contents_mut()
-                .copy_within(start_index..end_index, new_start_index);
+            let new_end_index = new_start_index + len as usize;
+            page_buf[new_start_index..new_end_index]
+                .copy_from_slice(&self.page.contents()[start_index..end_index]);
 
             last_start = new_offset - len;
             last_offset = new_offset;
         }
+
+        self.page.contents_mut()[PAGE_DATA_SIZE - last_offset as usize..]
+            .copy_from_slice(&page_buf[PAGE_DATA_SIZE - last_offset as usize..]);
 
         Ok(true)
     }
@@ -902,7 +907,7 @@ mod tests {
             String::from_iter(&['a'; 814])
         );
         assert_eq!(
-            subtrie_page.get_value::<String>(i1).unwrap(),
+            subtrie_page.get_value::<String>(i5).unwrap(),
             String::from_iter(&['g'; 1630])
         );
         assert_eq!(
