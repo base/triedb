@@ -207,11 +207,60 @@ impl<'p> SlottedPage<'p, RW> {
                 }
                 return self.set_cell_pointer(index, offset, length);
             }
-            None => {
-                // TODO: defragment the page
-                Err(PageError::PageIsFull)
-            }
+            None => match self.defragment(index, length)? {
+                true => return self.allocate_cell_pointer(index, length),
+                false => return Err(PageError::PageIsFull),
+            },
         }
+    }
+
+    fn defragment(&mut self, index: u8, additional_slot_length: u16) -> Result<bool, PageError> {
+        let num_cells = self.num_cells();
+
+        let total_occupied_space = self
+            .cell_pointers_iter()
+            .filter(|cp| !cp.is_deleted())
+            .map(|cp| cp.length())
+            .sum::<u16>();
+
+        let new_num_cells = max(num_cells, index + 1);
+        if (total_occupied_space + additional_slot_length + new_num_cells as u16 * 3 + 1) as usize
+            > PAGE_DATA_SIZE
+        {
+            return Ok(false);
+        }
+
+        let mut last_start = 0;
+        let mut last_offset = 0;
+        for i in 0..num_cells {
+            let cp = self.get_cell_pointer(i)?;
+            if cp.is_deleted() {
+                continue;
+            }
+            let len = cp.length();
+            let offset = cp.offset();
+            let start = offset - len;
+            if start == last_start {
+                last_offset = offset;
+                continue;
+            }
+
+            let start_index = (PAGE_DATA_SIZE as u16 - offset) as usize;
+            let end_index = start_index + len as usize;
+
+            let new_offset = last_offset + len;
+            self.set_cell_pointer(i, new_offset, len)?;
+
+            let new_start_index = (PAGE_DATA_SIZE as u16 - new_offset) as usize;
+            self.page
+                .contents_mut()
+                .copy_within(start_index..end_index, new_start_index);
+
+            last_start = new_offset - len;
+            last_offset = new_offset;
+        }
+
+        Ok(true)
     }
 
     // Finds a free space with length in the page. Returns slotted page offset if found.
@@ -799,5 +848,74 @@ mod tests {
         let cell_pointer = subtrie_page.get_cell_pointer(i6).unwrap();
         assert_eq!(cell_pointer.length(), 100);
         assert_eq!(cell_pointer.offset(), 2720); // 2720 = 2620 + 100
+    }
+
+    #[test]
+    fn test_defragment_page() {
+        let mut data = [0; PAGE_SIZE];
+        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
+        let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
+
+        let i0 = subtrie_page
+            .insert_value(String::from_iter(&['a'; 814]))
+            .unwrap();
+        assert_eq!(i0, 0);
+
+        let i1 = subtrie_page
+            .insert_value(String::from_iter(&['b'; 814]))
+            .unwrap();
+        assert_eq!(i1, 1);
+
+        let i2 = subtrie_page
+            .insert_value(String::from_iter(&['c'; 814]))
+            .unwrap();
+        assert_eq!(i2, 2);
+
+        let i3 = subtrie_page
+            .insert_value(String::from_iter(&['d'; 814]))
+            .unwrap();
+        assert_eq!(i3, 3);
+
+        let i4 = subtrie_page
+            .insert_value(String::from_iter(&['e'; 814]))
+            .unwrap();
+        assert_eq!(i4, 4);
+
+        subtrie_page.delete_value(i1).unwrap();
+        assert_eq!(subtrie_page.num_cells(), 5);
+        subtrie_page.delete_value(i3).unwrap();
+        assert_eq!(subtrie_page.num_cells(), 5);
+
+        // should not be able to allocate anything larger than 1630 bytes (4088 - 1 - 3*5 - 814 - 814 - 814 = 1630)
+        let cell_index = subtrie_page.insert_value(String::from_iter(&['f'; 1631]));
+        assert!(cell_index.is_err());
+        assert!(matches!(cell_index, Err(PageError::PageIsFull)));
+
+        // should be able to allocate 1630 bytes
+        let i5 = subtrie_page
+            .insert_value(String::from_iter(&['g'; 1630]))
+            .unwrap();
+        assert_eq!(i5, 1);
+
+        assert_eq!(
+            subtrie_page.get_value::<String>(i0).unwrap(),
+            String::from_iter(&['a'; 814])
+        );
+        assert_eq!(
+            subtrie_page.get_value::<String>(i1).unwrap(),
+            String::from_iter(&['g'; 1630])
+        );
+        assert_eq!(
+            subtrie_page.get_value::<String>(i2).unwrap(),
+            String::from_iter(&['c'; 814])
+        );
+        let v = subtrie_page.get_value::<String>(i3);
+        assert!(v.is_err());
+        assert!(matches!(v, Err(PageError::InvalidCellPointer)));
+
+        assert_eq!(
+            subtrie_page.get_value::<String>(i4).unwrap(),
+            String::from_iter(&['e'; 814])
+        );
     }
 }
