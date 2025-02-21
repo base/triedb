@@ -9,6 +9,7 @@ use crate::{
     path::AddressPath,
     storage::{engine::StorageEngine, value::Value},
 };
+use alloy_rlp::Encodable;
 pub use manager::TransactionManager;
 use sealed::sealed;
 
@@ -68,7 +69,7 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
 }
 
 impl<'tx, P: PageManager> Transaction<'tx, RW, P> {
-    pub fn set_account<A: Account + Value + Clone>(
+    pub fn set_account<A: Account + Value + Encodable + Clone>(
         &mut self,
         address_path: AddressPath,
         account: Option<A>,

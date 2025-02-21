@@ -11,6 +11,8 @@ use crate::storage::engine::StorageEngine;
 use crate::transaction::Transaction;
 use crate::transaction::TransactionManager;
 use crate::transaction::{RO, RW};
+use alloy_primitives::B256;
+use alloy_trie::EMPTY_ROOT_HASH;
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -31,6 +33,7 @@ pub(crate) struct Metadata {
     pub(crate) root_page_id: PageId,
     pub(crate) root_subtrie_page_id: PageId,
     pub(crate) snapshot_id: SnapshotId,
+    pub(crate) state_root: B256,
 }
 
 impl Metadata {
@@ -39,6 +42,7 @@ impl Metadata {
             snapshot_id: self.snapshot_id + 1,
             root_page_id: (self.root_page_id + 1) % 2,
             root_subtrie_page_id: self.root_subtrie_page_id,
+            state_root: self.state_root,
         }
     }
 }
@@ -69,6 +73,7 @@ impl Database<MmapPageManager> {
             snapshot_id: 0,
             root_page_id: 0,
             root_subtrie_page_id: 256,
+            state_root: EMPTY_ROOT_HASH,
         };
 
         let db = Self::new(metadata, StorageEngine::new(page_manager, orphan_manager));
@@ -165,6 +170,7 @@ impl<'p, P: PageKind> From<RootPage<'p, P>> for Metadata {
             root_page_id: root_page.page_id(),
             root_subtrie_page_id: root_page.root_subtrie_page_id(),
             snapshot_id: root_page.snapshot_id(),
+            state_root: root_page.state_root(),
         }
     }
 }
