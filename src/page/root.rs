@@ -250,7 +250,7 @@ impl<'p> RootPage<'p, RW> {
         // We are done writing. Explicity set the next slot to 0 to
         // mark the end of the list.
         //
-        // Note, that it should be safe to always write the next slot at this point since our
+        // Note: it should be safe to always write the next slot at this point since our
         // last orphan page id write should always at least be before
         // the last slot index.
         let current_orphan_page_id_start_index = current_slot_index * 4;
