@@ -217,14 +217,11 @@ impl<'p> SlottedPage<'p, RW> {
     fn defragment(&mut self, index: u8, additional_slot_length: u16) -> Result<bool, PageError> {
         let num_cells = self.num_cells();
 
-        let total_occupied_space =
-            (0..num_cells).try_fold(0, |mut size, i| -> Result<u16, PageError> {
-                let cp = self.get_cell_pointer(i)?;
-                if !cp.is_deleted() {
-                    size += cp.length();
-                }
-                Ok(size)
-            })?;
+        let total_occupied_space = self
+            .cell_pointers_iter()
+            .filter(|cp| !cp.is_deleted())
+            .map(|cp| cp.length())
+            .sum::<u16>();
 
         let new_num_cells = max(num_cells, index + 1);
         if (total_occupied_space + additional_slot_length + new_num_cells as u16 * 3 + 1) as usize
