@@ -144,7 +144,7 @@ impl<'p> RootPage<'p, RW> {
         // assuming a FIFO strategy from the orphan manager, the end of our list
         // should contain new elements if there are any. By rotating them to the
         // front of the list, we can minimize the number of elements we actually
-        // have to right to disk.
+        // have to write to disk.
         //
         // (e.g):
         // 1. on_disk: [1, 2, 3, 4, 5]
