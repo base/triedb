@@ -52,7 +52,7 @@ impl Node {
         }
     }
 
-    pub fn has_children(&self) -> bool {
+    pub fn is_branch(&self) -> bool {
         match self {
             Self::Branch { .. } => true,
             _ => false,

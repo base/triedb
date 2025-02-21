@@ -254,8 +254,7 @@ impl<P: PageManager> StorageEngine<P> {
                 }
                 let page = self.get_mut_clone(metadata, page_id)?;
                 let mut new_slotted_page = SlottedPage::try_from(page)?;
-                self
-                    .split_page(metadata, &mut new_slotted_page)
+                self.split_page(metadata, &mut new_slotted_page)
                     .expect("split page should succeed");
                 let location = self
                     .set_account_in_cloned_page(
@@ -280,9 +279,6 @@ impl<P: PageManager> StorageEngine<P> {
         slotted_page: &mut SlottedPage<'_, RW>,
         page_index: u8,
     ) -> Result<Location, Error> {
-        // TODO: handle the case where insertion fails because the page is full.
-        // We should undo any successful insertions, split the page, and try again.
-
         let res = slotted_page.get_value::<Node>(page_index);
         if res.is_err() {
             // Trie is empty, insert the new account at the root.
@@ -425,7 +421,7 @@ impl<P: PageManager> StorageEngine<P> {
     fn count_subtrie_nodes(&self, page: &SlottedPage<'_, RW>, root_index: u8) -> Result<u8, Error> {
         let mut count = 1; // Count the root node
         let node: Node = page.get_value(root_index)?;
-        if !node.has_children() {
+        if !node.is_branch() {
             return Ok(count);
         }
 
@@ -449,13 +445,13 @@ impl<P: PageManager> StorageEngine<P> {
         let node: Node = source_page.get_value(root_index)?;
         source_page.delete_value(root_index)?;
 
-        let has_children = node.has_children();
+        let is_branch = node.is_branch();
 
         // first insert the node into the new page to secure its location.
         let new_index = target_page.insert_value(node)?;
 
         // if the node has no children, we're done.
-        if !has_children {
+        if !is_branch {
             return Ok(Location::for_cell(new_index));
         }
 
