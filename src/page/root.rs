@@ -150,7 +150,7 @@ impl<'p> RootPage<'p, RW> {
         // 1. on_disk: [1, 2, 3, 4, 5]
         // 2. 2 orphan pages are used: [3, 4, 5]
         // 3. 2 new orphan pages come in [3, 4, 5, 6, 7]
-        // 4. Rotate right by 2: [7, 6, 3, 4, 5]
+        // 4. Rotate right by 2: [6, 7, 3, 4, 5]
         // 5. When we write to disk only the first 2 slots change
         let mut deq: VecDeque<PageId> = VecDeque::from(orphan_page_ids.clone());
         deq.rotate_right(num_orphan_slots_used);
