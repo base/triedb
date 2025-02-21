@@ -503,12 +503,12 @@ mod tests {
     fn test_root_0_doesnt_spill_into_root_1() {
         // GIVEN: 2 root pages
         let mut page_manager = MmapPageManager::new_anon(257, 0).unwrap();
-        let page = page_manager.allocate(42).unwrap();
-        assert_eq!(page.page_id(), 0);
-        let mut root_page = RootPage::new(page, B256::default());
+        let page0 = page_manager.allocate(42).unwrap();
+        assert_eq!(page0.page_id(), 0);
+        let mut root_page = RootPage::new(page0, B256::default());
 
-        let page2 = page_manager.allocate(42).unwrap();
-        assert_eq!(page2.page_id(), 1);
+        let page1 = page_manager.allocate(42).unwrap();
+        assert_eq!(page1.page_id(), 1);
 
         // page 0 and 1 (root pages) allocated. allocate 254 more pages to simulate the
         // reserved pages
@@ -525,7 +525,7 @@ mod tests {
             .unwrap();
 
         // THEN: Page 1 should not be changed at all
-        assert_eq!(page2.contents(), [0; PAGE_DATA_SIZE]);
+        assert_eq!(page1.contents(), [0; PAGE_DATA_SIZE]);
     }
 
     #[test]
