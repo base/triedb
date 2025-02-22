@@ -211,7 +211,7 @@ impl<P: PageManager> StorageEngine<P> {
         trace!("set_account(): {:?}", address_path);
 
         let root_subtrie_page_id = metadata.root_subtrie_page_id;
-        let location = self.set_account_in_page(
+        let location = self.set_value_in_page(
             metadata,
             address_path.into(),
             account,
@@ -222,20 +222,20 @@ impl<P: PageManager> StorageEngine<P> {
         Ok(())
     }
 
-    fn set_account_in_page<A: Account + Value + Clone>(
+    fn set_value_in_page<V: Value + Clone>(
         &self,
         metadata: &mut Metadata,
         path: Nibbles,
-        account: A,
+        value: V,
         page_id: PageId,
         page_index: u8,
     ) -> Result<Location, Error> {
         let page = self.get_mut_clone(metadata, page_id)?;
         let mut new_slotted_page = SlottedPage::try_from(page)?;
-        let result = self.set_account_in_cloned_page(
+        let result = self.set_value_in_cloned_page(
             metadata,
             path.clone(),
-            account.clone(),
+            value.clone(),
             &mut new_slotted_page,
             page_index,
         );
@@ -244,7 +244,7 @@ impl<P: PageManager> StorageEngine<P> {
             Err(Error::PageError(PageError::PageIsFull)) => {
                 // Re-clone the page, split it, and try again. This orphans the first clone.
                 // TODO: it's probably better if we can proactively split the page instead of needing this fallback behavior.
-                // This would also allow us to avoid cloning the path and account.
+                // This would also allow us to avoid cloning the path and value.
                 {
                     self.inner
                         .write()
@@ -257,10 +257,10 @@ impl<P: PageManager> StorageEngine<P> {
                 self.split_page(metadata, &mut new_slotted_page)
                     .expect("split page should succeed");
                 let location = self
-                    .set_account_in_cloned_page(
+                    .set_value_in_cloned_page(
                         metadata,
                         path,
-                        account,
+                        value,
                         &mut new_slotted_page,
                         page_index,
                     )
@@ -271,18 +271,18 @@ impl<P: PageManager> StorageEngine<P> {
         }
     }
 
-    fn set_account_in_cloned_page<A: Account + Value + Clone>(
+    fn set_value_in_cloned_page<V: Value + Clone>(
         &self,
         metadata: &mut Metadata,
         path: Nibbles,
-        account: A,
+        value: V,
         slotted_page: &mut SlottedPage<'_, RW>,
         page_index: u8,
     ) -> Result<Location, Error> {
         let res = slotted_page.get_value::<Node>(page_index);
         if res.is_err() {
             // Trie is empty, insert the new account at the root.
-            let new_node = Node::new_leaf(path, account.to_bytes().as_slice());
+            let new_node = Node::new_leaf(path, value.to_bytes().as_slice());
             let index = slotted_page.insert_value(new_node)?;
             assert_eq!(index, 0, "root node must be at index 0");
             return Ok(Location::for_page(slotted_page.page_id()));
@@ -297,7 +297,7 @@ impl<P: PageManager> StorageEngine<P> {
             let mut new_parent_branch = Node::new_branch(common_prefix);
             let child_branch_index = path[common_prefix_length];
             let remaining_path = path.slice(common_prefix_length + 1..);
-            let new_leaf_node = Node::new_leaf(remaining_path, account.to_bytes().as_slice());
+            let new_leaf_node = Node::new_leaf(remaining_path, value.to_bytes().as_slice());
             // update the prefix of the existing node and insert it into the page
             let node_branch_index = node.prefix()[common_prefix_length];
             node.set_prefix(node.prefix().slice(common_prefix_length + 1..));
@@ -312,7 +312,7 @@ impl<P: PageManager> StorageEngine<P> {
 
         if common_prefix_length == path.len() {
             // the path matches the node prefix exactly, so we can update the value.
-            let new_node = Node::new_leaf(path, account.to_bytes().as_slice());
+            let new_node = Node::new_leaf(path, value.to_bytes().as_slice());
             slotted_page.set_value(page_index, new_node)?;
 
             return Ok(self.node_location(slotted_page.page_id(), page_index));
@@ -327,10 +327,10 @@ impl<P: PageManager> StorageEngine<P> {
                 // the child node exists, so we need to traverse it.
                 let child_location = child_pointer.location();
                 if let Some(child_cell_index) = child_location.cell_index() {
-                    let location = self.set_account_in_cloned_page::<A>(
+                    let location = self.set_value_in_cloned_page(
                         metadata,
                         remaining_path,
-                        account,
+                        value,
                         slotted_page,
                         child_cell_index,
                     )?;
@@ -340,13 +340,8 @@ impl<P: PageManager> StorageEngine<P> {
                     Ok(self.node_location(slotted_page.page_id(), page_index))
                 } else {
                     let child_page_id = child_location.page_id().unwrap();
-                    let location = self.set_account_in_page::<A>(
-                        metadata,
-                        remaining_path,
-                        account,
-                        child_page_id,
-                        0,
-                    )?;
+                    let location =
+                        self.set_value_in_page(metadata, remaining_path, value, child_page_id, 0)?;
                     node.set_child(child_index, Pointer::new_unhashed(location));
                     slotted_page.set_value(page_index, node)?;
 
@@ -355,7 +350,7 @@ impl<P: PageManager> StorageEngine<P> {
             }
             None => {
                 // the child node does not exist, so we need to create a new leaf node with the remaining path.
-                let new_node = Node::new_leaf(remaining_path, account.to_bytes().as_slice());
+                let new_node = Node::new_leaf(remaining_path, value.to_bytes().as_slice());
                 let location = Location::for_cell(slotted_page.insert_value(new_node)?);
                 node.set_child(child_index, Pointer::new_unhashed(location));
                 slotted_page.set_value(page_index, node)?;
