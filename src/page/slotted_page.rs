@@ -923,4 +923,67 @@ mod tests {
             String::from_iter(&['e'; 814])
         );
     }
+
+    #[test]
+    fn test_defragment_page_cells_out_of_order() {
+        let mut data = [0; PAGE_SIZE];
+        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
+        let mut slotted_page = SlottedPage::<RW>::try_from(page).unwrap();
+
+        slotted_page.set_num_cells(16);
+
+        let initial_cell_pointers = [
+            (595, 595),
+            (762, 167),
+            (1358, 168),
+            (929, 167),
+            (0, 0),
+            (1860, 168),
+            (2028, 168),
+            (2195, 167),
+            (2362, 167),
+            (2530, 168),
+            (2865, 167),
+            (2698, 168),
+            (3962, 167),
+            (3795, 595),
+            (3033, 167),
+            (3200, 167),
+        ];
+
+        for (index, (offset, length)) in initial_cell_pointers.iter().enumerate() {
+            slotted_page.set_cell_pointer(index as u8, *offset, *length).unwrap();
+        }
+
+        slotted_page.defragment(5, 595).unwrap();
+
+        // FIXME: this is not the correct answer, and contains overlapping cells!!!
+        let expected_cell_pointers = [
+            (595, 595),
+            (762, 167),
+            (930, 168),
+            (929, 167),
+            (0, 0),
+            (1097, 168),
+            (1265, 168),
+            (1432, 167),
+            (1599, 167),
+            (1767, 168),
+            (1934, 167),
+            (2102, 168),
+            (2269, 167),
+            (2864, 595),
+            (3031, 167),
+            (3198, 167),
+            (9999, 9999), // dummy value to ensure this fails
+        ];
+
+        assert_eq!(slotted_page.num_cells(), expected_cell_pointers.len() as u8);
+
+        for (index, (offset, length)) in expected_cell_pointers.iter().enumerate() {
+            let cell_pointer = slotted_page.get_cell_pointer(index as u8).unwrap();
+            assert_eq!(cell_pointer.offset(), *offset);
+            assert_eq!(cell_pointer.length(), *length);
+        }
+    }
 }
