@@ -959,29 +959,30 @@ mod tests {
 
         slotted_page.defragment(5, 595).unwrap();
 
+        // (id, offset, length)
         let expected_cell_pointers = [
-            (595, 595),
-            (762, 167),
-            (1097, 168),
-            (929, 167),
-            (0, 0),
-            (1265, 168),
-            (1433, 168),
-            (1600, 167),
-            (1767, 167),
-            (1935, 168),
-            (2270, 167),
-            (2103, 168),
-            (3366, 167),
-            (3199, 595),
-            (2437, 167),
-            (2604, 167),
+            (4, 0, 0),
+            (0, 595, 595),
+            (1, 762, 167),
+            (3, 929, 167),
+            (2, 1097, 168),
+            (5, 1265, 168),
+            (6, 1433, 168),
+            (7, 1600, 167),
+            (8, 1767, 167),
+            (9, 1935, 168),
+            (11, 2103, 168),
+            (10, 2270, 167),
+            (14, 2437, 167),
+            (15, 2604, 167),
+            (13, 3199, 595),
+            (12, 3366, 167),
         ];
 
         assert_eq!(slotted_page.num_cells(), expected_cell_pointers.len() as u8);
 
-        for (index, (offset, length)) in expected_cell_pointers.iter().enumerate() {
-            let cell_pointer = slotted_page.get_cell_pointer(index as u8).unwrap();
+        for (index, offset, length) in expected_cell_pointers.iter() {
+            let cell_pointer = slotted_page.get_cell_pointer(*index as u8).unwrap();
             assert_eq!(cell_pointer.offset(), *offset);
             assert_eq!(cell_pointer.length(), *length);
         }
