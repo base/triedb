@@ -9,6 +9,7 @@ use super::{
 
 pub mod cell_pointer;
 use cell_pointer::CellPointer;
+use log::trace;
 
 const MAX_NUM_CELLS: u8 = 255; // With 1 byte for the number of cells, the maximum number of cells is 255.
 
@@ -125,7 +126,7 @@ impl<'p, P: PageKind, V: Value> SlottedStorage<'p, V> for SlottedPage<'p, P> {
     type Error = PageError;
 
     fn get_value(&self, index: u8) -> Result<V, Self::Error> {
-        self.get_value(index)
+        SlottedPage::get_value(self, index)
     }
 }
 

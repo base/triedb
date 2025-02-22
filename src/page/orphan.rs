@@ -39,6 +39,8 @@ impl OrphanPageManager {
     pub fn unlock(&mut self, max_snapshot_id: SnapshotId) {
         let mut to_remove = Vec::new();
         for (snapshot_id, pages) in self.locked_page_ids.iter_mut() {
+            pages.sort_unstable();
+            pages.dedup();
             if *snapshot_id <= max_snapshot_id {
                 self.unlocked_page_ids.append(pages);
                 to_remove.push(*snapshot_id);
