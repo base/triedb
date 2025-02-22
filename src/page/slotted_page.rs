@@ -230,20 +230,20 @@ impl<'p> SlottedPage<'p, RW> {
             return Ok(false);
         }
 
-        // (id, len, offset)
+        // (id, offset, length)
         let mut cell_pointers = self
             .cell_pointers_iter()
             .enumerate()
             .filter(|(_, cp)| !cp.is_deleted())
-            .map(|(i, cp)| (i, cp.length(), cp.offset()))
+            .map(|(i, cp)| (i, cp.offset(), cp.length()))
             .collect::<Vec<_>>();
 
         // sort by offset
-        cell_pointers.sort_by(|a, b| a.2.cmp(&b.2));
+        cell_pointers.sort_by(|a, b| a.1.cmp(&b.1));
 
         let mut last_start = 0;
         let mut last_offset = 0;
-        for (id, len, offset) in cell_pointers {
+        for (id, offset, len) in cell_pointers {
             let start = offset - len;
             if start == last_start {
                 last_offset = offset;
