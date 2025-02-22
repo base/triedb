@@ -29,8 +29,8 @@ impl From<AddressPath> for Nibbles {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoragePath {
-    address: AddressPath,
-    slot: Nibbles,
+    pub address: AddressPath,
+    pub slot: Nibbles,
 }
 
 impl StoragePath {

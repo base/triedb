@@ -1,15 +1,16 @@
 use crate::{
-    account::Account,
+    account::{Account, AccountVec},
     database::Metadata,
     location::Location,
     node::Node,
     page::{
         OrphanPageManager, Page, PageError, PageId, PageManager, RootPage, SlottedPage, RO, RW,
     },
-    path::AddressPath,
+    path::{AddressPath, StoragePath},
     pointer::Pointer,
     snapshot::SnapshotId,
 };
+use alloy_primitives::{b256, StorageValue};
 use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
 use log::{debug, trace};
 use std::cmp::max;
@@ -224,7 +225,7 @@ impl<P: PageManager> StorageEngine<P> {
 
     fn set_value_in_page<V: Value + Clone>(
         &self,
-        metadata: &mut Metadata,
+        metadata: &Metadata,
         path: Nibbles,
         value: V,
         page_id: PageId,
@@ -273,7 +274,7 @@ impl<P: PageManager> StorageEngine<P> {
 
     fn set_value_in_cloned_page<V: Value + Clone>(
         &self,
-        metadata: &mut Metadata,
+        metadata: &Metadata,
         path: Nibbles,
         value: V,
         slotted_page: &mut SlottedPage<'_, RW>,
@@ -369,11 +370,7 @@ impl<P: PageManager> StorageEngine<P> {
     }
 
     // Split the page into two, moving the largest immediate subtrie of the root node to a new child page.
-    fn split_page(
-        &self,
-        metadata: &mut Metadata,
-        page: &mut SlottedPage<'_, RW>,
-    ) -> Result<(), Error> {
+    fn split_page(&self, metadata: &Metadata, page: &mut SlottedPage<'_, RW>) -> Result<(), Error> {
         let child_page = self.allocate_page(metadata)?;
         let mut child_slotted_page = SlottedPage::try_from(child_page)?;
 
@@ -476,13 +473,60 @@ impl<P: PageManager> StorageEngine<P> {
         Ok(self.node_location(target_page.page_id(), new_index))
     }
 
-    // pub fn get_storage(&self, storage_path: StoragePath) -> Result<StorageValue, Error> {
-    //     todo!()
-    // }
+    pub fn get_storage<A: Account + Value>(
+        &self,
+        metadata: &Metadata,
+        storage_path: StoragePath,
+    ) -> Result<Option<StorageValue>, Error> {
+        debug!("get_storage_from_account(): {:?}", storage_path.address);
 
-    // pub fn set_storage(&mut self, storage_path: StoragePath, value: StorageValue) -> Result<(), Error> {
-    //     todo!()
-    // }
+        match self.get_account::<A>(metadata, storage_path.address)? {
+            Some(account) => {
+                if account.storage_root() == EMPTY_ROOT_HASH {
+                    return Ok(None);
+                }
+                let page = self.get_page(metadata, account.storage_root_subtrie_page_id())?;
+                let slotted_page = SlottedPage::try_from(page)?;
+
+                self.get_value_from_page(metadata, storage_path.slot, slotted_page, 0)
+            }
+
+            None => Ok(None),
+        }
+    }
+
+    pub fn set_storage<A: Account + Value>(
+        &mut self,
+        metadata: &mut Metadata,
+        storage_path: StoragePath,
+        value: StorageValue,
+    ) -> Result<(), Error> {
+        let account = match self.get_account::<A>(metadata, storage_path.address.clone())? {
+            Some(account) => Ok(account),
+            None => Err(Error::AccountDoesNotExist(storage_path.address.clone())),
+        }?;
+
+        let mut page_id: PageId = account.storage_root_subtrie_page_id();
+        if account.storage_root() == EMPTY_ROOT_HASH {
+            // the storage is empty. create a new page to hold the root (and some children)
+            // of the storage trie.
+            let storage_root_page = self.allocate_page(metadata)?;
+            page_id = storage_root_page.page_id();
+        }
+
+        let location = self.set_value_in_page(metadata, storage_path.slot, value, page_id, 0)?;
+        let new_account = AccountVec::new(
+            account.balance(),
+            account.nonce(),
+            account.code_hash(),
+            // TODO: need to update the storage root. setting to a random hash for now
+            // to "fake" the existence of a storage trie for tests
+            b256!("0x02aec41a1825308a87018897119fd23097b63eb96cbe092e52cc32a571a9ff81"),
+            location.page_id().unwrap(),
+        );
+
+        self.set_account(metadata, storage_path.address, Some(new_account))
+    }
 
     pub fn commit(&self, metadata: &Metadata) -> Result<(), Error> {
         let mut inner = self.inner.write().unwrap();
@@ -596,6 +640,7 @@ pub enum Error {
     PageError(PageError),
     InvalidPath,
     InvalidSnapshotId,
+    AccountDoesNotExist(AddressPath),
     EngineClosed,
 }
 
@@ -628,7 +673,13 @@ mod tests {
     }
 
     fn create_test_account(balance: u64, nonce: u64) -> AccountVec {
-        AccountVec::new(U256::from(balance), nonce, B256::ZERO, B256::ZERO)
+        AccountVec::new(
+            U256::from(balance),
+            nonce,
+            B256::ZERO,
+            EMPTY_ROOT_HASH,
+            0 as PageId,
+        )
     }
 
     #[test]
@@ -844,6 +895,71 @@ mod tests {
                 .get_account::<AccountVec>(&metadata, path.clone())
                 .unwrap();
             assert_eq!(account, Some(create_test_account(i, i)));
+        }
+    }
+
+    #[test]
+    fn test_set_get_account_storage_slots() {
+        let (mut storage_engine, mut metadata) = create_test_engine(300, 256);
+
+        let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
+        let account = create_test_account(100, 1);
+        storage_engine
+            .set_account(
+                &mut metadata,
+                AddressPath::for_address(address),
+                Some(account.clone()),
+            )
+            .unwrap();
+        assert_eq!(metadata.root_subtrie_page_id, 257);
+
+        let test_cases = vec![
+            (
+                // storage key and storage value
+                b256!("0x0000000000000000000000000000000000000000000000000000000000000000"),
+                b256!("0x0000000000000000000000000000000000000000000000000000000062617365"),
+            ),
+            (
+                // storage key and storage value
+                b256!("0x0000000000000000000000000000000000000000000000000000000000000001"),
+                b256!("0x000000000000000000000000000000006274632040202439362c3434322e3735"),
+            ),
+            (
+                // storage key and storage value
+                b256!("0x0000000000000000000000000000000000000000000000000000000000000002"),
+                b256!("0x0000000000000000000000000000000000000000000000000000747269656462"),
+            ),
+            (
+                // storage key and storage value
+                b256!("0x0000000000000000000000000000000000000000000000000000000000000003"),
+                b256!("0x000000000000000000000000000000000000000000000000436f696e62617365"),
+            ),
+        ];
+
+        // Insert storage slots and verify they don't exist before insertion
+        for (storage_key, storage_value) in &test_cases {
+            let storage_path = StoragePath::for_address_and_slot(address.clone(), *storage_key);
+
+            let read_storage_slot = storage_engine
+                .get_storage::<AccountVec>(&metadata, storage_path.clone())
+                .unwrap();
+            assert_eq!(read_storage_slot, None);
+
+            let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
+
+            storage_engine
+                .set_storage::<AccountVec>(&mut metadata, storage_path, storage_value)
+                .unwrap();
+        }
+
+        // Verify all storage slots exist after insertion
+        for (storage_key, storage_value) in &test_cases {
+            let storage_path = StoragePath::for_address_and_slot(address.clone(), *storage_key);
+            let read_storage_slot = storage_engine
+                .get_storage::<AccountVec>(&metadata, storage_path)
+                .unwrap();
+            let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
+            assert_eq!(read_storage_slot, Some(storage_value));
         }
     }
 
