@@ -230,17 +230,20 @@ impl<'p> SlottedPage<'p, RW> {
             return Ok(false);
         }
 
-        let mut page_buf = [0; PAGE_DATA_SIZE];
-        page_buf.copy_from_slice(self.page.contents());
+        // (id, len, offset)
+        let mut cell_pointers = self
+            .cell_pointers_iter()
+            .enumerate()
+            .filter(|(_, cp)| !cp.is_deleted())
+            .map(|(i, cp)| (i, cp.length(), cp.offset()))
+            .collect::<Vec<_>>();
+
+        // sort by offset
+        cell_pointers.sort_by(|a, b| a.2.cmp(&b.2));
+
         let mut last_start = 0;
         let mut last_offset = 0;
-        for i in 0..num_cells {
-            let cp = self.get_cell_pointer(i)?;
-            if cp.is_deleted() {
-                continue;
-            }
-            let len = cp.length();
-            let offset = cp.offset();
+        for (id, len, offset) in cell_pointers {
             let start = offset - len;
             if start == last_start {
                 last_offset = offset;
@@ -251,19 +254,16 @@ impl<'p> SlottedPage<'p, RW> {
             let end_index = start_index + len as usize;
 
             let new_offset = last_offset + len;
-            self.set_cell_pointer(i, new_offset, len)?;
+            self.set_cell_pointer(id as u8, new_offset, len)?;
 
             let new_start_index = (PAGE_DATA_SIZE as u16 - new_offset) as usize;
-            let new_end_index = new_start_index + len as usize;
-            page_buf[new_start_index..new_end_index]
-                .copy_from_slice(&self.page.contents()[start_index..end_index]);
+            self.page
+                .contents_mut()
+                .copy_within(start_index..end_index, new_start_index);
 
             last_start = new_offset - len;
             last_offset = new_offset;
         }
-
-        self.page.contents_mut()[PAGE_DATA_SIZE - last_offset as usize..]
-            .copy_from_slice(&page_buf[PAGE_DATA_SIZE - last_offset as usize..]);
 
         Ok(true)
     }
@@ -952,30 +952,30 @@ mod tests {
         ];
 
         for (index, (offset, length)) in initial_cell_pointers.iter().enumerate() {
-            slotted_page.set_cell_pointer(index as u8, *offset, *length).unwrap();
+            slotted_page
+                .set_cell_pointer(index as u8, *offset, *length)
+                .unwrap();
         }
 
         slotted_page.defragment(5, 595).unwrap();
 
-        // FIXME: this is not the correct answer, and contains overlapping cells!!!
         let expected_cell_pointers = [
             (595, 595),
             (762, 167),
-            (930, 168),
+            (1097, 168),
             (929, 167),
             (0, 0),
-            (1097, 168),
             (1265, 168),
-            (1432, 167),
-            (1599, 167),
-            (1767, 168),
-            (1934, 167),
-            (2102, 168),
-            (2269, 167),
-            (2864, 595),
-            (3031, 167),
-            (3198, 167),
-            (9999, 9999), // dummy value to ensure this fails
+            (1433, 168),
+            (1600, 167),
+            (1767, 167),
+            (1935, 168),
+            (2270, 167),
+            (2103, 168),
+            (3366, 167),
+            (3199, 595),
+            (2437, 167),
+            (2604, 167),
         ];
 
         assert_eq!(slotted_page.num_cells(), expected_cell_pointers.len() as u8);
