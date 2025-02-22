@@ -141,17 +141,17 @@ impl<P: PageManager> StorageEngine<P> {
 
         debug!("get_account(): {:?}", address_path);
 
-        self.get_account_from_page::<A>(metadata, address_path.into(), slotted_page, 0)
+        self.get_value_from_page(metadata, address_path.into(), slotted_page, 0)
     }
 
-    fn get_account_from_page<A: Account + Value>(
+    fn get_value_from_page<V: Value>(
         &self,
         metadata: &Metadata,
         path: Nibbles,
         slotted_page: SlottedPage<'_, RO>,
         page_index: u8,
-    ) -> Result<Option<A>, Error> {
-        trace!("get_account_from_page(): {:?} {:?}", path, page_index);
+    ) -> Result<Option<V>, Error> {
+        trace!("get_value_from_page(): {:?} {:?}", path, page_index);
 
         let node: Node = slotted_page.get_value(page_index)?;
         trace!("node.prefix(): {:?}", node.prefix());
@@ -167,7 +167,7 @@ impl<P: PageManager> StorageEngine<P> {
         trace!("remaining_path: {:?}", remaining_path);
         if remaining_path.is_empty() {
             let val: &[u8] = node.value().unwrap();
-            return Ok(Some(A::from_bytes(val).unwrap()));
+            return Ok(Some(V::from_bytes(val).unwrap()));
         }
 
         let child_pointer = node.child(remaining_path[0]);
@@ -175,7 +175,7 @@ impl<P: PageManager> StorageEngine<P> {
             Some(child_pointer) => {
                 let child_location = child_pointer.location();
                 if child_location.cell_index().is_some() {
-                    self.get_account_from_page::<A>(
+                    self.get_value_from_page(
                         metadata,
                         remaining_path.slice(1..),
                         slotted_page,
@@ -185,7 +185,7 @@ impl<P: PageManager> StorageEngine<P> {
                     let child_page_id = child_location.page_id().unwrap();
                     let child_page = self.get_page(metadata, child_page_id)?;
                     let child_slotted_page = SlottedPage::try_from(child_page)?;
-                    self.get_account_from_page::<A>(
+                    self.get_value_from_page(
                         metadata,
                         remaining_path.slice(1..),
                         child_slotted_page,
