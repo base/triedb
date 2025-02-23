@@ -230,7 +230,6 @@ impl<'p> SlottedPage<'p, RW> {
             return Ok(false);
         }
 
-        // (id, offset, length)
         let mut cell_pointers = self
             .cell_pointers_iter()
             .enumerate()
@@ -951,9 +950,9 @@ mod tests {
             (3200, 167),
         ];
 
-        for (index, (offset, length)) in initial_cell_pointers.iter().enumerate() {
+        for (idx, (offset, length)) in initial_cell_pointers.iter().enumerate() {
             slotted_page
-                .set_cell_pointer(index as u8, *offset, *length)
+                .set_cell_pointer(idx as u8, *offset, *length)
                 .unwrap();
         }
 
