@@ -230,17 +230,20 @@ impl<'p> SlottedPage<'p, RW> {
             return Ok(false);
         }
 
-        let mut page_buf = [0; PAGE_DATA_SIZE];
-        page_buf.copy_from_slice(self.page.contents());
+        // (id, offset, length)
+        let mut cell_pointers = self
+            .cell_pointers_iter()
+            .enumerate()
+            .filter(|(_, cp)| !cp.is_deleted())
+            .map(|(i, cp)| (i, cp.offset(), cp.length()))
+            .collect::<Vec<_>>();
+
+        // sort by offset
+        cell_pointers.sort_by(|a, b| a.1.cmp(&b.1));
+
         let mut last_start = 0;
         let mut last_offset = 0;
-        for i in 0..num_cells {
-            let cp = self.get_cell_pointer(i)?;
-            if cp.is_deleted() {
-                continue;
-            }
-            let len = cp.length();
-            let offset = cp.offset();
+        for (idx, offset, len) in cell_pointers {
             let start = offset - len;
             if start == last_start {
                 last_offset = offset;
@@ -251,19 +254,16 @@ impl<'p> SlottedPage<'p, RW> {
             let end_index = start_index + len as usize;
 
             let new_offset = last_offset + len;
-            self.set_cell_pointer(i, new_offset, len)?;
+            self.set_cell_pointer(idx as u8, new_offset, len)?;
 
             let new_start_index = (PAGE_DATA_SIZE as u16 - new_offset) as usize;
-            let new_end_index = new_start_index + len as usize;
-            page_buf[new_start_index..new_end_index]
-                .copy_from_slice(&self.page.contents()[start_index..end_index]);
+            self.page
+                .contents_mut()
+                .copy_within(start_index..end_index, new_start_index);
 
             last_start = new_offset - len;
             last_offset = new_offset;
         }
-
-        self.page.contents_mut()[PAGE_DATA_SIZE - last_offset as usize..]
-            .copy_from_slice(&page_buf[PAGE_DATA_SIZE - last_offset as usize..]);
 
         Ok(true)
     }
