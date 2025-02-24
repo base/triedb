@@ -17,6 +17,7 @@ pub enum PageError {
     PageIsFull,
     IO(std::io::Error),
     InvalidValue,
+    InvalidPageContents(PageId),
     // TODO: add more errors here for other cases.
 }
 
