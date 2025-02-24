@@ -256,7 +256,7 @@ mod tests {
         let bytes = node.to_bytes();
         // branch, no prefix
         let mut expected = Vec::from([128]);
-        // children bitmask (100000000 00010000)
+        // children bitmask (10000000 00010000)
         expected.extend([128, 16]);
         // child 0
         expected.extend([0, 0, 0, 42, 160]);
