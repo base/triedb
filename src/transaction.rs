@@ -10,6 +10,8 @@ use crate::{
     storage::{engine::StorageEngine, value::Value},
 };
 pub use manager::TransactionManager;
+use metrics::Counter;
+use metrics_derive::Metrics;
 use sealed::sealed;
 
 #[sealed]
@@ -34,6 +36,19 @@ pub struct Transaction<'tx, K: TransactionKind, P: PageManager> {
     database: &'tx Database<P>,
     lock: Option<RwLockReadGuard<'tx, StorageEngine<P>>>,
     _marker: std::marker::PhantomData<K>,
+    // todo: add metrics
+}
+
+// Metrics for a transaction.
+#[derive(Metrics)]
+#[metrics(scope = "triedb.transaction")]
+pub(crate) struct TransactionMetrics {
+    pub(crate) pages_read: Counter,
+    pub(crate) pages_written: Counter,
+    pub(crate) pages_allocated: Counter,
+    pub(crate) nodes_read: Counter,
+    pub(crate) nodes_written: Counter,
+    pub(crate) nodes_allocated: Counter,
 }
 
 impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {

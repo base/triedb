@@ -9,6 +9,8 @@ alloy-rlp = "0.3.11"
 alloy-trie = "0.7.6"
 log = "0.4.25"
 memmap2 = "0.9.5"
+metrics = "0.24.1"
+metrics-derive = "0.1.0"
 sealed = "0.6.0"
 
 [dev-dependencies]
