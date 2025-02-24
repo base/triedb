@@ -152,23 +152,93 @@ impl<P: PageManager> StorageEngine<P> {
         slotted_page: SlottedPage<'_, RO>,
         page_index: u8,
     ) -> Result<Option<V>, Error> {
+        let node_option =
+            self.get_node_from_page(metadata, path.clone(), slotted_page, page_index)?;
+        match node_option {
+            Some(node) => {
+                let val: &[u8] = node.value().unwrap();
+                Ok(Some(V::from_bytes(val).unwrap()))
+            }
+
+            None => Ok(None),
+        }
+
+        // trace!("get_value_from_page(): {:?} {:?}", path, page_index);
+
+        // let node: Node = slotted_page.get_value(page_index)?;
+        // trace!("node.prefix(): {:?}", node.prefix());
+
+        // let common_prefix_length = path.common_prefix_length(node.prefix());
+        // let common_prefix = path.slice(0..common_prefix_length);
+        // trace!("common_prefix: {:?}", common_prefix);
+        // if common_prefix_length < node.prefix().len() {
+        //     return Ok(None);
+        // }
+
+        // let remaining_path = path.slice(common_prefix_length..);
+        // trace!("remaining_path: {:?}", remaining_path);
+        // if remaining_path.is_empty() {
+        //     let val: &[u8] = node.value().unwrap();
+        //     return Ok(Some(V::from_bytes(val).unwrap()));
+        // }
+
+        // let child_pointer = node.child(remaining_path[0]);
+        // match child_pointer {
+        //     Some(child_pointer) => {
+        //         let child_location = child_pointer.location();
+        //         if child_location.cell_index().is_some() {
+        //             self.get_value_from_page(
+        //                 metadata,
+        //                 remaining_path.slice(1..),
+        //                 slotted_page,
+        //                 child_location.cell_index().unwrap(),
+        //             )
+        //         } else {
+        //             let child_page_id = child_location.page_id().unwrap();
+        //             let child_page = self.get_page(metadata, child_page_id)?;
+        //             let child_slotted_page = SlottedPage::try_from(child_page)?;
+        //             self.get_value_from_page(
+        //                 metadata,
+        //                 remaining_path.slice(1..),
+        //                 child_slotted_page,
+        //                 0,
+        //             )
+        //         }
+        //     }
+        //     None => Ok(None),
+        // }
+    }
+
+    fn get_node_from_page(
+        &self,
+        metadata: &Metadata,
+        path: Nibbles,
+        slotted_page: SlottedPage<'_, RO>,
+        page_index: u8,
+    ) -> Result<Option<Node>, Error> {
         trace!("get_value_from_page(): {:?} {:?}", path, page_index);
 
         let node: Node = slotted_page.get_value(page_index)?;
         trace!("node.prefix(): {:?}", node.prefix());
 
         let common_prefix_length = path.common_prefix_length(node.prefix());
+
+        let remaining_path = path.slice(common_prefix_length..);
+        trace!("remaining_path: {:?}", remaining_path);
+        if remaining_path.is_empty() {
+            return Ok(Some(node));
+        }
+
         let common_prefix = path.slice(0..common_prefix_length);
         trace!("common_prefix: {:?}", common_prefix);
         if common_prefix_length < node.prefix().len() {
             return Ok(None);
         }
 
-        let remaining_path = path.slice(common_prefix_length..);
-        trace!("remaining_path: {:?}", remaining_path);
-        if remaining_path.is_empty() {
-            let val: &[u8] = node.value().unwrap();
-            return Ok(Some(V::from_bytes(val).unwrap()));
+        if node.is_leaf() {
+            // This case means there is more to traverse but we are at a leaf node
+            // with no where else to go.
+            return Ok(None);
         }
 
         let child_pointer = node.child(remaining_path[0]);
@@ -176,7 +246,7 @@ impl<P: PageManager> StorageEngine<P> {
             Some(child_pointer) => {
                 let child_location = child_pointer.location();
                 if child_location.cell_index().is_some() {
-                    self.get_value_from_page(
+                    self.get_node_from_page(
                         metadata,
                         remaining_path.slice(1..),
                         slotted_page,
@@ -186,7 +256,7 @@ impl<P: PageManager> StorageEngine<P> {
                     let child_page_id = child_location.page_id().unwrap();
                     let child_page = self.get_page(metadata, child_page_id)?;
                     let child_slotted_page = SlottedPage::try_from(child_page)?;
-                    self.get_value_from_page(
+                    self.get_node_from_page(
                         metadata,
                         remaining_path.slice(1..),
                         child_slotted_page,
@@ -293,28 +363,38 @@ impl<P: PageManager> StorageEngine<P> {
         let common_prefix_length = path.common_prefix_length(node.prefix());
         // find the common prefix between the path and the node prefix.
         let common_prefix = path.slice(0..common_prefix_length);
-        if common_prefix_length < node.prefix().len() {
-            // the path does not match the node prefix, so we need to create a new branch node as its parent.
-            let mut new_parent_branch = Node::new_branch(common_prefix);
-            let child_branch_index = path[common_prefix_length];
-            let remaining_path = path.slice(common_prefix_length + 1..);
-            let new_leaf_node = Node::new_leaf(remaining_path, value.to_bytes().as_slice());
-            // update the prefix of the existing node and insert it into the page
-            let node_branch_index = node.prefix()[common_prefix_length];
-            node.set_prefix(node.prefix().slice(common_prefix_length + 1..));
-            let location = Location::for_cell(slotted_page.insert_value(node)?);
-            new_parent_branch.set_child(node_branch_index, Pointer::new_unhashed(location));
-            let location = Location::for_cell(slotted_page.insert_value(new_leaf_node)?);
-            new_parent_branch.set_child(child_branch_index, Pointer::new_unhashed(location));
-            slotted_page.set_value(page_index, new_parent_branch)?;
+
+        if common_prefix_length == path.len() {
+            // the path matches the node prefix exactly, so we can update the value.
+            node.set_value(value.to_bytes().as_slice());
+            slotted_page.set_value(page_index, node)?;
 
             return Ok(self.node_location(slotted_page.page_id(), page_index));
         }
 
-        if common_prefix_length == path.len() {
-            // the path matches the node prefix exactly, so we can update the value.
-            let new_node = Node::new_leaf(path, value.to_bytes().as_slice());
-            slotted_page.set_value(page_index, new_node)?;
+        if common_prefix_length < node.prefix().len()
+            || (common_prefix_length == node.prefix().len() && node.is_leaf())
+        {
+            // the path does not match the node prefix, so we need to create a new branch node as its parent.
+            let branch_value = if common_prefix_length == node.prefix().len() && node.is_leaf() {
+                node.value()
+            } else {
+                None
+            };
+            let mut new_parent_branch = Node::new_branch(common_prefix, branch_value);
+            let child_branch_index = path[common_prefix_length];
+            let remaining_path = path.slice(common_prefix_length + 1..);
+            let new_leaf_node = Node::new_leaf(remaining_path, value.to_bytes().as_slice());
+            // update the prefix of the existing node and insert it into the page
+            if common_prefix_length < node.prefix().len() {
+                let node_branch_index = node.prefix()[common_prefix_length];
+                node.set_prefix(node.prefix().slice(common_prefix_length + 1..));
+                let location = Location::for_cell(slotted_page.insert_value(node)?);
+                new_parent_branch.set_child(node_branch_index, Pointer::new_unhashed(location));
+            }
+            let location = Location::for_cell(slotted_page.insert_value(new_leaf_node)?);
+            new_parent_branch.set_child(child_branch_index, Pointer::new_unhashed(location));
+            slotted_page.set_value(page_index, new_parent_branch)?;
 
             return Ok(self.node_location(slotted_page.page_id(), page_index));
         }
@@ -480,19 +560,10 @@ impl<P: PageManager> StorageEngine<P> {
     ) -> Result<Option<StorageValue>, Error> {
         debug!("get_storage_from_account(): {:?}", storage_path.address);
 
-        match self.get_account::<A>(metadata, storage_path.address)? {
-            Some(account) => {
-                if account.storage_root() == EMPTY_ROOT_HASH {
-                    return Ok(None);
-                }
-                let page = self.get_page(metadata, account.storage_root_subtrie_page_id())?;
-                let slotted_page = SlottedPage::try_from(page)?;
+        let page = self.get_page(metadata, metadata.root_subtrie_page_id)?;
+        let slotted_page = SlottedPage::try_from(page)?;
 
-                self.get_value_from_page(metadata, storage_path.slot, slotted_page, 0)
-            }
-
-            None => Ok(None),
-        }
+        self.get_value_from_page(metadata, storage_path.into(), slotted_page, 0)
     }
 
     pub fn set_storage<A: Account + Value>(
@@ -506,15 +577,16 @@ impl<P: PageManager> StorageEngine<P> {
             None => Err(Error::AccountDoesNotExist(storage_path.address.clone())),
         }?;
 
-        let mut page_id: PageId = account.storage_root_subtrie_page_id();
-        if account.storage_root() == EMPTY_ROOT_HASH {
-            // the storage is empty. create a new page to hold the root (and some children)
-            // of the storage trie.
-            let storage_root_page = self.allocate_page(metadata)?;
-            page_id = storage_root_page.page_id();
-        }
+        let location = self.set_value_in_page(
+            metadata,
+            storage_path.clone().into(),
+            value,
+            metadata.root_subtrie_page_id,
+            0,
+        )?;
 
-        let location = self.set_value_in_page(metadata, storage_path.slot, value, page_id, 0)?;
+        metadata.root_subtrie_page_id = location.page_id().unwrap();
+
         let new_account = AccountVec::new(
             account.balance(),
             account.nonce(),

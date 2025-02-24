@@ -44,3 +44,9 @@ impl StoragePath {
         }
     }
 }
+
+impl From<StoragePath> for Nibbles {
+    fn from(path: StoragePath) -> Self {
+        path.address.path.join(&path.slot)
+    }
+}

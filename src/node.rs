@@ -14,13 +14,8 @@ pub enum Node {
     Branch {
         prefix: Nibbles,
         children: [Option<Pointer>; 16],
+        value: Option<Vec<u8>>,
     },
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum NodeType {
-    Leaf,
-    Branch,
 }
 
 impl Node {
@@ -31,10 +26,11 @@ impl Node {
         }
     }
 
-    pub fn new_branch(prefix: Nibbles) -> Self {
+    pub fn new_branch(prefix: Nibbles, value: Option<&[u8]>) -> Self {
         Self::Branch {
             prefix,
             children: [const { None }; 16],
+            value: value.map(|v| v.to_vec()),
         }
     }
 
@@ -55,6 +51,13 @@ impl Node {
     pub fn is_branch(&self) -> bool {
         match self {
             Self::Branch { .. } => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_leaf(&self) -> bool {
+        match self {
+            Self::Leaf { .. } => true,
             _ => false,
         }
     }
@@ -83,9 +86,18 @@ impl Node {
         }
     }
 
+    pub fn set_value(&mut self, new_value: &[u8]) {
+        match self {
+            Self::Leaf { value, .. } => *value = new_value.to_vec(),
+            Self::Branch { value, .. } => *value = Some(new_value.to_vec()),
+            _ => panic!("cannot get value of non-leaf node"),
+        }
+    }
+
     pub fn value(&self) -> Option<&[u8]> {
         match self {
             Self::Leaf { value, .. } => Some(value),
+            Self::Branch { value: Some(v), .. } => Some(v),
             _ => panic!("cannot get value of non-leaf node"),
         }
     }
@@ -102,7 +114,11 @@ impl Value for Node {
                 data[prefix_length + 1..].copy_from_slice(&value);
                 data
             }
-            Self::Branch { prefix, children } => {
+            Self::Branch {
+                prefix,
+                children,
+                value,
+            } => {
                 let prefix_length = prefix.len();
                 let mut data = vec![0; prefix_length + 3];
                 data[0] = prefix_length as u8 | 0b1000_0000;
@@ -120,6 +136,11 @@ impl Value for Node {
                     } else {
                         data.extend_from_slice(&[0; 36]);
                     }
+                }
+
+                match value {
+                    Some(v) => data.extend_from_slice(&v),
+                    None => (),
                 }
                 data
             }
@@ -150,7 +171,23 @@ impl Value for Node {
                 let child_bytes = bytes[child_offset..child_offset + 36].to_vec();
                 *child = Some(Pointer::from_bytes(&child_bytes)?);
             }
-            Ok(Self::Branch { prefix, children })
+
+            let value_start = (3 + prefix_length + 15 * 36) + 36;
+            if value_start >= bytes.len() {
+                return Ok(Self::Branch {
+                    prefix,
+                    children,
+                    value: None,
+                });
+            }
+
+            // value exists in branch node
+            let value = &bytes[value_start..];
+            Ok(Self::Branch {
+                prefix,
+                children,
+                value: Some(value.to_vec()),
+            })
         }
     }
 }
@@ -178,13 +215,13 @@ mod tests {
 
     #[test]
     fn test_branch_node_to_bytes() {
-        let node = Node::new_branch(Nibbles::from_nibbles([0xa, 0xb]));
+        let node = Node::new_branch(Nibbles::from_nibbles([0xa, 0xb]), None);
         let bytes = node.to_bytes();
         let mut expected = Vec::from(hex!("820a0b"));
         expected.extend(vec![0; 36 * 16 + 2]);
         assert_eq!(bytes, expected);
 
-        let mut node = Node::new_branch(Nibbles::from_nibbles([0xa, 0xb]));
+        let mut node = Node::new_branch(Nibbles::from_nibbles([0xa, 0xb]), None);
         node.set_child(0, Pointer::new_unhashed(7.into()));
         let bytes = node.to_bytes();
         let mut expected = Vec::from(hex!("820a0b"));
