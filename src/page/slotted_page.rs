@@ -61,6 +61,10 @@ impl<'p, P: PageKind> SlottedPage<'p, P> {
         V::from_bytes(data).map_err(|_| PageError::InvalidValue)
     }
 
+    pub fn num_free_bytes(&self) -> usize {
+        self.num_free_bytes_with_cell_count(self.num_cells())
+    }
+
     // Returns the cell pointer at the given index.
     fn get_cell_pointer(&self, index: u8) -> Result<CellPointer, PageError> {
         if index >= self.num_cells() {
@@ -83,17 +87,19 @@ impl<'p, P: PageKind> SlottedPage<'p, P> {
             .map(|chunk| chunk.try_into().unwrap())
     }
 
-    fn num_free_bytes(&self, num_cells: u8) -> usize {
-        let max_offset = (0..num_cells)
-            .map(|i| self.get_cell_pointer(i).unwrap().offset())
-            .max()
-            .unwrap_or(0);
-        self.page.contents().len() - 1 - 3 * num_cells as usize - max_offset as usize
+    fn num_free_bytes_with_cell_count(&self, num_cells: u8) -> usize {
+        let total_occupied_space = self
+            .cell_pointers_iter()
+            .filter(|cp| !cp.is_deleted())
+            .map(|cp| cp.length())
+            .sum::<u16>();
+
+        self.page.contents().len() - total_occupied_space as usize - 3 * num_cells as usize - 1
     }
 
     fn num_dead_bytes(&self, num_cells: u8) -> usize {
         let total_bytes = self.page.contents().len();
-        let free_bytes = self.num_free_bytes(num_cells);
+        let free_bytes = self.num_free_bytes_with_cell_count(num_cells);
         let used_bytes: usize = self
             .cell_pointers_iter()
             .map(|cp| cp.length() as usize)
@@ -104,12 +110,13 @@ impl<'p, P: PageKind> SlottedPage<'p, P> {
 
 impl<'p, P: PageKind> std::fmt::Debug for SlottedPage<'p, P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let num_cells = self.num_cells();
         write!(f, "SlottedPage {{ page_id: {}, num_cells: {}, cell_pointers: {:?}, free_bytes: {}, dead_bytes: {} }}",
             self.page_id(),
             self.num_cells(),
             self.cell_pointers_iter().collect::<Vec<CellPointer>>(),
-            self.num_free_bytes(self.num_cells()),
-            self.num_dead_bytes(self.num_cells())
+            self.num_free_bytes_with_cell_count(num_cells),
+            self.num_dead_bytes(num_cells)
         )
     }
 }
