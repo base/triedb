@@ -84,9 +84,7 @@ impl<P: PageManager> StorageEngine<P> {
             return Err(Error::EngineClosed);
         }
 
-        let original_page = inner.page_manager.get_mut(metadata.snapshot_id, page_id)?;
-
-        metadata.metrics_inc_pages_read();
+        let original_page = inner.page_manager_get_mut(metadata, page_id)?;
 
         // if the page already has the correct snapshot id, return it without cloning.
         if original_page.snapshot_id() == metadata.snapshot_id {
@@ -94,8 +92,6 @@ impl<P: PageManager> StorageEngine<P> {
         }
 
         let mut new_page = inner.allocate_page(metadata)?;
-
-        metadata.metrics_inc_pages_allocated();
 
         inner
             .orphan_manager
@@ -113,14 +109,7 @@ impl<P: PageManager> StorageEngine<P> {
             return Err(Error::EngineClosed);
         }
 
-        let result = inner
-            .page_manager
-            .get(metadata.snapshot_id, page_id)
-            .map_err(|e| e.into());
-        if let Ok(_) = result {
-            metadata.metrics_inc_pages_read();
-        }
-        result
+        inner.page_manager_get(metadata, page_id)
     }
 
     fn get_mut_page<'p>(
@@ -134,14 +123,7 @@ impl<P: PageManager> StorageEngine<P> {
             return Err(Error::EngineClosed);
         }
 
-        let result = inner
-            .page_manager
-            .get_mut(metadata.snapshot_id, page_id)
-            .map_err(|e| e.into());
-        if let Ok(_) = result {
-            metadata.metrics_inc_pages_read();
-        }
-        result
+        inner.page_manager_get_mut(metadata, page_id)
     }
 
     pub fn get_account<A: Account + Value>(
@@ -564,18 +546,56 @@ impl<P: PageManager> Inner<P> {
         }
     }
 
+    // a wrapper around the page manager get_mut that increments the pages read metric
+    fn page_manager_get_mut<'p>(
+        &mut self,
+        metadata: &Metadata,
+        page_id: PageId,
+    ) -> Result<Page<'p, RW>, Error> {
+        let snapshot_id = metadata.snapshot_id;
+        let page = self.page_manager.get_mut(snapshot_id, page_id)?;
+        metadata.metrics_inc_pages_read();
+        Ok(page)
+    }
+
+    // a wrapper around the page manager get that increments the pages read metric
+    fn page_manager_get<'p>(
+        &self,
+        metadata: &Metadata,
+        page_id: PageId,
+    ) -> Result<Page<'p, RO>, Error> {
+        let result = self
+            .page_manager
+            .get(metadata.snapshot_id, page_id)
+            .map_err(|e| e.into());
+        if let Ok(_) = result {
+            metadata.metrics_inc_pages_read();
+        }
+        result
+    }
+    // a wrapper around the page manager allocate that increments the pages allocated metric
+    fn page_manager_allocate<'p>(&mut self, metadata: &Metadata) -> Result<Page<'p, RW>, Error> {
+        let result = self
+            .page_manager
+            .allocate(metadata.snapshot_id)
+            .map_err(|e| e.into());
+        if let Ok(_) = result {
+            metadata.metrics_inc_pages_allocated();
+        }
+        result
+    }
+
     fn allocate_page<'p>(&mut self, metadata: &Metadata) -> Result<Page<'p, RW>, Error> {
         let snapshot_id = metadata.snapshot_id;
         let orphaned_page_id = self.orphan_manager.get_orphaned_page_id();
         if let Some(orphaned_page_id) = orphaned_page_id {
-            let mut page = self.page_manager.get_mut(snapshot_id, orphaned_page_id)?;
+            let mut page = self.page_manager_get_mut(metadata, orphaned_page_id)?;
+
             page.set_snapshot_id(snapshot_id);
             page.contents_mut().fill(0);
             Ok(page)
         } else {
-            self.page_manager
-                .allocate(snapshot_id)
-                .map_err(|e| e.into())
+            self.page_manager_allocate(metadata)
         }
     }
 
