@@ -1,3 +1,5 @@
+use crate::metrics::DatabaseMetrics;
+use crate::metrics::TransactionMetrics;
 use crate::page::MmapPageManager;
 use crate::page::OrphanPageManager;
 use crate::page::PageError;
@@ -11,12 +13,14 @@ use crate::storage::engine::StorageEngine;
 use crate::transaction::Transaction;
 use crate::transaction::TransactionManager;
 use crate::transaction::{RO, RW};
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::RwLock;
 
 #[derive(Debug, Clone)]
 pub struct Database<P: PageManager> {
     pub(crate) inner: Arc<Inner<P>>,
+    metrics: DatabaseMetrics,
 }
 
 #[derive(Debug)]
@@ -31,6 +35,7 @@ pub(crate) struct Metadata {
     pub(crate) root_page_id: PageId,
     pub(crate) root_subtrie_page_id: PageId,
     pub(crate) snapshot_id: SnapshotId,
+    transaction_metrics: RefCell<TransactionMetrics>,
 }
 
 impl Metadata {
@@ -39,7 +44,43 @@ impl Metadata {
             snapshot_id: self.snapshot_id + 1,
             root_page_id: (self.root_page_id + 1) % 2,
             root_subtrie_page_id: self.root_subtrie_page_id,
+            transaction_metrics: Default::default(),
         }
+    }
+}
+
+impl Metadata {
+    pub fn metrics_inc_pages_read(&self) {
+        self.transaction_metrics.borrow_mut().pages_read += 1;
+    }
+
+    pub fn metrics_inc_pages_written(&self) {
+        self.transaction_metrics.borrow_mut().pages_written += 1;
+    }
+
+    pub fn metrics_inc_pages_allocated(&self) {
+        self.transaction_metrics.borrow_mut().pages_allocated += 1;
+    }
+
+    pub fn metrics_pages_read_get_reset(&self) -> u32 {
+        let mut metrics = self.transaction_metrics.borrow_mut();
+        let pages_read = metrics.pages_read;
+        metrics.pages_read = 0;
+        pages_read
+    }
+
+    pub fn metrics_pages_written_get_reset(&self) -> u32 {
+        let mut metrics = self.transaction_metrics.borrow_mut();
+        let pages_written = metrics.pages_written;
+        metrics.pages_written = 0;
+        pages_written
+    }
+
+    pub fn metrics_pages_allocated_get_reset(&self) -> u32 {
+        let mut metrics = self.transaction_metrics.borrow_mut();
+        let pages_allocated = metrics.pages_allocated;
+        metrics.pages_allocated = 0;
+        pages_allocated
     }
 }
 
@@ -69,6 +110,7 @@ impl Database<MmapPageManager> {
             snapshot_id: 0,
             root_page_id: 0,
             root_subtrie_page_id: 256,
+            transaction_metrics: Default::default(),
         };
 
         let db = Self::new(metadata, StorageEngine::new(page_manager, orphan_manager));
@@ -120,6 +162,26 @@ impl Database<MmapPageManager> {
 }
 
 impl<P: PageManager> Database<P> {
+    pub fn update_metrics_ro(&self, metadata: &Metadata) {
+        self.metrics
+            .ro_transaction_pages_read
+            .record(metadata.metrics_pages_read_get_reset() as f64);
+    }
+
+    pub fn update_metrics_rw(&self, metadata: &Metadata) {
+        self.metrics
+            .rw_transaction_pages_read
+            .record(metadata.metrics_pages_read_get_reset() as f64);
+        self.metrics
+            .rw_transaction_pages_written
+            .record(metadata.metrics_pages_written_get_reset() as f64);
+        self.metrics
+            .rw_transaction_pages_allocated
+            .record(metadata.metrics_pages_allocated_get_reset() as f64);
+    }
+}
+
+impl<P: PageManager> Database<P> {
     pub fn new(metadata: Metadata, storage_engine: StorageEngine<P>) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -127,6 +189,7 @@ impl<P: PageManager> Database<P> {
                 storage_engine: RwLock::new(storage_engine),
                 transaction_manager: RwLock::new(TransactionManager::new()),
             }),
+            metrics: Default::default(),
         }
     }
 
@@ -165,6 +228,7 @@ impl<'p, P: PageKind> From<RootPage<'p, P>> for Metadata {
             root_page_id: root_page.page_id(),
             root_subtrie_page_id: root_page.root_subtrie_page_id(),
             snapshot_id: root_page.snapshot_id(),
+            transaction_metrics: Default::default(),
         }
     }
 }

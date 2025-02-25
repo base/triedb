@@ -85,12 +85,17 @@ impl<P: PageManager> StorageEngine<P> {
         }
 
         let original_page = inner.page_manager.get_mut(metadata.snapshot_id, page_id)?;
+
+        metadata.metrics_inc_pages_read();
+
         // if the page already has the correct snapshot id, return it without cloning.
         if original_page.snapshot_id() == metadata.snapshot_id {
             return Ok(original_page);
         }
 
         let mut new_page = inner.allocate_page(metadata)?;
+
+        metadata.metrics_inc_pages_allocated();
 
         inner
             .orphan_manager
@@ -108,10 +113,14 @@ impl<P: PageManager> StorageEngine<P> {
             return Err(Error::EngineClosed);
         }
 
-        inner
+        let result = inner
             .page_manager
             .get(metadata.snapshot_id, page_id)
-            .map_err(|e| e.into())
+            .map_err(|e| e.into());
+        if let Ok(_) = result {
+            metadata.metrics_inc_pages_read();
+        }
+        result
     }
 
     fn get_mut_page<'p>(
@@ -125,10 +134,14 @@ impl<P: PageManager> StorageEngine<P> {
             return Err(Error::EngineClosed);
         }
 
-        inner
+        let result = inner
             .page_manager
             .get_mut(metadata.snapshot_id, page_id)
-            .map_err(|e| e.into())
+            .map_err(|e| e.into());
+        if let Ok(_) = result {
+            metadata.metrics_inc_pages_read();
+        }
+        result
     }
 
     pub fn get_account<A: Account + Value>(

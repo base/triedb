@@ -1,6 +1,7 @@
 mod account;
 mod database;
 mod location;
+mod metrics;
 mod node;
 mod page;
 mod path;
