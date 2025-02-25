@@ -1506,12 +1506,12 @@ mod tests {
             let mut nibbles = [0u8; 64];
             // Generate random nibbles
             for j in 0..64 {
-                nibbles[j] = rng.random_range(0..16) as u8;
+                nibbles[j] = rng.gen_range(0..16) as u8;
             }
 
             let path = AddressPath::new(Nibbles::from_nibbles(nibbles));
-            let balance = rng.random_range(0..1_000_000);
-            let nonce = rng.random_range(0..100);
+            let balance = rng.gen_range(0..1_000_000);
+            let nonce = rng.gen_range(0..100);
             let account = create_test_account(balance, nonce);
             accounts.push((path, account));
         }
@@ -1582,8 +1582,8 @@ mod tests {
             if i % 5 == 0 {
                 // Update every 5th account
                 let (path, _) = &accounts[i];
-                let new_balance = rng.random_range(0..1_000_000);
-                let new_nonce = rng.random_range(0..100);
+                let new_balance = rng.gen_range(0..1_000_000);
+                let new_nonce = rng.gen_range(0..100);
                 let new_account = create_test_account(new_balance, new_nonce);
 
                 updates.push((i, path.clone(), new_account));

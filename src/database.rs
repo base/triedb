@@ -304,7 +304,7 @@ mod tests {
             let db = Database::create(file_path.as_str()).unwrap();
 
             let create_size = db.size();
-            assert_eq!(create_size, 300);
+            assert_eq!(create_size, 3_000_000);
         }
 
         // WHEN: the database is dropped from scope

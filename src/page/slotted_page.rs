@@ -9,7 +9,6 @@ use super::{
 
 pub mod cell_pointer;
 use cell_pointer::CellPointer;
-use log::trace;
 
 const MAX_NUM_CELLS: u8 = 255; // With 1 byte for the number of cells, the maximum number of cells is 255.
 
