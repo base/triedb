@@ -269,24 +269,33 @@ impl<'p> SlottedPage<'p, RW> {
 
     // Finds a free space with length in the page. Returns slotted page offset if found.
     fn find_available_slot(&self, index: u8, length: u16) -> Result<Option<u16>, PageError> {
-        match self.find_available_slot_in_used_space(length)? {
+        match self.find_available_slot_in_used_space(index, length)? {
             Some(offset) => Ok(Some(offset)),
             None => self.find_available_slot_in_remaining_space(index, length),
         }
     }
 
-    fn find_available_slot_in_used_space(&self, length: u16) -> Result<Option<u16>, PageError> {
+    fn find_available_slot_in_used_space(
+        &self,
+        index: u8,
+        length: u16,
+    ) -> Result<Option<u16>, PageError> {
         let num_cells = self.num_cells();
-        let mut used_space = (0..num_cells).try_fold(
-            Vec::new(),
-            |mut acc, i| -> Result<Vec<(u16, u16)>, PageError> {
-                let cp = self.get_cell_pointer(i)?;
-                if !cp.is_deleted() {
-                    acc.push((cp.offset() - cp.length(), cp.offset()));
-                }
-                Ok(acc)
-            },
-        )?;
+        let new_num_cells = max(num_cells, index + 1);
+        let header_size = new_num_cells as usize * 3 + 1;
+        let mut used_space = Vec::new();
+        for i in 0..num_cells {
+            let cp = self.get_cell_pointer(i)?;
+            if cp.is_deleted() {
+                continue;
+            }
+            // ensure existing offsets do not overlap with the header
+            if cp.offset() as usize + header_size > self.page.contents().len() {
+                return Ok(None);
+            }
+            used_space.push((cp.offset() - cp.length(), cp.offset()));
+        }
+
         used_space.sort_by(|a, b| a.1.cmp(&b.1));
 
         if used_space.len() > 1 {
@@ -312,15 +321,21 @@ impl<'p> SlottedPage<'p, RW> {
             if i == index {
                 continue;
             }
-            let offset = self.get_cell_pointer(i)?.offset();
-            if offset > max_offset {
-                max_offset = offset;
+            let cp = self.get_cell_pointer(i)?;
+            if !cp.is_deleted() {
+                // Only consider non-deleted cells
+                let offset = cp.offset();
+                if offset > max_offset {
+                    max_offset = offset;
+                }
             }
         }
 
         let offset = max_offset + length;
+        let header_size = new_num_cells as usize * 3 + 1;
+        let available_space = self.page.contents().len() - header_size;
 
-        if offset as usize > self.page.contents().len() - new_num_cells as usize * 3 - 1 {
+        if offset as usize > available_space {
             return Ok(None);
         }
 
@@ -801,6 +816,10 @@ mod tests {
         let page = Page::new_rw_with_snapshot(42, 123, &mut data);
         let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
 
+        // bytes 0-12 are used by the header, and the next 4072 are used by the first 4 cells
+        // this sums up to 4085 bytes, which allows for one more pointer to be added later
+        // without defragmenting the page.
+
         let i0 = subtrie_page
             .insert_value(String::from_iter(&['a'; 1020]))
             .unwrap();
@@ -817,7 +836,7 @@ mod tests {
         assert_eq!(i2, 2);
 
         let i3 = subtrie_page
-            .insert_value(String::from_iter(&['d'; 1015]))
+            .insert_value(String::from_iter(&['d'; 1012]))
             .unwrap();
         assert_eq!(i3, 3);
 
@@ -852,6 +871,16 @@ mod tests {
         let cell_pointer = subtrie_page.get_cell_pointer(i6).unwrap();
         assert_eq!(cell_pointer.length(), 100);
         assert_eq!(cell_pointer.offset(), 2720); // 2720 = 2620 + 100
+
+        // this additional insertion forces the page to be defragmented to avoid overlapping with the header
+        let i7 = subtrie_page
+            .insert_value(String::from_iter(&['h'; 100]))
+            .unwrap();
+        assert_eq!(i7, 5);
+        assert_eq!(subtrie_page.num_cells(), 6);
+        let cell_pointer = subtrie_page.get_cell_pointer(i7).unwrap();
+        assert_eq!(cell_pointer.length(), 100);
+        assert_eq!(cell_pointer.offset(), 3832);
     }
 
     #[test]
