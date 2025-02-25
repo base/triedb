@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 pub struct OrphanPageManager {
     unlocked_page_ids: Vec<PageId>,
     locked_page_ids: BTreeMap<SnapshotId, Vec<PageId>>,
+    num_orphan_pages_used: usize,
 }
 
 impl OrphanPageManager {
@@ -15,6 +16,7 @@ impl OrphanPageManager {
         Self {
             unlocked_page_ids: Vec::new(),
             locked_page_ids: BTreeMap::new(),
+            num_orphan_pages_used: 0,
         }
     }
 
@@ -23,11 +25,13 @@ impl OrphanPageManager {
         Self {
             unlocked_page_ids: unlocked_page_ids,
             locked_page_ids: BTreeMap::new(),
+            num_orphan_pages_used: 0,
         }
     }
 
     // Returns an unlocked orphaned page id, if one exists.
     pub fn get_orphaned_page_id(&mut self) -> Option<PageId> {
+        self.num_orphan_pages_used = self.num_orphan_pages_used + 1;
         self.unlocked_page_ids.pop()
     }
 
@@ -60,6 +64,16 @@ impl OrphanPageManager {
             .entry(snapshot_id)
             .or_default()
             .extend(pages);
+    }
+
+    // Returns the number of orphan pages were given out
+    pub fn get_num_orphan_pages_used(&self) -> usize {
+        self.num_orphan_pages_used
+    }
+
+    // Resets the number of orphan pages were given out
+    pub fn reset_num_orphan_pages_used(&mut self) {
+        self.num_orphan_pages_used = 0
     }
 
     // Returns a flat iterator over all the orphaned page ids, locked and unlocked.

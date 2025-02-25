@@ -1,5 +1,6 @@
 use crate::page::PageId;
-use alloy_primitives::{StorageValue, B256, U256};
+use alloy_primitives::{hex, StorageValue, B256, U256};
+use alloy_rlp::{BufMut, Encodable, RlpEncodable};
 use std::fmt::Debug;
 
 use crate::storage::value::{self, Value, ValueRef};
@@ -138,5 +139,25 @@ impl Value for StorageValue {
 
     fn from_bytes(bytes: &[u8]) -> value::Result<Self> {
         Ok(Self::from_be_slice(bytes))
+    }
+}
+
+#[derive(RlpEncodable, Debug)]
+struct RlpAccount {
+    nonce: u64,
+    balance: U256,
+    storage_root: B256,
+    code_hash: B256,
+}
+
+impl Encodable for AccountVec {
+    fn encode(&self, out: &mut dyn BufMut) {
+        let rlp_account = RlpAccount {
+            nonce: self.nonce(),
+            balance: self.balance(),
+            storage_root: self.storage_root(),
+            code_hash: self.code_hash(),
+        };
+        rlp_account.encode(out);
     }
 }
