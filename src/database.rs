@@ -35,7 +35,7 @@ pub(crate) struct Metadata {
     pub(crate) root_page_id: PageId,
     pub(crate) root_subtrie_page_id: PageId,
     pub(crate) snapshot_id: SnapshotId,
-    transaction_metrics: RefCell<TransactionMetrics>,
+    pub(crate) transaction_metrics: RefCell<TransactionMetrics>,
 }
 
 impl Metadata {

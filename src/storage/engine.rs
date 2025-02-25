@@ -645,6 +645,7 @@ mod tests {
             snapshot_id: 1,
             root_page_id: 0,
             root_subtrie_page_id,
+            transaction_metrics: Default::default(),
         };
         let storage_engine = StorageEngine::new(manager, orphan_manager);
         (storage_engine, metadata)
