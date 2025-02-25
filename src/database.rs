@@ -196,14 +196,14 @@ mod tests {
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
 
-        let account1 = AccountVec::new(U256::from(100), 1, B256::ZERO, B256::ZERO, 0);
+        let account1 = AccountVec::new(U256::from(100), 1, B256::ZERO, B256::ZERO);
         let mut tx = db.begin_rw().unwrap();
         tx.set_account(AddressPath::for_address(address), Some(account1.clone()))
             .unwrap();
 
         tx.commit().unwrap();
 
-        let account2 = AccountVec::new(U256::from(123), 456, B256::ZERO, B256::ZERO, 0);
+        let account2 = AccountVec::new(U256::from(123), 456, B256::ZERO, B256::ZERO);
         let mut tx = db.begin_rw().unwrap();
         tx.set_account(AddressPath::for_address(address), Some(account2.clone()))
             .unwrap();

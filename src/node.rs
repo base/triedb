@@ -18,7 +18,7 @@ pub enum Node<V> {
     Branch {
         prefix: Nibbles,
         children: [Option<Pointer>; 16],
-        value: Option<Vec<u8>>,
+        value: Option<V>,
     },
 }
 
@@ -33,11 +33,11 @@ impl<V> Node<V> {
         Self::Leaf { prefix, value }
     }
 
-    pub fn new_branch(prefix: Nibbles, value: Option<&[u8]>) -> Self {
+    pub fn new_branch(prefix: Nibbles, value: Option<V>) -> Self {
         Self::Branch {
             prefix,
             children: [const { None }; 16],
-            value: value.map(|v| v.to_vec()),
+            value: value,
         }
     }
 
@@ -93,11 +93,10 @@ impl<V> Node<V> {
         }
     }
 
-    pub fn set_value(&mut self, new_value: &[u8]) {
+    pub fn set_value(&mut self, new_value: V) {
         match self {
-            Self::Leaf { value, .. } => *value = new_value.to_vec(),
-            Self::Branch { value, .. } => *value = Some(new_value.to_vec()),
-            _ => panic!("cannot get value of non-leaf node"),
+            Self::Leaf { value, .. } => *value = new_value,
+            Self::Branch { value, .. } => *value = Some(new_value),
         }
     }
 
@@ -112,6 +111,7 @@ impl<V> Node<V> {
     pub fn to_value(self) -> V {
         match self {
             Self::Leaf { value, .. } => value,
+            Self::Branch { value: Some(v), .. } => v,
             _ => panic!("cannot get value of non-leaf node"),
         }
     }
@@ -160,7 +160,7 @@ impl<V: Value> Value for Node<V> {
                 }
 
                 match value {
-                    Some(v) => data.extend_from_slice(&v),
+                    Some(v) => data.extend_from_slice(&v.to_bytes()),
                     None => (),
                 }
                 data
@@ -193,7 +193,7 @@ impl<V: Value> Value for Node<V> {
                 *child = Some(Pointer::from_bytes(&child_bytes)?);
             }
 
-            let value_start = (3 + prefix_length + 15 * 36) + 36;
+            let value_start = (3 + prefix_length + 15 * 37) + 37;
             if value_start >= bytes.len() {
                 return Ok(Self::Branch {
                     prefix,
@@ -207,7 +207,7 @@ impl<V: Value> Value for Node<V> {
             Ok(Self::Branch {
                 prefix,
                 children,
-                value: Some(value.to_vec()),
+                value: Some(V::from_bytes(value)?),
             })
         }
     }
@@ -224,8 +224,22 @@ impl<V: Value + Encodable> Encodable for Node<V> {
                 }
                 .encode(out);
             }
-            Self::Branch { prefix, children } => {
-                if prefix.is_empty() {
+            Self::Branch {
+                prefix,
+                children,
+                value,
+            } => {
+                if value.is_some() {
+                    // if the value is set this is a branch node holding an account,
+                    // with this branch node acting as the "storage root".
+                    // treat this as a leaf node
+                    let value_rlp = encode(value.as_ref().unwrap());
+                    LeafNodeRef {
+                        key: prefix,
+                        value: &value_rlp,
+                    }
+                    .encode(out);
+                } else if prefix.is_empty() {
                     BranchNode {
                         stack: children
                             .iter()
@@ -291,7 +305,7 @@ mod tests {
 
     #[test]
     fn test_branch_node_to_bytes() {
-        let mut node: Node<Vec<u8>> = Node::new_branch(Nibbles::new());
+        let mut node: Node<Vec<u8>> = Node::new_branch(Nibbles::new(), None);
         let hash1 = b256!("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
         let hash2 = b256!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
         node.set_child(0, Pointer::new(42.into(), RlpNode::word_rlp(&hash1)));
@@ -314,7 +328,7 @@ mod tests {
         assert_eq!(bytes, expected);
 
         let mut node: Node<Vec<u8>> =
-            Node::new_branch(Nibbles::from_nibbles([0xa, 0xb, 0xc, 0xd, 0xe]));
+            Node::new_branch(Nibbles::from_nibbles([0xa, 0xb, 0xc, 0xd, 0xe]), None);
         let hash1 = b256!("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
         let hash2 = b256!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
         node.set_child(2, Pointer::new(2.into(), RlpNode::word_rlp(&hash1)));
@@ -336,7 +350,7 @@ mod tests {
         expected.extend([0; 37 * 12]);
         assert_eq!(bytes, expected);
 
-        let mut node: Node<Vec<u8>> = Node::new_branch(Nibbles::from_nibbles([0x0, 0x0]));
+        let mut node: Node<Vec<u8>> = Node::new_branch(Nibbles::from_nibbles([0x0, 0x0]), None);
         let v1 = encode(1u8);
         let v2 = encode("hello world");
         node.set_child(1, Pointer::new(99999.into(), RlpNode::from_rlp(&v1)));
@@ -407,7 +421,7 @@ mod tests {
 
     #[test]
     fn test_branch_node_encode() {
-        let mut node: Node<AccountVec> = Node::new_branch(Nibbles::new());
+        let mut node: Node<AccountVec> = Node::new_branch(Nibbles::new(), None);
         node.set_child(
             0,
             Pointer::new(
@@ -430,7 +444,7 @@ mod tests {
         node.encode(&mut bytes);
         assert_eq!(bytes, hex!("0xf851a01234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef8080808080808080808080808080a0deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef80"));
 
-        let mut node: Node<AccountVec> = Node::new_branch(Nibbles::new());
+        let mut node: Node<AccountVec> = Node::new_branch(Nibbles::new(), None);
         node.set_child(
             3,
             Pointer::new(
@@ -462,7 +476,7 @@ mod tests {
         node.encode(&mut bytes);
         assert_eq!(bytes, hex!("0xf871808080a01234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef808080a0deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef8080808080a0f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f808080"));
 
-        let mut node: Node<AccountVec> = Node::new_branch(Nibbles::from_nibbles([0x1, 0x2]));
+        let mut node: Node<AccountVec> = Node::new_branch(Nibbles::from_nibbles([0x1, 0x2]), None);
         node.set_child(
             0,
             Pointer::new(
@@ -488,8 +502,10 @@ mod tests {
             hex!("0xe4820012a07bd949f8cd65627b2b00e38e837d3d6136a9fd1599e3677a4b5a730e2176f67d")
         );
 
-        let mut node: Node<AccountVec> =
-            Node::new_branch(Nibbles::from_nibbles([0x7, 0x7, 0x7, 0x7, 0x7, 0x7, 0x7]));
+        let mut node: Node<AccountVec> = Node::new_branch(
+            Nibbles::from_nibbles([0x7, 0x7, 0x7, 0x7, 0x7, 0x7, 0x7]),
+            None,
+        );
         node.set_child(
             3,
             Pointer::new(
@@ -526,7 +542,7 @@ mod tests {
             )
         );
 
-        let mut node: Node<AccountVec> = Node::new_branch(Nibbles::new());
+        let mut node: Node<AccountVec> = Node::new_branch(Nibbles::new(), None);
         node.set_child(
             5,
             Pointer::new(
