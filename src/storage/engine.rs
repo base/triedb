@@ -1022,6 +1022,8 @@ mod tests {
             storage_engine
                 .set_storage::<AccountVec>(&mut metadata, storage_path, storage_value)
                 .unwrap();
+
+            metadata = metadata.next();
         }
 
         // Verify all storage slots exist after insertion
