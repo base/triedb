@@ -39,6 +39,8 @@ impl OrphanPageManager {
     pub fn unlock(&mut self, max_snapshot_id: SnapshotId) {
         let mut to_remove = Vec::new();
         for (snapshot_id, pages) in self.locked_page_ids.iter_mut() {
+            // This is currently necessary because the same page may be added multiple times when the page is split.
+            // TODO: revisit this behavior when splitting is performed in a more deterministic fashion.
             pages.sort_unstable();
             pages.dedup();
             if *snapshot_id <= max_snapshot_id {
