@@ -64,6 +64,17 @@ impl<'v> ValueRef<'v> for &'v str {
     }
 }
 
+// Example implementation for a vector of bytes, useful for testing purposes
+impl Value for Vec<u8> {
+    fn to_bytes(self) -> Vec<u8> {
+        self
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        Ok(bytes.to_vec())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
