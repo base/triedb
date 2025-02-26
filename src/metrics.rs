@@ -23,5 +23,6 @@ pub(crate) struct TransactionMetrics {
     pub(crate) pages_read: u32,
     pub(crate) pages_written: u32,
     pub(crate) pages_allocated: u32,
+    pub(crate) pages_reallocated: u32,
     // TODO: add more metrics
 }

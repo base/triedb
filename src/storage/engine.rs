@@ -575,15 +575,22 @@ impl<P: PageManager> Inner<P> {
         Ok(page)
     }
 
+    fn page_manager_reallocate<'p>(
+        &mut self,
+        metadata: &Metadata,
+        orphaned_page_id: PageId,
+    ) -> Result<Page<'p, RW>, Error> {
+        let mut page = self.page_manager_get_mut(metadata, orphaned_page_id)?;
+        page.set_snapshot_id(metadata.snapshot_id);
+        page.contents_mut().fill(0);
+        metadata.metrics_inc_pages_reallocated();
+        Ok(page)
+    }
+
     fn allocate_page<'p>(&mut self, metadata: &Metadata) -> Result<Page<'p, RW>, Error> {
-        let snapshot_id = metadata.snapshot_id;
         let orphaned_page_id = self.orphan_manager.get_orphaned_page_id();
         if let Some(orphaned_page_id) = orphaned_page_id {
-            let mut page = self.page_manager_get_mut(metadata, orphaned_page_id)?;
-
-            page.set_snapshot_id(snapshot_id);
-            page.contents_mut().fill(0);
-            Ok(page)
+            self.page_manager_reallocate(metadata, orphaned_page_id)
         } else {
             self.page_manager_allocate(metadata)
         }

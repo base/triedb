@@ -62,6 +62,10 @@ impl Metadata {
         self.transaction_metrics.borrow_mut().pages_allocated += 1;
     }
 
+    pub fn metrics_inc_pages_reallocated(&self) {
+        self.transaction_metrics.borrow_mut().pages_reallocated += 1;
+    }
+
     pub fn metrics_pages_read_get_reset(&self) -> u32 {
         let mut metrics = self.transaction_metrics.borrow_mut();
         let pages_read = metrics.pages_read;
@@ -81,6 +85,13 @@ impl Metadata {
         let pages_allocated = metrics.pages_allocated;
         metrics.pages_allocated = 0;
         pages_allocated
+    }
+
+    pub fn metrics_pages_reallocated_get_reset(&self) -> u32 {
+        let mut metrics = self.transaction_metrics.borrow_mut();
+        let pages_reallocated = metrics.pages_reallocated;
+        metrics.pages_reallocated = 0;
+        pages_reallocated
     }
 }
 
