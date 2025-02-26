@@ -4,7 +4,7 @@ use std::{fmt::Debug, sync::RwLockReadGuard};
 
 use crate::{
     account::Account,
-    database::{Database, Metadata},
+    database::{Database, Metadata, TransactionContext},
     page::PageManager,
     path::AddressPath,
     storage::{engine::StorageEngine, value::Value},
@@ -31,7 +31,8 @@ impl TransactionKind for RO {}
 #[derive(Debug)]
 pub struct Transaction<'tx, K: TransactionKind, P: PageManager> {
     committed: bool,
-    metadata: Metadata,
+    // metadata: Metadata,
+    context: TransactionContext,
     database: &'tx Database<P>,
     lock: Option<RwLockReadGuard<'tx, StorageEngine<P>>>,
     _marker: std::marker::PhantomData<K>,
@@ -39,13 +40,13 @@ pub struct Transaction<'tx, K: TransactionKind, P: PageManager> {
 
 impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
     pub(crate) fn new(
-        metadata: Metadata,
+        context: TransactionContext,
         database: &'tx Database<P>,
         lock: Option<RwLockReadGuard<'tx, StorageEngine<P>>>,
     ) -> Self {
         Self {
             committed: false,
-            metadata,
+            context,
             database,
             lock,
             _marker: std::marker::PhantomData,
@@ -58,7 +59,7 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
     ) -> Result<Option<A>, ()> {
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
         let account = storage_engine
-            .get_account(&self.metadata, address_path)
+            .get_account(&self.context, address_path)
             .unwrap();
         Ok(account)
     }

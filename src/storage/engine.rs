@@ -1,6 +1,6 @@
 use crate::{
     account::Account,
-    database::Metadata,
+    database::{Metadata, TransactionContext},
     location::Location,
     node::Node,
     page::{
@@ -102,7 +102,11 @@ impl<P: PageManager> StorageEngine<P> {
         Ok(new_page)
     }
 
-    fn get_page<'p>(&self, metadata: &Metadata, page_id: PageId) -> Result<Page<'p, RO>, Error> {
+    fn get_page<'p>(
+        &self,
+        context: &TransactionContext,
+        page_id: PageId,
+    ) -> Result<Page<'p, RO>, Error> {
         let inner = self.inner.read().unwrap();
 
         if inner.is_closed() {
@@ -111,7 +115,7 @@ impl<P: PageManager> StorageEngine<P> {
 
         inner
             .page_manager
-            .get(metadata.snapshot_id, page_id)
+            .get(context.metadata.snapshot_id, page_id)
             .map_err(|e| e.into())
     }
 
@@ -134,20 +138,20 @@ impl<P: PageManager> StorageEngine<P> {
 
     pub fn get_account<A: Account + Value>(
         &self,
-        metadata: &Metadata,
+        context: &TransactionContext,
         address_path: AddressPath,
     ) -> Result<Option<A>, Error> {
-        let page = self.get_page(metadata, metadata.root_subtrie_page_id)?;
+        let page = self.get_page(context, context.metadata.root_subtrie_page_id)?;
         let slotted_page = SlottedPage::try_from(page)?;
 
         debug!("get_account(): {:?}", address_path);
 
-        self.get_account_from_page::<A>(metadata, address_path.into(), slotted_page, 0)
+        self.get_account_from_page::<A>(context, address_path.into(), slotted_page, 0)
     }
 
     fn get_account_from_page<A: Account + Value>(
         &self,
-        metadata: &Metadata,
+        context: &TransactionContext,
         path: Nibbles,
         slotted_page: SlottedPage<'_, RO>,
         page_index: u8,

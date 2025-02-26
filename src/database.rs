@@ -48,6 +48,18 @@ impl Metadata {
 }
 
 #[derive(Debug)]
+pub(crate) struct TransactionContext {
+    pub(crate) metadata: Metadata,
+    // TODO: add others for transaction context like metrics, etc.
+}
+
+impl TransactionContext {
+    pub fn new(metadata: Metadata) -> Self {
+        Self { metadata }
+    }
+}
+
+#[derive(Debug)]
 pub enum Error {
     PageError(PageError),
     CloseError(engine::Error),
@@ -144,7 +156,8 @@ impl<P: PageManager> Database<P> {
         let metadata = self.inner.metadata.read().unwrap().next();
         let min_snapshot_id = transaction_manager.begin_rw(metadata.snapshot_id)?;
         storage_engine.unlock(min_snapshot_id - 1);
-        Ok(Transaction::new(metadata, self, None))
+        let context = TransactionContext::new(metadata);
+        Ok(Transaction::new(context, self, None))
     }
 
     pub fn begin_ro<'tx>(&'tx self) -> Result<Transaction<'tx, RO, P>, ()> {
