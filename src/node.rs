@@ -134,6 +134,14 @@ impl<V: Value> Node<V> {
         }
     }
 
+    pub fn remove_child(&mut self, index: u8) {
+        match self {
+            Self::AccountLeaf { storage_root, .. } => *storage_root = None,
+            Self::Branch { children, .. } => children[index as usize] = None,
+            _ => panic!("cannot set child of non-branch node"),
+        }
+    }
+
     pub fn value(&self) -> Option<&V> {
         match self {
             Self::StorageLeaf { value, .. } => Some(value),

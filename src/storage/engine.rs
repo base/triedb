@@ -464,6 +464,178 @@ impl<P: PageManager> StorageEngine<P> {
         }
     }
 
+    fn delete_value_in_cloned_page<V: Value + Encodable + Clone>(
+        &self,
+        metadata: &mut Metadata,
+        path: Nibbles,
+        slotted_page: &mut SlottedPage<'_, RW>,
+        page_index: u8,
+    ) -> Result<Option<Pointer>, Error> {
+        let mut node: Node<V> = match slotted_page.get_value(page_index) {
+            Ok(node) => node,
+            // No node exists on this page, so there is nothing to delete
+            Err(_) => return Err(Error::InvalidPath),
+        };
+
+        let node_prefix = node.prefix();
+        let common_prefix_length = path.common_prefix_length(node_prefix);
+        if common_prefix_length < node_prefix.len() {
+            // the value we are looking to delete doesn't exist.
+            return Err(Error::InvalidPath);
+        }
+
+        let remaining_path = path.slice(common_prefix_length..);
+
+        if remaining_path.len() == 0 {
+            // the node's prefix and our path match exactly. we've arrived at the node we need to delete.
+            // we need to delete this data from the slotted page.
+            slotted_page.delete_value(page_index)?;
+            return Ok(None);
+        }
+
+        // otherwise, the node's entire prefix matches some portion of our path,
+        // so continue traversing the node's children
+        let child_index = remaining_path
+            .first()
+            .expect("remaining path has at least 1 element");
+
+        let (child_pointer, remaining_path) = if !node.is_branch() {
+            (node.direct_child(), remaining_path)
+        } else {
+            (node.child(child_index), remaining_path.slice(1..))
+        };
+
+        let updated_child_pointer = match child_pointer {
+            Some(pointer) => {
+                if let Some(cell_index) = pointer.location().cell_index() {
+                    // our next node exists on the same page as us, so we can recursively traverse
+                    // it.
+                    self.delete_value_in_cloned_page::<V>(
+                        metadata,
+                        remaining_path,
+                        slotted_page,
+                        cell_index,
+                    )?
+                } else {
+                    // the child is located on another page. load the next slotted page and
+                    // recursively traverse it.
+                    let child_page = self.get_mut_clone(
+                        metadata,
+                        pointer.location().page_id().expect("page_id should exist"),
+                    )?;
+                    let mut child_slotted_page = SlottedPage::try_from(child_page)?;
+                    self.delete_value_in_cloned_page::<V>(
+                        metadata,
+                        remaining_path,
+                        &mut child_slotted_page,
+                        0,
+                    )?
+                }
+            }
+            None => {
+                // the value we want to delete doesn't exist
+                return Err(Error::InvalidPath);
+            }
+        };
+
+        match updated_child_pointer {
+            Some(pointer) => {
+                // the value was deleted somewhere in our subtree. update our
+                // child pointer to reflect changes in our subtree.
+                node.set_child(child_index, pointer);
+                let rlp_node = node.rlp_encode();
+                slotted_page.set_value(page_index, node)?;
+                Ok(Some(Pointer::new(
+                    self.node_location(slotted_page.page_id(), page_index),
+                    rlp_node,
+                )))
+            }
+
+            None => {
+                // our direct child was deleted. we need to remove our child pointer.
+                // After, removing our child pointer:
+                // 1. if we are an account leaf just return our location and update our hash
+                // 1. if we are a branch node with more than 1 child just return our location and update our hash
+                // 2. if we are a branch node with 1 child:
+                //      2a: if our child is a leaf, merge with our child creating a new leaf with our child_index prepended
+                //          to the leaf's prefix
+                //      2b: if our child is a branch, become a single nibble prefixed extension node to our child branch
+                node.remove_child(child_index);
+
+                let children = node.enumerate_children();
+                assert_eq!(children.len() > 0, true, "there must be at least 1 child");
+
+                if !node.is_branch() || children.len() > 1 {
+                    // we are either an account leaf or a branch node with 2 or more children, so
+                    // just update our child pointer/hash and return upstream.
+                    let rlp_node = node.rlp_encode();
+                    slotted_page.set_value(page_index, node)?;
+                    return Ok(Some(Pointer::new(
+                        self.node_location(slotted_page.page_id(), page_index),
+                        rlp_node,
+                    )));
+                }
+
+                // we are a branch node with 1 child. we need to "merge" ourselves with our child.
+                //
+                // whether our child_node is leaf (accountleaf or storageleaf) or a branch doesn't matter.
+                // by prepending our child_index to the child_node's prefix, we are either creating a longer
+                // leaf node or a longer extension node which is exactly what we need.
+                let (only_child_index, only_child_node_pointer) = children[0];
+
+                let (mut only_child_node, child_slotted_page) =
+                    if let Some(cell_index) = only_child_node_pointer.location().cell_index() {
+                        (slotted_page.get_value::<Node<V>>(cell_index)?, None)
+                    } else {
+                        // the child is located on another page. load the correct slotted page and
+                        // get the child.
+                        let child_page = self.get_mut_clone(
+                            metadata,
+                            only_child_node_pointer
+                                .location()
+                                .page_id()
+                                .expect("page_id should exist"),
+                        )?;
+                        let child_slotted_page = SlottedPage::try_from(child_page)?;
+                        (child_slotted_page.get_value(0)?, Some(child_slotted_page))
+                    };
+
+                let mut new_nibbles = Nibbles::new();
+                new_nibbles.push(only_child_index);
+                new_nibbles = new_nibbles.join(only_child_node.prefix());
+                only_child_node.set_prefix(new_nibbles);
+
+                // delete ourselves from disk
+                slotted_page.delete_value(page_index)?;
+
+                // write our updated child to disk
+                let rlp_node = only_child_node.rlp_encode();
+                if child_slotted_page.is_none() {
+                    // the child is stored on the same slotted page as us
+                    let cell_index = only_child_node_pointer
+                        .location()
+                        .cell_index()
+                        .expect("cell index should exist");
+                    slotted_page.set_value(cell_index, only_child_node)?;
+
+                    return Ok(Some(Pointer::new(
+                        self.node_location(slotted_page.page_id(), cell_index),
+                        rlp_node,
+                    )));
+                }
+
+                // child is stored on another page at the root cell index 0.
+                let mut child_slotted_page =
+                    child_slotted_page.expect("child slotted page should exist");
+                child_slotted_page.set_value(0, only_child_node)?;
+                Ok(Some(Pointer::new(
+                    self.node_location(child_slotted_page.page_id(), 0),
+                    rlp_node,
+                )))
+            }
+        }
+    }
+
     fn update_account_storage_root<V: Value>(
         &self,
         node: Node<V>,
