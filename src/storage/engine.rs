@@ -621,7 +621,7 @@ impl<P: PageManager> StorageEngine<P> {
     }
 
     pub fn set_storage(
-        &mut self,
+        &self,
         metadata: &mut Metadata,
         storage_path: StoragePath,
         value: StorageValue,
@@ -1006,22 +1006,47 @@ mod tests {
     fn test_trie_state_root_order_independence() {
         let mut rng = StdRng::seed_from_u64(1);
 
-        // create 200 accounts with random addresses and balances
+        // create 30 accounts with random addresses, balances, and storage values
         let mut accounts = Vec::new();
-        for _ in 0..200 {
-            let address = address_path_for_idx(rng.next_u64());
+        for _ in 0..30 {
+            let mut address_bytes = [0u8; 20];
+            rng.fill_bytes(&mut address_bytes);
+            let address = Address::from_slice(&address_bytes);
             let account = create_test_account(rng.next_u64(), rng.next_u64());
-            accounts.push((address, account));
+            let mut storage = Vec::new();
+            if rng.next_u64() % 10 == 0 {
+                for _ in 0..rng.next_u64() % 8 {
+                    let mut slot_bytes = [0u8; 32];
+                    rng.fill_bytes(&mut slot_bytes);
+                    let slot = StorageKey::from_slice(&slot_bytes);
+                    storage.push((slot, StorageValue::from(rng.next_u64())));
+                }
+            }
+            accounts.push((address, account, storage));
         }
 
         let (storage_engine, mut metadata) = create_test_engine(300, 256);
 
-        // insert accounts in random order
+        // insert accounts and storage in random order
         accounts.shuffle(&mut rng);
-        for (address, account) in accounts.clone() {
+        for (address, account, mut storage) in accounts.clone() {
             storage_engine
-                .set_account(&mut metadata, address, Some(account))
+                .set_account(
+                    &mut metadata,
+                    AddressPath::for_address(address),
+                    Some(account),
+                )
                 .unwrap();
+            storage.shuffle(&mut rng);
+            for (slot, value) in storage {
+                storage_engine
+                    .set_storage(
+                        &mut metadata,
+                        StoragePath::for_address_and_slot(address, slot),
+                        value,
+                    )
+                    .unwrap();
+            }
         }
 
         // commit the changes
@@ -1033,19 +1058,47 @@ mod tests {
 
         // insert accounts in a different random order, but only after inserting different values first
         accounts.shuffle(&mut rng);
-        for (address, _) in accounts.clone() {
+        for (address, _, mut storage) in accounts.clone() {
             storage_engine
                 .set_account(
                     &mut metadata,
-                    address,
+                    AddressPath::for_address(address),
                     Some(create_test_account(rng.next_u64(), rng.next_u64())),
                 )
                 .unwrap();
+
+            storage.shuffle(&mut rng);
+            for (slot, _) in storage {
+                storage_engine
+                    .set_storage(
+                        &mut metadata,
+                        StoragePath::for_address_and_slot(address, slot),
+                        StorageValue::from(rng.next_u64()),
+                    )
+                    .unwrap();
+            }
         }
-        for (address, account) in accounts {
+
+        accounts.shuffle(&mut rng);
+        for (address, account, mut storage) in accounts {
             storage_engine
-                .set_account(&mut metadata, address, Some(account))
+                .set_account(
+                    &mut metadata,
+                    AddressPath::for_address(address),
+                    Some(account),
+                )
                 .unwrap();
+
+            storage.shuffle(&mut rng);
+            for (slot, value) in storage {
+                storage_engine
+                    .set_storage(
+                        &mut metadata,
+                        StoragePath::for_address_and_slot(address, slot),
+                        value,
+                    )
+                    .unwrap();
+            }
         }
 
         // commit the changes
