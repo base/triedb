@@ -283,7 +283,7 @@ impl<P: PageManager> StorageEngine<P> {
         let res = slotted_page.get_value::<Node<A>>(page_index);
         if res.is_err() {
             // Trie is empty, insert the new account at the root.
-            let new_node = Node::new_leaf(path, account);
+            let new_node = Node::new_account_leaf(path, account, None);
             let rlp_node = new_node.rlp_encode();
             let index = slotted_page.insert_value(new_node)?;
             assert_eq!(index, 0, "root node must be at index 0");
@@ -302,7 +302,7 @@ impl<P: PageManager> StorageEngine<P> {
             let mut new_parent_branch: Node<A> = Node::new_branch(common_prefix);
             let child_branch_index = path[common_prefix_length];
             let remaining_path = path.slice(common_prefix_length + 1..);
-            let new_leaf_node = Node::new_leaf(remaining_path, account);
+            let new_leaf_node = Node::new_account_leaf(remaining_path, account, None);
             // update the prefix of the existing node and insert it into the page
             let node_branch_index = node.prefix()[common_prefix_length];
             node.set_prefix(node.prefix().slice(common_prefix_length + 1..));
@@ -323,7 +323,7 @@ impl<P: PageManager> StorageEngine<P> {
 
         if common_prefix_length == path.len() {
             // the path matches the node prefix exactly, so we can update the value.
-            let new_node = Node::new_leaf(path, account);
+            let new_node = Node::new_account_leaf(path, account, None);
             let rlp_node = new_node.rlp_encode();
             slotted_page.set_value(page_index, new_node)?;
 
@@ -379,7 +379,7 @@ impl<P: PageManager> StorageEngine<P> {
             }
             None => {
                 // the child node does not exist, so we need to create a new leaf node with the remaining path.
-                let new_node = Node::new_leaf(remaining_path, account);
+                let new_node = Node::new_account_leaf(remaining_path, account, None);
                 let rlp_node = new_node.rlp_encode();
                 let location = Location::for_cell(slotted_page.insert_value(new_node)?);
                 node.set_child(child_index, Pointer::new(location, rlp_node));
@@ -416,6 +416,7 @@ impl<P: PageManager> StorageEngine<P> {
         // Find the child with the largest subtrie
         let (largest_child_index, largest_child_pointer) = root_node
             .enumerate_children()
+            .into_iter()
             .max_by_key(|(_, ptr)| {
                 // If pointer points to a cell in current page, count nodes in that subtrie
                 if let Some(cell_index) = ptr.location().cell_index() {
