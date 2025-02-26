@@ -1,6 +1,7 @@
 use crate::page::PageId;
+use proptest_derive::Arbitrary;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Arbitrary)]
 pub struct Location(u32);
 
 impl Location {
@@ -46,6 +47,7 @@ impl From<Location> for u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn test_page_id() {
@@ -65,5 +67,13 @@ mod tests {
         let location = Location::for_cell(100);
         assert_eq!(location.page_id(), None);
         assert_eq!(location.cell_index(), Some(100));
+    }
+
+    proptest! {
+        #[test]
+        fn fuzz_location_from_u32(value in any::<u32>()) {
+            let location = Location::from(value);
+            assert_eq!(location.0, value);
+        }
     }
 }

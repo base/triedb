@@ -1,5 +1,9 @@
 use alloy_primitives::{StorageValue, B256, U256};
 use alloy_rlp::{BufMut, Encodable, RlpEncodable};
+use proptest::{
+    arbitrary::{Arbitrary, Mapped},
+    prelude::{any, Strategy},
+};
 use std::fmt::Debug;
 
 use crate::storage::value::{self, Value, ValueRef};
@@ -45,6 +49,50 @@ impl Account for AccountVec {
     }
 }
 
+impl Value for AccountVec {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.data.clone()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> value::Result<Self> {
+        Ok(Self {
+            data: bytes.to_vec(),
+        })
+    }
+}
+
+#[derive(RlpEncodable, Debug)]
+struct RlpAccount {
+    nonce: u64,
+    balance: U256,
+    storage_root: B256,
+    code_hash: B256,
+}
+
+impl Encodable for AccountVec {
+    fn encode(&self, out: &mut dyn BufMut) {
+        let rlp_account = RlpAccount {
+            nonce: self.nonce(),
+            balance: self.balance(),
+            storage_root: self.storage_root(),
+            code_hash: self.code_hash(),
+        };
+        rlp_account.encode(out);
+    }
+}
+
+impl Arbitrary for AccountVec {
+    type Parameters = ();
+    type Strategy = Mapped<(U256, u64, B256, B256), AccountVec>;
+    fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
+        any::<(U256, u64, B256, B256)>().prop_map(
+            move |(balance, nonce, code_hash, storage_root)| {
+                AccountVec::new(balance, nonce, code_hash, storage_root)
+            },
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountSlice<'a> {
     data: &'a [u8],
@@ -81,18 +129,6 @@ impl Account for AccountSlice<'_> {
 
     fn storage_root(&self) -> B256 {
         B256::from_slice(&self.data[72..104])
-    }
-}
-
-impl Value for AccountVec {
-    fn to_bytes(&self) -> Vec<u8> {
-        self.data.clone()
-    }
-
-    fn from_bytes(bytes: &[u8]) -> value::Result<Self> {
-        Ok(Self {
-            data: bytes.to_vec(),
-        })
     }
 }
 
@@ -148,22 +184,32 @@ impl Encodable for TrieValue {
     }
 }
 
-#[derive(RlpEncodable, Debug)]
-struct RlpAccount {
-    nonce: u64,
-    balance: U256,
-    storage_root: B256,
-    code_hash: B256,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
 
-impl Encodable for AccountVec {
-    fn encode(&self, out: &mut dyn BufMut) {
-        let rlp_account = RlpAccount {
-            nonce: self.nonce(),
-            balance: self.balance(),
-            storage_root: self.storage_root(),
-            code_hash: self.code_hash(),
-        };
-        rlp_account.encode(out);
+    proptest! {
+        #[test]
+        fn fuzz_account_fields(balance: U256, nonce: u64, code_hash: B256, storage_root: B256) {
+            let account = AccountVec::new(balance, nonce, code_hash, storage_root);
+            assert_eq!(account.balance(), balance);
+            assert_eq!(account.nonce(), nonce);
+            assert_eq!(account.code_hash(), code_hash);
+            assert_eq!(account.storage_root(), storage_root);
+        }
+
+        #[test]
+        fn fuzz_account_to_from_bytes(account: AccountVec) {
+            let bytes = account.clone().to_bytes();
+            let decoded = AccountVec::from_bytes(&bytes).unwrap();
+            assert_eq!(account, decoded);
+        }
+
+        #[test]
+        fn fuzz_account_rlp_encode(account: AccountVec) {
+            let mut buf = vec![];
+            account.encode(&mut buf);
+        }
     }
 }

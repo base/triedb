@@ -3,13 +3,15 @@ use alloy_trie::{
     nodes::{BranchNode, ExtensionNodeRef, LeafNodeRef, RlpNode},
     Nibbles, TrieMask,
 };
+use proptest::prelude::{any, prop, Strategy};
+use proptest_derive::Arbitrary;
 
 use crate::{
     pointer::Pointer,
     storage::value::{self, Value},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Arbitrary)]
 pub enum Node<V> {
     AccountLeaf {
         prefix: Nibbles,
@@ -22,6 +24,7 @@ pub enum Node<V> {
     },
     Branch {
         prefix: Nibbles,
+        #[proptest(strategy = "arb_children()")]
         children: [Option<Pointer>; 16],
     },
 }
@@ -317,10 +320,21 @@ impl<V: Value + Encodable> Encodable for Node<V> {
     }
 }
 
+fn arb_children() -> impl Strategy<Value = [Option<Pointer>; 16]> {
+    (prop::collection::vec(any::<Pointer>(), 2..16), 1..15).prop_map(|(children, spacing)| {
+        let mut result = [const { None }; 16];
+        for (i, child) in children.iter().enumerate() {
+            result[(i + spacing as usize) % 16] = Some(child.clone());
+        }
+        result
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{b256, hex, B256, U256};
     use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
+    use proptest::prelude::*;
 
     use crate::account::AccountVec;
 
@@ -634,5 +648,20 @@ mod tests {
             rlp_encoded.as_slice(),
             hex!("0xa00d9348243d7357c491e6a61f4b1305e77dc6acacdb8cc708e662f6a9bab6ca02")
         );
+    }
+
+    proptest! {
+        #[test]
+        fn fuzz_node_to_from_bytes(node: Node<AccountVec>) {
+            let bytes = node.clone().to_bytes();
+            let decoded = Node::from_bytes(&bytes).unwrap();
+            assert_eq!(node, decoded);
+        }
+
+        #[test]
+        fn fuzz_node_rlp_encode(node: Node<AccountVec>) {
+            let mut bytes = vec![];
+            node.encode(&mut bytes);
+        }
     }
 }

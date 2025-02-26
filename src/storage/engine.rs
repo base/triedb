@@ -789,6 +789,7 @@ mod tests {
         root::{storage_root_unhashed, storage_root_unsorted},
         EMPTY_ROOT_HASH, KECCAK_EMPTY,
     };
+    use proptest::prelude::*;
     use rand::{rngs::StdRng, seq::SliceRandom, Rng, RngCore, SeedableRng};
 
     use super::*;
@@ -1729,5 +1730,31 @@ mod tests {
             pos -= 1;
         }
         AddressPath::new(Nibbles::from_nibbles(nibbles))
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+        #[test]
+        fn fuzz_insert_get_accounts(
+            accounts in prop::collection::vec(
+                (any::<Address>(), any::<AccountVec>()),
+                1..20
+            )
+        ) {
+            let (storage_engine, mut metadata) = create_test_engine(10_000, 256);
+
+            for (address, account) in &accounts {
+                storage_engine
+                    .set_account(&mut metadata, AddressPath::for_address(*address), Some(account.clone()))
+                    .unwrap();
+            }
+
+            for (address, account) in accounts {
+                let read_account = storage_engine
+                    .get_account::<AccountVec>(&metadata, AddressPath::for_address(address))
+                    .unwrap();
+                assert_eq!(read_account, Some(account));
+            }
+        }
     }
 }
