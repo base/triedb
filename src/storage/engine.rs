@@ -304,7 +304,6 @@ impl<P: PageManager> StorageEngine<P> {
         if res.is_err() {
             // Trie is empty, insert the new account at the root.
             let new_node = Node::new_leaf(path, value, leaf_type);
-            let whatever = new_node.child(0);
             let rlp_node = new_node.rlp_encode();
             let index = slotted_page.insert_value(new_node)?;
             assert_eq!(index, 0, "root node must be at index 0");
