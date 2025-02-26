@@ -1,7 +1,7 @@
 use alloy_primitives::{keccak256, Address, StorageKey};
 use alloy_trie::Nibbles;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AddressPath {
     path: Nibbles,
 }
