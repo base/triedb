@@ -1,4 +1,3 @@
-use alloy_rlp::{encode, Decodable};
 use alloy_trie::nodes::RlpNode;
 
 use crate::{

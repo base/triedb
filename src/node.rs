@@ -89,10 +89,7 @@ impl<V: Value> Node<V> {
     }
 
     pub fn is_branch(&self) -> bool {
-        match self {
-            Self::Branch { .. } => true,
-            _ => false,
-        }
+        matches!(self, Self::Branch { .. })
     }
 
     pub fn enumerate_children(&self) -> Vec<(u8, &Pointer)> {

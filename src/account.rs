@@ -66,7 +66,7 @@ impl<'a> AccountSlice<'a> {
     }
 }
 
-impl<'a> Account for AccountSlice<'a> {
+impl Account for AccountSlice<'_> {
     fn balance(&self) -> U256 {
         U256::from_be_slice(&self.data[0..32])
     }

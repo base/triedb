@@ -14,7 +14,7 @@ pub struct RootPage<'p, P: PageKind> {
     page: Page<'p, P>,
 }
 
-impl<'p, P: PageKind> RootPage<'p, P> {
+impl<P: PageKind> RootPage<'_, P> {
     pub fn page_id(&self) -> PageId {
         self.page.page_id()
     }

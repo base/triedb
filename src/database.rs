@@ -139,7 +139,7 @@ impl<P: PageManager> Database<P> {
         }
     }
 
-    pub fn begin_rw<'tx>(&'tx self) -> Result<Transaction<'tx, RW, P>, ()> {
+    pub fn begin_rw(&self) -> Result<Transaction<'_, RW, P>, ()> {
         let mut transaction_manager = self.inner.transaction_manager.write().unwrap();
         let storage_engine = self.inner.storage_engine.read().unwrap();
         let metadata = self.inner.metadata.read().unwrap().next();
@@ -148,7 +148,7 @@ impl<P: PageManager> Database<P> {
         Ok(Transaction::new(metadata, self, None))
     }
 
-    pub fn begin_ro<'tx>(&'tx self) -> Result<Transaction<'tx, RO, P>, ()> {
+    pub fn begin_ro(&self) -> Result<Transaction<'_, RO, P>, ()> {
         let mut transaction_manager = self.inner.transaction_manager.write().unwrap();
         let storage_engine = self.inner.storage_engine.read().unwrap();
         let metadata = self.inner.metadata.read().unwrap().clone();
