@@ -789,7 +789,7 @@ mod tests {
         root::{storage_root_unhashed, storage_root_unsorted},
         EMPTY_ROOT_HASH, KECCAK_EMPTY,
     };
-    use rand::{rngs::StdRng, seq::SliceRandom, RngCore, SeedableRng};
+    use rand::{rngs::StdRng, seq::SliceRandom, Rng, RngCore, SeedableRng};
 
     use super::*;
     use crate::{account::AccountVec, page::MmapPageManager};
@@ -808,6 +808,10 @@ mod tests {
         };
         let storage_engine = StorageEngine::new(manager, orphan_manager);
         (storage_engine, metadata)
+    }
+
+    fn random_test_account(rng: &mut StdRng) -> AccountVec {
+        create_test_account(rng.next_u64(), rng.next_u64())
     }
 
     fn create_test_account(balance: u64, nonce: u64) -> AccountVec {
@@ -1006,26 +1010,22 @@ mod tests {
     fn test_trie_state_root_order_independence() {
         let mut rng = StdRng::seed_from_u64(1);
 
-        // create 30 accounts with random addresses, balances, and storage values
+        // create 100 accounts with random addresses, balances, and storage values
         let mut accounts = Vec::new();
-        for _ in 0..30 {
-            let mut address_bytes = [0u8; 20];
-            rng.fill_bytes(&mut address_bytes);
-            let address = Address::from_slice(&address_bytes);
-            let account = create_test_account(rng.next_u64(), rng.next_u64());
+        for _ in 0..100 {
+            let address = Address::random_with(&mut rng);
+            let account = random_test_account(&mut rng);
             let mut storage = Vec::new();
             if rng.next_u64() % 10 == 0 {
-                for _ in 0..rng.next_u64() % 8 {
-                    let mut slot_bytes = [0u8; 32];
-                    rng.fill_bytes(&mut slot_bytes);
-                    let slot = StorageKey::from_slice(&slot_bytes);
+                for _ in 0..rng.gen_range(1..25) {
+                    let slot = StorageKey::random_with(&mut rng);
                     storage.push((slot, StorageValue::from(rng.next_u64())));
                 }
             }
             accounts.push((address, account, storage));
         }
 
-        let (storage_engine, mut metadata) = create_test_engine(300, 256);
+        let (storage_engine, mut metadata) = create_test_engine(350, 256);
 
         // insert accounts and storage in random order
         accounts.shuffle(&mut rng);
@@ -1054,7 +1054,7 @@ mod tests {
 
         let state_root = metadata.state_root;
 
-        let (storage_engine, mut metadata) = create_test_engine(300, 256);
+        let (storage_engine, mut metadata) = create_test_engine(350, 256);
 
         // insert accounts in a different random order, but only after inserting different values first
         accounts.shuffle(&mut rng);
@@ -1063,7 +1063,7 @@ mod tests {
                 .set_account(
                     &mut metadata,
                     AddressPath::for_address(address),
-                    Some(create_test_account(rng.next_u64(), rng.next_u64())),
+                    Some(random_test_account(&mut rng)),
                 )
                 .unwrap();
 
