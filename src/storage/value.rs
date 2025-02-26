@@ -10,7 +10,7 @@ pub enum Error {
 /// A trait for types that can be stored as values in the database
 pub trait Value: Sized + Debug {
     /// Convert this value into a byte vec for storage
-    fn to_bytes(self) -> Vec<u8>;
+    fn to_bytes(&self) -> Vec<u8>;
 
     /// Create a value from a byte slice
     /// Returns Error::InvalidEncoding if the bytes don't represent a valid value
@@ -36,8 +36,8 @@ pub trait ValueRef<'v>: Sized + Debug {
 
 // Example implementation for a string-like type
 impl Value for String {
-    fn to_bytes(self) -> Vec<u8> {
-        self.into_bytes()
+    fn to_bytes(&self) -> Vec<u8> {
+        self.clone().into_bytes()
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
@@ -66,8 +66,8 @@ impl<'v> ValueRef<'v> for &'v str {
 
 // Example implementation for a vector of bytes, useful for testing purposes
 impl Value for Vec<u8> {
-    fn to_bytes(self) -> Vec<u8> {
-        self
+    fn to_bytes(&self) -> Vec<u8> {
+        self.clone()
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {

@@ -5,6 +5,7 @@ use alloy_trie::{
 };
 
 use crate::{
+    account::AccountVec,
     pointer::Pointer,
     storage::value::{self, Value},
 };
@@ -26,7 +27,20 @@ pub enum Node<V> {
     },
 }
 
-impl<V> Node<V> {
+#[derive(Debug, Clone, Copy)]
+pub enum LeafType {
+    AccountLeaf,
+    StorageLeaf,
+}
+
+impl<V: Value> Node<V> {
+    pub fn new_leaf(prefix: Nibbles, value: V, leaf_type: LeafType) -> Self {
+        match leaf_type {
+            LeafType::AccountLeaf => Node::new_account_leaf(prefix, value, None),
+            LeafType::StorageLeaf => Node::new_storage_leaf(prefix, value),
+        }
+    }
+
     pub fn new_account_leaf(prefix: Nibbles, value: V, storage_root: Option<Pointer>) -> Self {
         Self::AccountLeaf {
             prefix,
@@ -59,6 +73,14 @@ impl<V> Node<V> {
             Self::StorageLeaf { prefix, .. } => *prefix = new_prefix,
             Self::AccountLeaf { prefix, .. } => *prefix = new_prefix,
             Self::Branch { prefix, .. } => *prefix = new_prefix,
+        }
+    }
+
+    pub fn has_children(&self) -> bool {
+        match self {
+            Self::AccountLeaf { .. } => true,
+            Self::Branch { .. } => true,
+            _ => false,
         }
     }
 
@@ -125,7 +147,7 @@ impl<V: Value + Encodable> Node<V> {
 }
 
 impl<V: Value> Value for Node<V> {
-    fn to_bytes(self) -> Vec<u8> {
+    fn to_bytes(&self) -> Vec<u8> {
         match self {
             Self::StorageLeaf { prefix, value } => {
                 let prefix_length = prefix.len();
@@ -195,10 +217,18 @@ impl<V: Value> Value for Node<V> {
             let prefix = Nibbles::from_nibbles(&bytes[2..2 + prefix_length]);
             let storage_root_bytes = &bytes[prefix_length + 2..prefix_length + 2 + 37];
             let value = V::from_bytes(&bytes[prefix_length + 2 + 37..])?;
+
+            let storage_root: Option<Pointer>;
+            if storage_root_bytes == [0; 37] {
+                storage_root = None
+            } else {
+                storage_root = Some(Pointer::from_bytes(storage_root_bytes)?)
+            }
+
             Ok(Self::AccountLeaf {
                 prefix,
                 value,
-                storage_root: Some(Pointer::from_bytes(storage_root_bytes)?),
+                storage_root,
             })
         } else {
             let prefix_length = bytes[1] as usize;
