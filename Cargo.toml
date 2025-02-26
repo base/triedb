@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 alloy-primitives = "0.8.19"
 alloy-rlp = "0.3.11"
-alloy-trie = "0.7.6"
+alloy-trie = { version = "0.7.6", features=[ "ethereum" ]}
 log = "0.4.25"
 memmap2 = "0.9.5"
 sealed = "0.6.0"

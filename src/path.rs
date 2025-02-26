@@ -43,4 +43,12 @@ impl StoragePath {
             slot: slot_nibbles,
         }
     }
+
+    pub fn full_path(&self) -> Nibbles {
+        self.address.path.join(&self.slot)
+    }
+
+    pub fn get_slot(&self) -> Nibbles {
+        self.slot.clone()
+    }
 }
