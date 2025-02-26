@@ -165,7 +165,8 @@ impl<P: PageManager> Database<P> {
         let storage_engine = self.inner.storage_engine.read().unwrap();
         let metadata = self.inner.metadata.read().unwrap().clone();
         transaction_manager.begin_ro(metadata.snapshot_id)?;
-        Ok(Transaction::new(metadata, self, Some(storage_engine)))
+        let context = TransactionContext::new(metadata);
+        Ok(Transaction::new(context, self, Some(storage_engine)))
     }
 
     pub(crate) fn resize(&self, new_page_count: PageId) -> Result<(), ()> {
@@ -175,10 +176,11 @@ impl<P: PageManager> Database<P> {
     }
 
     pub fn close(&self) -> Result<(), Error> {
-        let metadata = self.inner.metadata.read().unwrap();
+        // TODO: is it safe to clone the metadata here?
+        let metadata = self.inner.metadata.read().unwrap().clone();
+        let context = TransactionContext::new(metadata);
         let storage_engine = self.inner.storage_engine.read().unwrap();
-
-        storage_engine.close(&metadata).map_err(Error::CloseError)?;
+        storage_engine.close(&context).map_err(Error::CloseError)?;
         Ok(())
     }
 

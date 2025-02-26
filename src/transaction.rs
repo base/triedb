@@ -77,7 +77,7 @@ impl<'tx, P: PageManager> Transaction<'tx, RW, P> {
     ) -> Result<(), ()> {
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
         storage_engine
-            .set_account(&mut self.metadata, address_path, account)
+            .set_account(&mut self.context, address_path, account)
             .unwrap();
         Ok(())
     }
@@ -89,10 +89,10 @@ impl<'tx, P: PageManager> Transaction<'tx, RW, P> {
     pub fn commit(mut self) -> Result<(), ()> {
         let mut transaction_manager = self.database.inner.transaction_manager.write().unwrap();
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
-        storage_engine.commit(&self.metadata).unwrap();
+        storage_engine.commit(&self.context).unwrap();
         let mut metadata = self.database.inner.metadata.write().unwrap();
-        *metadata = self.metadata.clone();
-        transaction_manager.remove_transaction(self.metadata.snapshot_id, true)?;
+        *metadata = self.context.metadata.clone();
+        transaction_manager.remove_transaction(self.context.metadata.snapshot_id, true)?;
 
         self.committed = true;
         Ok(())
@@ -101,8 +101,8 @@ impl<'tx, P: PageManager> Transaction<'tx, RW, P> {
     pub fn rollback(mut self) -> Result<(), ()> {
         let mut transaction_manager = self.database.inner.transaction_manager.write().unwrap();
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
-        storage_engine.rollback(&self.metadata).unwrap();
-        transaction_manager.remove_transaction(self.metadata.snapshot_id, true)?;
+        storage_engine.rollback(&self.context).unwrap();
+        transaction_manager.remove_transaction(self.context.metadata.snapshot_id, true)?;
 
         self.committed = false;
         Ok(())
@@ -112,7 +112,7 @@ impl<'tx, P: PageManager> Transaction<'tx, RW, P> {
 impl<'tx, P: PageManager> Transaction<'tx, RO, P> {
     pub fn commit(mut self) -> Result<(), ()> {
         let mut transaction_manager = self.database.inner.transaction_manager.write().unwrap();
-        transaction_manager.remove_transaction(self.metadata.snapshot_id, false)?;
+        transaction_manager.remove_transaction(self.context.metadata.snapshot_id, false)?;
 
         self.committed = true;
         Ok(())
