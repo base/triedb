@@ -1085,6 +1085,26 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
+    fn test_set_storage_slot_with_no_account_panics() {
+        let (mut storage_engine, mut metadata) = create_test_engine(300, 256);
+        let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
+
+        let storage_key =
+            b256!("0x0000000000000000000000000000000000000000000000000000000000000000");
+        let storage_value =
+            b256!("0x0000000000000000000000000000000000000000000000000000000062617365");
+
+        let storage_path = StoragePath::for_address_and_slot(address.clone(), storage_key);
+
+        let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
+
+        storage_engine
+            .set_storage(&mut metadata, storage_path, storage_value)
+            .unwrap();
+    }
+
+    #[test]
     fn test_set_get_account_storage_slots() {
         let (mut storage_engine, mut metadata) = create_test_engine(300, 256);
 

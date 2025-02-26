@@ -35,6 +35,11 @@ pub enum LeafType {
 
 impl<V: Value> Node<V> {
     pub fn new_leaf(prefix: Nibbles, value: V, leaf_type: LeafType) -> Self {
+        assert_eq!(
+            prefix.len() <= 64,
+            true,
+            "account and storage leaf prefix's must be at most 64 nibbles"
+        );
         match leaf_type {
             LeafType::AccountLeaf => Node::new_account_leaf(prefix, value, None),
             LeafType::StorageLeaf => Node::new_storage_leaf(prefix, value),
