@@ -114,13 +114,16 @@ impl Database<MmapPageManager> {
         database.resize(max_page_count + 20).unwrap();
         Ok(database)
     }
+}
 
-    pub fn close(&self) -> Result<(), Error> {
-        let metadata = self.inner.metadata.read().unwrap();
-        let storage_engine = self.inner.storage_engine.read().unwrap();
-
-        storage_engine.close(&metadata).map_err(Error::CloseError)?;
-        Ok(())
+impl<P: PageManager> Drop for Database<P> {
+    fn drop(&mut self) {
+        if let Err(e) = self.close() {
+            if let Error::CloseError(engine::Error::EngineClosed) = e {
+                return;
+            }
+            panic!("Failed to close database: {:?}", e);
+        }
     }
 }
 
@@ -158,6 +161,14 @@ impl<P: PageManager> Database<P> {
         Ok(())
     }
 
+    pub fn close(&self) -> Result<(), Error> {
+        let metadata = self.inner.metadata.read().unwrap();
+        let storage_engine = self.inner.storage_engine.read().unwrap();
+
+        storage_engine.close(&metadata).map_err(Error::CloseError)?;
+        Ok(())
+    }
+
     pub fn size(&self) -> u32 {
         let storage_engine = self.inner.storage_engine.read().unwrap();
         storage_engine.size()
@@ -181,10 +192,7 @@ mod tests {
     use std::fs::File;
     use tempdir::TempDir;
 
-    use crate::{
-        account::{AccountSlice, AccountVec},
-        path::AddressPath,
-    };
+    use crate::{account::AccountVec, path::AddressPath};
 
     use super::*;
 
@@ -273,6 +281,33 @@ mod tests {
 
         // THEN: the size of the database should be the
         // max_page_size
+        let max_page_size = 2; // fresh db so at least 2 pages for the root pages
+        let file = File::options().read(true).open(file_path.as_str()).unwrap();
+        let file_len = file.metadata().unwrap().len();
+        assert_eq!(file_len, max_page_size * 4096);
+
+        // cleanup
+        tmp_dir.close().unwrap();
+    }
+
+    #[test]
+    fn test_auto_close_database() {
+        // GIVEN: a database
+        //
+        // create the database on disk. currently this
+        // will create a database with N pages (see 'create' for N).
+        let tmp_dir = TempDir::new("test_db").unwrap();
+        let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
+
+        {
+            let db = Database::create(file_path.as_str()).unwrap();
+
+            let create_size = db.size();
+            assert_eq!(create_size, 300);
+        }
+
+        // WHEN: the database is dropped from scope
+        // THEN: the database should be closed and the file should be truncated
         let max_page_size = 2; // fresh db so at least 2 pages for the root pages
         let file = File::options().read(true).open(file_path.as_str()).unwrap();
         let file_len = file.metadata().unwrap().len();
