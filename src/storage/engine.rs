@@ -4,7 +4,8 @@ use crate::{
     location::Location,
     node::{LeafType, Node},
     page::{
-        OrphanPageManager, Page, PageError, PageId, PageManager, RootPage, SlottedPage, RO, RW,
+        OrphanPageManager, Page, PageError, PageId, PageManager, RootPage, SlottedPage,
+        PAGE_DATA_SIZE, RO, RW,
     },
     path::{AddressPath, StoragePath},
     pointer::Pointer,
@@ -266,32 +267,19 @@ impl<P: PageManager> StorageEngine<P> {
         );
         match result {
             Ok(pointer) => Ok(pointer),
+            // In the case of a page split, re-attempt the operation from scratch. This ensures that a page will be
+            // consistently evaluated, and not modified in the middle of an operation, which could result in
+            // inconsistent cell pointers.
+            Err(Error::PageSplit) => self.set_value_in_cloned_page(
+                metadata,
+                path,
+                value,
+                &mut new_slotted_page,
+                page_index,
+                leaf_type,
+            ),
             Err(Error::PageError(PageError::PageIsFull)) => {
-                // Re-clone the page, split it, and try again. This orphans the first clone.
-                // TODO: it's probably better if we can proactively split the page instead of needing this fallback behavior.
-                // This would also allow us to avoid cloning the path and account.
-                {
-                    self.inner
-                        .write()
-                        .unwrap()
-                        .orphan_manager
-                        .add_orphaned_page_id(metadata.snapshot_id, new_slotted_page.page_id());
-                }
-                let page = self.get_mut_clone(metadata, page_id)?;
-                let mut new_slotted_page = SlottedPage::try_from(page)?;
-                self.split_page::<V>(metadata, &mut new_slotted_page)
-                    .expect("split page should succeed");
-                let pointer = self
-                    .set_value_in_cloned_page(
-                        metadata,
-                        path,
-                        value,
-                        &mut new_slotted_page,
-                        page_index,
-                        leaf_type,
-                    )
-                    .expect("set account in cloned page should succeed");
-                Ok(pointer)
+                panic!("Page is full!");
             }
             Err(e) => Err(e),
         }
@@ -325,6 +313,12 @@ impl<P: PageManager> StorageEngine<P> {
         let common_prefix = path.slice(0..common_prefix_length);
         if common_prefix_length < node.prefix().len() {
             // the path does not match the node prefix, so we need to create a new branch node as its parent.
+            // ensure that the page has enough space (1100 bytes) to insert a new branch and leaf node.
+            // TODO: use a more accurate threshold
+            if slotted_page.num_free_bytes() < 1100 {
+                self.split_page::<V>(metadata, slotted_page)?;
+                return Err(Error::PageSplit);
+            }
             let mut new_parent_branch: Node<V> = Node::new_branch(common_prefix);
             let child_branch_index = path[common_prefix_length];
             let remaining_path = path.slice(common_prefix_length + 1..);
@@ -440,6 +434,12 @@ impl<P: PageManager> StorageEngine<P> {
             }
             None => {
                 // the child node does not exist, so we need to create a new leaf node with the remaining path.
+                // ensure that the page has enough space (300 bytes) to insert a new leaf node.
+                // TODO: use a more accurate threshold
+                if slotted_page.num_free_bytes() < 300 {
+                    self.split_page::<V>(metadata, slotted_page)?;
+                    return Err(Error::PageSplit);
+                }
                 let new_node = Node::new_leaf(remaining_path, value, leaf_type);
                 let rlp_node = new_node.rlp_encode();
                 let location = Location::for_cell(slotted_page.insert_value(new_node)?);
@@ -682,40 +682,44 @@ impl<P: PageManager> StorageEngine<P> {
         metadata: &mut Metadata,
         page: &mut SlottedPage<'_, RW>,
     ) -> Result<(), Error> {
-        let child_page = self.allocate_page(metadata)?;
-        let mut child_slotted_page = SlottedPage::try_from(child_page)?;
+        while page.num_free_bytes() < PAGE_DATA_SIZE / 3 as usize {
+            let child_page = self.allocate_page(metadata)?;
+            let mut child_slotted_page = SlottedPage::try_from(child_page)?;
 
-        let mut root_node: Node<V> = page.get_value(0)?;
+            let mut root_node: Node<V> = page.get_value(0)?;
 
-        // Find the child with the largest subtrie
-        let (largest_child_index, largest_child_pointer) = root_node
-            .enumerate_children()
-            .into_iter()
-            .max_by_key(|(_, ptr)| {
-                // If pointer points to a cell in current page, count nodes in that subtrie
-                if let Some(cell_index) = ptr.location().cell_index() {
-                    self.count_subtrie_nodes::<V>(page, cell_index).unwrap_or(0)
-                } else {
-                    // If pointer points to another page, count as 0
-                    0
-                }
-            })
-            .ok_or(Error::PageError(PageError::PageIsFull))?;
+            // Find the child with the largest subtrie
+            let (largest_child_index, largest_child_pointer) = root_node
+                .enumerate_children()
+                .into_iter()
+                .max_by_key(|(_, ptr)| {
+                    // If pointer points to a cell in current page, count nodes in that subtrie
+                    if let Some(cell_index) = ptr.location().cell_index() {
+                        self.count_subtrie_nodes::<V>(page, cell_index).unwrap_or(0)
+                    } else {
+                        // If pointer points to another page, count as 0
+                        0
+                    }
+                })
+                .ok_or(Error::PageError(PageError::PageIsFull))?;
 
-        // Move the subtrie to the new page
-        if let Some(cell_index) = largest_child_pointer.location().cell_index() {
-            // Move all child nodes that are in the current page
-            self.move_subtrie_nodes::<V>(page, cell_index, &mut child_slotted_page)?;
+            // Move the subtrie to the new page
+            if let Some(cell_index) = largest_child_pointer.location().cell_index() {
+                // Move all child nodes that are in the current page
+                let location =
+                    self.move_subtrie_nodes::<V>(page, cell_index, &mut child_slotted_page)?;
+                assert!(
+                    location.page_id().is_some(),
+                    "expected subtrie to be moved to a new page"
+                );
 
-            // Update the pointer in the root node to point to the new page
-            root_node.set_child(
-                largest_child_index as u8,
-                Pointer::new(
-                    Location::for_page(child_slotted_page.page_id()),
-                    largest_child_pointer.rlp().clone(),
-                ),
-            );
-            page.set_value(0, root_node)?;
+                // Update the pointer in the root node to point to the new page
+                root_node.set_child(
+                    largest_child_index as u8,
+                    Pointer::new(location, largest_child_pointer.rlp().clone()),
+                );
+                page.set_value(0, root_node)?;
+            }
         }
 
         Ok(())
@@ -760,7 +764,7 @@ impl<P: PageManager> StorageEngine<P> {
 
         // if the node has no children, we're done.
         if !has_children {
-            return Ok(Location::for_cell(new_index));
+            return Ok(self.node_location(target_page.page_id(), new_index));
         }
 
         // otherwise, we need to move the children of the node.
@@ -957,6 +961,7 @@ pub enum Error {
     InvalidPath,
     InvalidSnapshotId,
     EngineClosed,
+    PageSplit,
 }
 
 impl From<PageError> for Error {
@@ -1480,6 +1485,316 @@ mod tests {
 
             let storage_root = account.storage_root();
             assert_eq!(storage_root, expected_root);
+        }
+    }
+
+    fn test_split_page_stress() {
+        // Create a storage engine with limited pages to force splits
+        let (storage_engine, mut metadata) = create_test_engine(2000, 256);
+
+        // Create a large number of accounts with different patterns to stress the trie
+
+        // Pattern 1: Accounts with common prefixes to create deep branches
+        let mut accounts = Vec::new();
+        for i in 0..4096 {
+            // Create paths with common prefixes but different endings
+            let mut nibbles = [0u8; 64];
+            // First 32 nibbles are the same
+            for j in 0..32 {
+                nibbles[j] = (j % 16) as u8;
+            }
+            // Last 30 nibbles vary
+            for j in 32..64 {
+                nibbles[j] = ((i + j) % 16) as u8;
+            }
+
+            nibbles[61] = (i % 16) as u8;
+            nibbles[62] = ((i / 16) % 16) as u8;
+            nibbles[63] = ((i / 256) % 16) as u8;
+
+            let path = AddressPath::new(Nibbles::from_nibbles(nibbles));
+            let account = create_test_account(i as u64 * 1000, i as u64);
+            accounts.push((path, account));
+        }
+
+        // Pattern 2: Accounts with very different paths to create wide branches
+        for i in 0..4096 {
+            let mut nibbles = [0u8; 64];
+            // Make each path start with a different nibble
+            nibbles[0] = (i % 16) as u8;
+            nibbles[1] = ((i / 16) % 16) as u8;
+            nibbles[2] = ((i / 256) % 16) as u8;
+            // Fill the rest with a pattern
+            for j in 3..64 {
+                nibbles[j] = ((i * j) % 16) as u8;
+            }
+
+            let path = AddressPath::new(Nibbles::from_nibbles(nibbles));
+            let account = create_test_account(i as u64 * 2000, i as u64 * 2);
+            accounts.push((path, account));
+        }
+
+        // Pattern 3: Accounts with paths that will cause specific branch splits
+        for i in 0..4096 {
+            let mut nibbles = [0u8; 64];
+            // First half of paths share prefix, second half different
+            if i < 50 {
+                nibbles[0] = 10; // Arbitrary value
+                for j in 1..62 {
+                    nibbles[j] = ((i + j) % 16) as u8;
+                }
+            } else {
+                nibbles[0] = 11; // Different arbitrary value
+                for j in 1..62 {
+                    nibbles[j] = ((i + j) % 16) as u8;
+                }
+            }
+
+            nibbles[61] = (i % 16) as u8;
+            nibbles[62] = ((i / 16) % 16) as u8;
+            nibbles[63] = ((i / 256) % 16) as u8;
+
+            let path = AddressPath::new(Nibbles::from_nibbles(nibbles));
+            let account = create_test_account(i as u64 * 3000, i as u64 * 3);
+            accounts.push((path, account));
+        }
+
+        // Ensure there are no duplicate paths
+        let mut unique_paths = std::collections::HashSet::new();
+        for (path, _) in &accounts {
+            assert!(
+                unique_paths.insert(path.clone()),
+                "Duplicate path found: {:?}",
+                path
+            );
+        }
+
+        // Insert all accounts
+        for (path, account) in &accounts {
+            storage_engine
+                .set_account(&mut metadata, path.clone(), Some(account.clone()))
+                .unwrap();
+        }
+
+        // Verify all accounts exist with correct values
+        for (path, expected_account) in &accounts {
+            let retrieved_account = storage_engine
+                .get_account::<AccountVec>(&metadata, path.clone())
+                .unwrap();
+            assert_eq!(
+                retrieved_account,
+                Some(expected_account.clone()),
+                "Account mismatch for path: {:?}",
+                path
+            );
+        }
+
+        // Force multiple splits to stress the system
+        // Find all pages in the trie and split them recursively
+        let mut pages_to_split = vec![metadata.root_subtrie_page_id];
+        while let Some(page_id) = pages_to_split.pop() {
+            let page_result = storage_engine.get_mut_page(&metadata, page_id);
+            if matches!(
+                page_result,
+                Err(Error::PageError(PageError::PageNotFound(_)))
+            ) {
+                break;
+            }
+            let mut slotted_page = SlottedPage::try_from(page_result.unwrap()).unwrap();
+
+            // Try to split this page
+            if let Ok(_) = storage_engine.split_page::<AccountVec>(&mut metadata, &mut slotted_page)
+            {
+                // If split succeeded, add the new pages to be processed
+                pages_to_split.push(page_id + 1); // New page created by split
+            }
+        }
+
+        // Verify all accounts still exist with correct values after splits
+        for (path, expected_account) in &accounts {
+            let retrieved_account = storage_engine
+                .get_account::<AccountVec>(&metadata, path.clone())
+                .unwrap();
+            assert_eq!(
+                retrieved_account,
+                Some(expected_account.clone()),
+                "Account mismatch after split for path: {:?}",
+                path
+            );
+        }
+
+        // Add more accounts after splitting to ensure the structure is still valid
+        let mut additional_accounts = Vec::new();
+        for i in 0..50 {
+            let mut nibbles = [0u8; 64];
+            // Create some completely new paths
+            nibbles[0] = 15; // Different from previous patterns
+            for j in 1..62 {
+                nibbles[j] = ((i * j + 7) % 16) as u8; // Different pattern
+            }
+
+            nibbles[62] = (i % 16) as u8;
+            nibbles[63] = ((i / 16) % 16) as u8;
+
+            let path = AddressPath::new(Nibbles::from_nibbles(nibbles));
+            let account = create_test_account(i as u64 * 5000, i as u64 * 5);
+            additional_accounts.push((path, account));
+        }
+
+        // Insert additional accounts
+        for (path, account) in &additional_accounts {
+            storage_engine
+                .set_account(&mut metadata, path.clone(), Some(account.clone()))
+                .unwrap();
+        }
+
+        // Verify all original accounts still exist
+        for (path, expected_account) in &accounts {
+            let retrieved_account = storage_engine
+                .get_account::<AccountVec>(&metadata, path.clone())
+                .unwrap();
+            assert_eq!(
+                retrieved_account,
+                Some(expected_account.clone()),
+                "Original account lost after adding new accounts"
+            );
+        }
+
+        // Verify all new accounts exist
+        for (path, expected_account) in &additional_accounts {
+            let retrieved_account = storage_engine
+                .get_account::<AccountVec>(&metadata, path.clone())
+                .unwrap();
+            assert_eq!(
+                retrieved_account,
+                Some(expected_account.clone()),
+                "New account not found"
+            );
+        }
+    }
+
+    #[test]
+    fn test_split_page_random_accounts() {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        // Create a storage engine
+        let (storage_engine, mut metadata) = create_test_engine(2000, 256);
+
+        // Use a seeded RNG for reproducibility
+        let mut rng = StdRng::seed_from_u64(42);
+
+        // Generate a large number of random accounts
+        let mut accounts = Vec::new();
+        for i in 0..3000 {
+            let mut nibbles = [0u8; 64];
+            // Generate random nibbles
+            for j in 0..64 {
+                nibbles[j] = rng.random_range(0..16) as u8;
+            }
+
+            let path = AddressPath::new(Nibbles::from_nibbles(nibbles));
+            let balance = rng.random_range(0..1_000_000);
+            let nonce = rng.random_range(0..100);
+            let account = create_test_account(balance, nonce);
+            accounts.push((path, account));
+        }
+
+        // Insert all accounts
+        for (path, account) in &accounts {
+            storage_engine
+                .set_account(&mut metadata, path.clone(), Some(account.clone()))
+                .unwrap();
+        }
+
+        // Verify all accounts exist with correct values
+        for (path, expected_account) in &accounts {
+            let retrieved_account = storage_engine
+                .get_account::<AccountVec>(&metadata, path.clone())
+                .unwrap();
+            assert_eq!(retrieved_account, Some(expected_account.clone()));
+        }
+
+        // Get all pages and force splits on them
+        let mut page_ids = Vec::new();
+        // Start with the root page
+        page_ids.push(metadata.root_subtrie_page_id);
+
+        // Process each page
+        for i in 0..page_ids.len() {
+            let page_id = page_ids[i];
+
+            // Try to get and split the page
+            if let Ok(page) = storage_engine.get_mut_page(&metadata, page_id) {
+                if let Ok(mut slotted_page) = SlottedPage::try_from(page) {
+                    // Force a split
+                    let _ =
+                        storage_engine.split_page::<AccountVec>(&mut metadata, &mut slotted_page);
+
+                    // Get the node to find child pages
+                    if let Ok(node) = slotted_page.get_value::<Node<AccountVec>>(0) {
+                        // Add child pages to our list
+                        for (_, child_ptr) in node.enumerate_children() {
+                            if let Some(child_page_id) = child_ptr.location().page_id() {
+                                if !page_ids.contains(&child_page_id) {
+                                    page_ids.push(child_page_id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Verify all accounts still exist with correct values after splits
+        for (path, expected_account) in &accounts {
+            let retrieved_account = storage_engine
+                .get_account::<AccountVec>(&metadata, path.clone())
+                .unwrap();
+            assert_eq!(
+                retrieved_account,
+                Some(expected_account.clone()),
+                "Account mismatch after splitting multiple pages"
+            );
+        }
+
+        // Create a vector to store updates
+        let mut updates = Vec::new();
+
+        // Prepare updates for some existing accounts
+        for i in 0..accounts.len() {
+            if i % 5 == 0 {
+                // Update every 5th account
+                let (path, _) = &accounts[i];
+                let new_balance = rng.random_range(0..1_000_000);
+                let new_nonce = rng.random_range(0..100);
+                let new_account = create_test_account(new_balance, new_nonce);
+
+                updates.push((i, path.clone(), new_account));
+            }
+        }
+
+        // Apply the updates to both the trie and our test data
+        for (idx, path, new_account) in &updates {
+            // Update in the trie
+            storage_engine
+                .set_account(&mut metadata, path.clone(), Some(new_account.clone()))
+                .unwrap();
+
+            // Update in our test data
+            accounts[*idx] = (path.clone(), new_account.clone());
+        }
+
+        // Verify all accounts have correct values after updates
+        for (path, expected_account) in &accounts {
+            let retrieved_account = storage_engine
+                .get_account::<AccountVec>(&metadata, path.clone())
+                .unwrap();
+            assert_eq!(
+                retrieved_account,
+                Some(expected_account.clone()),
+                "Account mismatch after updates"
+            );
         }
     }
 

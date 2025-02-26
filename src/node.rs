@@ -5,7 +5,6 @@ use alloy_trie::{
 };
 
 use crate::{
-    account::AccountVec,
     pointer::Pointer,
     storage::value::{self, Value},
 };
