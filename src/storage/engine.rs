@@ -176,20 +176,26 @@ impl<P: PageManager> StorageEngine<P> {
             return Ok(None);
         }
 
-        let mut remaining_path = path.slice(common_prefix_length..);
+        let remaining_path = path.slice(common_prefix_length..);
+
         trace!("remaining_path: {:?}", remaining_path);
         if remaining_path.is_empty() {
             return Ok(Some(node.to_value()));
         }
 
-        let child_pointer = node.child(remaining_path[0]);
-        if !node.is_branch() {
+        let child_pointer = if !node.is_branch() {
+            node.direct_child()
+        } else {
+            node.child(remaining_path[0])
+        };
+
+        let remaining_path = if !node.is_branch() {
             // if we are at an AccountLeaf, we need a "free hop" to the storage trie
             // so the remaining_path needs to contain the current nibble.
-            remaining_path = path.slice(common_prefix_length..);
+            path.slice(common_prefix_length..)
         } else {
-            remaining_path = path.slice(common_prefix_length + 1..);
-        }
+            path.slice(common_prefix_length + 1..)
+        };
 
         match child_pointer {
             Some(child_pointer) => {
@@ -356,15 +362,22 @@ impl<P: PageManager> StorageEngine<P> {
         // the path is a prefix of the node prefix, so we need to traverse the node's children.
         let child_index = path[common_prefix_length];
 
-        let mut remaining_path = path.slice(common_prefix_length + 1..);
-        if !node.is_branch() {
+        let remaining_path = if !node.is_branch() {
             // if we are at an AccountLeaf, we need a "free hop" to the storage trie
             // so the remaining_path needs to contain the current nibble.
-            remaining_path = path.slice(common_prefix_length..);
-        }
+            path.slice(common_prefix_length..)
+        } else {
+            path.slice(common_prefix_length + 1..)
+        };
+
         // Note: if the node is an AccountLeaf, there is no such thing as a "child_index"
         // so node.child(...) will always return the storage_root.
-        let child_pointer = node.child(child_index);
+        let child_pointer = if !node.is_branch() {
+            node.direct_child()
+        } else {
+            node.child(child_index)
+        };
+
         match child_pointer {
             Some(child_pointer) => {
                 // the child node exists, so we need to traverse it.
@@ -471,7 +484,7 @@ impl<P: PageManager> StorageEngine<P> {
         let new_account_leaf: Node<AccountVec> = Node::new_account_leaf(
             node.prefix().clone(),
             updated_account,
-            node.child(0).cloned(),
+            node.direct_child().cloned(),
         );
 
         let rlp_node_with_child = new_account_leaf.rlp_encode();
@@ -590,7 +603,11 @@ impl<P: PageManager> StorageEngine<P> {
         };
 
         for branch_index in range {
-            let child_ptr = updated_node.child(branch_index);
+            let child_ptr = if !updated_node.is_branch() {
+                updated_node.direct_child()
+            } else {
+                updated_node.child(branch_index)
+            };
             if let Some(child_ptr) = child_ptr {
                 if let Some(child_index) = child_ptr.location().cell_index() {
                     // Recursively move its children

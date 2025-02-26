@@ -114,8 +114,14 @@ impl<V: Value> Node<V> {
 
     pub fn child(&self, index: u8) -> Option<&Pointer> {
         match self {
-            Self::AccountLeaf { storage_root, .. } => storage_root.as_ref(),
             Self::Branch { children, .. } => children[index as usize].as_ref(),
+            _ => panic!("cannot get child of leaf node"),
+        }
+    }
+
+    pub fn direct_child(&self) -> Option<&Pointer> {
+        match self {
+            Self::AccountLeaf { storage_root, .. } => storage_root.as_ref(),
             _ => panic!("cannot get child of leaf node"),
         }
     }
