@@ -552,8 +552,7 @@ impl<P: PageManager> Inner<P> {
         metadata: &Metadata,
         page_id: PageId,
     ) -> Result<Page<'p, RW>, Error> {
-        let snapshot_id = metadata.snapshot_id;
-        let page = self.page_manager.get_mut(snapshot_id, page_id)?;
+        let page = self.page_manager.get_mut(metadata.snapshot_id, page_id)?;
         metadata.metrics_inc_pages_read();
         Ok(page)
     }
@@ -564,25 +563,16 @@ impl<P: PageManager> Inner<P> {
         metadata: &Metadata,
         page_id: PageId,
     ) -> Result<Page<'p, RO>, Error> {
-        let result = self
-            .page_manager
-            .get(metadata.snapshot_id, page_id)
-            .map_err(|e| e.into());
-        if let Ok(_) = result {
-            metadata.metrics_inc_pages_read();
-        }
-        result
+        let page = self.page_manager.get(metadata.snapshot_id, page_id)?;
+        metadata.metrics_inc_pages_read();
+        Ok(page)
     }
+
     // a wrapper around the page manager allocate that increments the pages allocated metric
     fn page_manager_allocate<'p>(&mut self, metadata: &Metadata) -> Result<Page<'p, RW>, Error> {
-        let result = self
-            .page_manager
-            .allocate(metadata.snapshot_id)
-            .map_err(|e| e.into());
-        if let Ok(_) = result {
-            metadata.metrics_inc_pages_allocated();
-        }
-        result
+        let page = self.page_manager.allocate(metadata.snapshot_id)?;
+        metadata.metrics_inc_pages_allocated();
+        Ok(page)
     }
 
     fn allocate_page<'p>(&mut self, metadata: &Metadata) -> Result<Page<'p, RW>, Error> {
