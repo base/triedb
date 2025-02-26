@@ -52,7 +52,7 @@ impl<P: PageManager> StorageEngine<P> {
     pub(crate) fn unlock(&self, snapshot_id: SnapshotId) {
         let mut inner = self.inner.write().unwrap();
 
-        if inner.isClosed() {
+        if inner.is_closed() {
             return;
         }
 
@@ -65,7 +65,7 @@ impl<P: PageManager> StorageEngine<P> {
     fn allocate_page<'p>(&self, metadata: &Metadata) -> Result<Page<'p, RW>, Error> {
         let mut inner = self.inner.write().unwrap();
 
-        if inner.isClosed() {
+        if inner.is_closed() {
             return Err(Error::EngineClosed);
         }
 
@@ -81,7 +81,7 @@ impl<P: PageManager> StorageEngine<P> {
     ) -> Result<Page<'p, RW>, Error> {
         let mut inner = self.inner.write().unwrap();
 
-        if inner.isClosed() {
+        if inner.is_closed() {
             return Err(Error::EngineClosed);
         }
 
@@ -105,7 +105,7 @@ impl<P: PageManager> StorageEngine<P> {
     fn get_page<'p>(&self, metadata: &Metadata, page_id: PageId) -> Result<Page<'p, RO>, Error> {
         let inner = self.inner.read().unwrap();
 
-        if inner.isClosed() {
+        if inner.is_closed() {
             return Err(Error::EngineClosed);
         }
 
@@ -122,7 +122,7 @@ impl<P: PageManager> StorageEngine<P> {
     ) -> Result<Page<'p, RW>, Error> {
         let mut inner = self.inner.write().unwrap();
 
-        if inner.isClosed() {
+        if inner.is_closed() {
             return Err(Error::EngineClosed);
         }
 
@@ -525,7 +525,7 @@ impl<P: PageManager> StorageEngine<P> {
     pub fn commit(&self, metadata: &Metadata) -> Result<(), Error> {
         let mut inner = self.inner.write().unwrap();
 
-        if inner.isClosed() {
+        if inner.is_closed() {
             return Err(Error::EngineClosed);
         }
 
@@ -539,7 +539,7 @@ impl<P: PageManager> StorageEngine<P> {
     pub fn resize(&mut self, new_page_count: PageId) -> Result<(), Error> {
         let mut inner = self.inner.write().unwrap();
 
-        if inner.isClosed() {
+        if inner.is_closed() {
             return Err(Error::EngineClosed);
         }
 
@@ -554,7 +554,7 @@ impl<P: PageManager> StorageEngine<P> {
     pub fn close(&self, metadata: &Metadata) -> Result<(), Error> {
         let mut inner = self.inner.write().unwrap();
 
-        if inner.isClosed() {
+        if inner.is_closed() {
             return Err(Error::EngineClosed);
         }
 
@@ -577,7 +577,7 @@ impl<P: PageManager> StorageEngine<P> {
 }
 
 impl<P: PageManager> Inner<P> {
-    fn isClosed(&self) -> bool {
+    fn is_closed(&self) -> bool {
         match self.status {
             Status::Closed => true,
             _ => false,
