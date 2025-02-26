@@ -31,7 +31,7 @@ impl OrphanPageManager {
 
     // Returns an unlocked orphaned page id, if one exists.
     pub fn get_orphaned_page_id(&mut self) -> Option<PageId> {
-        self.num_orphan_pages_used = self.num_orphan_pages_used + 1;
+        self.num_orphan_pages_used += 1;
         self.unlocked_page_ids.pop()
     }
 

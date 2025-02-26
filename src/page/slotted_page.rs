@@ -212,11 +212,11 @@ impl<'p> SlottedPage<'p, RW> {
                 if new_num_cells > num_cells {
                     self.set_num_cells(new_num_cells);
                 }
-                return self.set_cell_pointer(index, offset, length);
+                self.set_cell_pointer(index, offset, length)
             }
             None => match self.defragment(index, length)? {
-                true => return self.allocate_cell_pointer(index, length),
-                false => return Err(PageError::PageIsFull),
+                true => self.allocate_cell_pointer(index, length),
+                false => Err(PageError::PageIsFull),
             },
         }
     }

@@ -21,8 +21,8 @@ impl AccountVec {
         let mut data = vec![0; 104];
         data[0..32].copy_from_slice(&balance.to_be_bytes::<32>());
         data[32..40].copy_from_slice(&nonce.to_be_bytes());
-        data[40..72].copy_from_slice(&code_hash.as_slice());
-        data[72..104].copy_from_slice(&storage_root.as_slice());
+        data[40..72].copy_from_slice(code_hash.as_slice());
+        data[72..104].copy_from_slice(storage_root.as_slice());
         Self { data }
     }
 }
@@ -60,8 +60,8 @@ impl<'a> AccountSlice<'a> {
     ) -> Self {
         data[0..32].copy_from_slice(&balance.to_be_bytes::<32>());
         data[32..40].copy_from_slice(&nonce.to_be_bytes());
-        data[40..72].copy_from_slice(&code_hash.as_slice());
-        data[72..104].copy_from_slice(&storage_root.as_slice());
+        data[40..72].copy_from_slice(code_hash.as_slice());
+        data[72..104].copy_from_slice(storage_root.as_slice());
         Self { data }
     }
 }

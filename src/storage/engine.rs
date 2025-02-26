@@ -171,7 +171,7 @@ impl<P: PageManager> StorageEngine<P> {
 
         let remaining_path = path.slice(common_prefix_length..);
         if remaining_path.is_empty() {
-            return Ok(Some(node.to_value()));
+            return Ok(Some(node.into_value()));
         }
 
         let child_pointer = if !node.is_branch() {
@@ -511,7 +511,7 @@ impl<P: PageManager> StorageEngine<P> {
                 .max_by_key(|(_, ptr)| {
                     // If pointer points to a cell in current page, count nodes in that subtrie
                     if let Some(cell_index) = ptr.location().cell_index() {
-                        self.count_subtrie_nodes::<V>(page, cell_index).unwrap_or(0)
+                        count_subtrie_nodes::<V>(page, cell_index).unwrap_or(0)
                     } else {
                         // If pointer points to another page, count as 0
                         0
@@ -531,36 +531,17 @@ impl<P: PageManager> StorageEngine<P> {
 
                 // Update the pointer in the root node to point to the new page
                 root_node.set_child(
-                    largest_child_index as u8,
-                    Pointer::new(location, largest_child_pointer.rlp().clone()),
+                    largest_child_index,
+                    Pointer::new(
+                        Location::for_page(child_slotted_page.page_id()),
+                        largest_child_pointer.rlp().clone(),
+                    ),
                 );
                 page.set_value(0, root_node)?;
             }
         }
 
         Ok(())
-    }
-
-    // Helper function to count nodes in a subtrie on the given page
-    fn count_subtrie_nodes<V: Value>(
-        &self,
-        page: &SlottedPage<'_, RW>,
-        root_index: u8,
-    ) -> Result<u8, Error> {
-        let mut count = 1; // Count the root node
-        let node: Node<V> = page.get_value(root_index)?;
-        if !node.has_children() {
-            return Ok(count);
-        }
-
-        // Count child nodes that are in this page
-        for (_, child_ptr) in node.enumerate_children() {
-            if let Some(child_index) = child_ptr.location().cell_index() {
-                count += self.count_subtrie_nodes::<V>(page, child_index)?;
-            }
-        }
-
-        Ok(count)
     }
 
     // Helper function to move an entire subtrie from one page to another.
@@ -607,7 +588,7 @@ impl<P: PageManager> StorageEngine<P> {
                         self.move_subtrie_nodes::<V>(source_page, child_index, target_page)?;
                     // update the pointer in the parent node
                     updated_node.set_child(
-                        branch_index as u8,
+                        branch_index,
                         Pointer::new(new_location, child_ptr.rlp().clone()),
                     );
                 }
@@ -715,12 +696,27 @@ impl<P: PageManager> StorageEngine<P> {
     }
 }
 
+// Helper function to count nodes in a subtrie on the given page
+fn count_subtrie_nodes<V: Value>(page: &SlottedPage<'_, RW>, root_index: u8) -> Result<u8, Error> {
+    let mut count = 1; // Count the root node
+    let node: Node<V> = page.get_value(root_index)?;
+    if !node.is_branch() {
+        return Ok(count);
+    }
+
+    // Count child nodes that are in this page
+    for (_, child_ptr) in node.enumerate_children() {
+        if let Some(child_index) = child_ptr.location().cell_index() {
+            count += count_subtrie_nodes::<V>(page, child_index)?;
+        }
+    }
+
+    Ok(count)
+}
+
 impl<P: PageManager> Inner<P> {
     fn is_closed(&self) -> bool {
-        match self.status {
-            Status::Closed => true,
-            _ => false,
-        }
+        matches!(self.status, Status::Closed)
     }
 
     fn allocate_page<'p>(&mut self, metadata: &Metadata) -> Result<Page<'p, RW>, Error> {
@@ -753,7 +749,7 @@ impl<P: PageManager> Inner<P> {
             .unwrap();
         // TODO: include the remaining metadata in the new root page.
         let mut new_root_page = RootPage::new(page_mut, metadata.state_root);
-        let orphaned_page_ids = self.orphan_manager.iter().copied().collect();
+        let orphaned_page_ids = self.orphan_manager.iter().copied().collect::<Vec<PageId>>();
         let num_orphan_pages_used = self.orphan_manager.get_num_orphan_pages_used();
         self.orphan_manager.reset_num_orphan_pages_used();
         new_root_page

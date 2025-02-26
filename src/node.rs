@@ -141,7 +141,7 @@ impl<V: Value> Node<V> {
         }
     }
 
-    pub fn to_value(self) -> V {
+    pub fn into_value(self) -> V {
         match self {
             Self::AccountLeaf { value, .. } => value,
             Self::StorageLeaf { value, .. } => value,
@@ -152,7 +152,7 @@ impl<V: Value> Node<V> {
 
 impl<V: Value + Encodable> Node<V> {
     pub fn rlp_encode(&self) -> RlpNode {
-        RlpNode::from_rlp(&encode(&self))
+        RlpNode::from_rlp(&encode(self))
     }
 }
 
