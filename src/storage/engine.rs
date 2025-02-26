@@ -642,7 +642,7 @@ impl<P: PageManager> StorageEngine<P> {
 
                     storage_root_rlp_node = branch_with_no_value.rlp_encode();
                 } else {
-                    // there is a single child in the branch node with a value. we need to conver it
+                    // there is a single child in the branch node with a value. we need to convert it
                     // to a leaf node or an extension node
                     let (index, child_pointer) = existing_children[0];
                     let child_location = child_pointer.location();
