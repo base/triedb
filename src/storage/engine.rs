@@ -1,5 +1,5 @@
 use crate::{
-    account::{Account, AccountVec},
+    account::{Account, AccountVec, TrieValue},
     database::Metadata,
     location::Location,
     node::Node,
@@ -9,11 +9,12 @@ use crate::{
     path::{AddressPath, StoragePath},
     pointer::Pointer,
     snapshot::SnapshotId,
+    storage::engine::Node::Branch,
     storage::value,
 };
 use alloy_primitives::{b256, StorageValue};
 use alloy_rlp::Encodable;
-use alloy_trie::Nibbles;
+use alloy_trie::{nodes::RlpNode, Nibbles};
 use log::{debug, trace};
 use std::cmp::max;
 use std::fmt::Debug;
@@ -154,6 +155,19 @@ impl<P: PageManager> StorageEngine<P> {
         slotted_page: SlottedPage<'_, RO>,
         page_index: u8,
     ) -> Result<Option<V>, Error> {
+        match self.get_node_from_page(metadata, path, slotted_page, page_index)? {
+            Some((_, node)) => Ok(Some(node.to_value())),
+            None => Ok(None),
+        }
+    }
+
+    fn get_node_from_page<'a, V: Value>(
+        &self,
+        metadata: &Metadata,
+        path: Nibbles,
+        slotted_page: SlottedPage<'a, RO>,
+        page_index: u8,
+    ) -> Result<Option<(SlottedPage<'a, RO>, Node<V>)>, Error> {
         trace!("get_account_from_page(): {:?} {:?}", path, page_index);
 
         let node: Node<V> = slotted_page.get_value(page_index)?;
@@ -169,7 +183,7 @@ impl<P: PageManager> StorageEngine<P> {
         let remaining_path = path.slice(common_prefix_length..);
         trace!("remaining_path: {:?}", remaining_path);
         if remaining_path.is_empty() {
-            return Ok(Some(node.to_value()));
+            return Ok(Some((slotted_page, node)));
         }
 
         if node.is_leaf() {
@@ -184,7 +198,7 @@ impl<P: PageManager> StorageEngine<P> {
             Some(child_pointer) => {
                 let child_location = child_pointer.location();
                 if child_location.cell_index().is_some() {
-                    self.get_value_from_page::<V>(
+                    self.get_node_from_page::<V>(
                         metadata,
                         remaining_path.slice(1..),
                         slotted_page,
@@ -194,7 +208,7 @@ impl<P: PageManager> StorageEngine<P> {
                     let child_page_id = child_location.page_id().unwrap();
                     let child_page = self.get_page(metadata, child_page_id)?;
                     let child_slotted_page = SlottedPage::try_from(child_page)?;
-                    self.get_value_from_page::<V>(
+                    self.get_node_from_page::<V>(
                         metadata,
                         remaining_path.slice(1..),
                         child_slotted_page,
@@ -333,7 +347,7 @@ impl<P: PageManager> StorageEngine<P> {
                 Node::new_branch(common_prefix, branch_value.cloned());
             let child_branch_index = path[common_prefix_length];
             let remaining_path = path.slice(common_prefix_length + 1..);
-            let new_leaf_node = Node::new_leaf(remaining_path.clone(), value);
+            let new_leaf_node = Node::new_leaf(remaining_path, value);
 
             if common_prefix_length < node.prefix().len() {
                 // update the prefix of the existing node and insert it into the page
@@ -352,12 +366,10 @@ impl<P: PageManager> StorageEngine<P> {
             let rlp_branch_node = new_parent_branch.rlp_encode();
             slotted_page.set_value(page_index, new_parent_branch)?;
 
-            let wat = Pointer::new(
+            return Ok(Pointer::new(
                 self.node_location(slotted_page.page_id(), page_index),
                 rlp_branch_node,
-            );
-
-            return Ok(wat);
+            ));
         }
 
         // the path is a prefix of the node prefix, so we need to traverse the node's children.
@@ -406,7 +418,7 @@ impl<P: PageManager> StorageEngine<P> {
             }
             None => {
                 // the child node does not exist, so we need to create a new leaf node with the remaining path.
-                let new_node = Node::new_leaf(remaining_path, value.clone());
+                let new_node = Node::new_leaf(remaining_path, value);
                 let rlp_node = new_node.rlp_encode();
                 let location = Location::for_cell(slotted_page.insert_value(new_node)?);
                 node.set_child(child_index, Pointer::new(location, rlp_node));
@@ -552,15 +564,12 @@ impl<P: PageManager> StorageEngine<P> {
         let slotted_page = SlottedPage::try_from(page)?;
 
         let value =
-            self.get_value_from_page::<Vec<u8>>(metadata, storage_path.into(), slotted_page, 0)?;
+            self.get_value_from_page::<TrieValue>(metadata, storage_path.into(), slotted_page, 0)?;
 
-        return match value {
-            Some(storage_value_bytes) => Ok(Some(
-                StorageValue::from_bytes(&storage_value_bytes)
-                    .map_err(|err| Error::ValueDeserialization(err))?,
-            )),
-            None => Ok(None),
-        };
+        match value {
+            Some(TrieValue::Storage(storage_value)) => Ok(Some(storage_value)),
+            _ => Ok(None),
+        }
     }
 
     pub fn set_storage<A: Account + Value>(
@@ -569,15 +578,11 @@ impl<P: PageManager> StorageEngine<P> {
         storage_path: StoragePath,
         value: StorageValue,
     ) -> Result<(), Error> {
-        let account = match self.get_account::<A>(metadata, storage_path.address.clone())? {
-            Some(account) => Ok(account),
-            None => Err(Error::AccountDoesNotExist(storage_path.address.clone())),
-        }?;
-
-        let pointer = self.set_value_in_page::<Vec<u8>>(
+        let trie_value = TrieValue::Storage(value);
+        let pointer = self.set_value_in_page::<TrieValue>(
             metadata,
             storage_path.clone().into(),
-            value.to_bytes(),
+            trie_value,
             metadata.root_subtrie_page_id,
             0,
         )?;
@@ -585,13 +590,97 @@ impl<P: PageManager> StorageEngine<P> {
         metadata.root_subtrie_page_id = pointer.location().page_id().unwrap();
         metadata.state_root = pointer.rlp().as_hash().unwrap();
 
+        let page = self.get_page(metadata, metadata.root_subtrie_page_id)?;
+        let slotted_page = SlottedPage::try_from(page)?;
+        let (slotted_page, node) = match self.get_node_from_page::<A>(
+            metadata,
+            storage_path.address.clone().into(),
+            slotted_page,
+            0,
+        )? {
+            Some(node) => Ok(node),
+            None => Err(Error::AccountDoesNotExist(storage_path.address.clone())),
+        }?;
+
+        // the account node should be a branch node with the following format:
+        // branch: [child*16, account_value]
+        //
+        // because this branch node is essentially the "storage root" for this account,
+        // in order to get the correct storage root, we need to rlp_encode this node
+        // correctly. rlp_encoding it as-is will not work because of the value
+        // field (if the value field is present it is rlp_encoding as a leaf node to be
+        // consistent with state root calculation).
+        // So, we will modify this node (in memory) to reflect a proper branch/leaf node
+        // and then rlp_encode this modified version.
+        //
+        // The node will be modified as follows:
+        // 1. The value will be set to None in the branch node
+        // 2. If there is only 1 child:
+        //      a. If the single child is a leaf, then rlp the leaf with prefix set to child_index_in_branch + leaf_prefix
+        //      b. If the single child is a branch, then rlp an extension node with prefix set to child_index and pointing to the child branch
+        // 3. If there is more than 1 child, return the rlp encoding of the branch node
+        if node.is_leaf() {
+            // this should never be the case given that we just set the storage and an account exists,
+            // so the node holding the account value should be a branch node.
+            return Err(Error::InvalidPath);
+        }
+
+        let mut storage_root_rlp_node: RlpNode;
+        match node {
+            Branch {
+                ref prefix,
+                ref children,
+                ref value,
+            } => {
+                let existing_children: Vec<(u8, &Pointer)> = node.enumerate_children().collect();
+                if existing_children.len() > 1 {
+                    let mut branch_with_no_value: Node<TrieValue> =
+                        Node::new_branch(Nibbles::new(), None);
+                    for (child_index, child_pointer) in &existing_children {
+                        branch_with_no_value.set_child(*child_index, child_pointer.clone().clone());
+                    }
+
+                    storage_root_rlp_node = branch_with_no_value.rlp_encode();
+                } else {
+                    // there is a single child in the branch node with a value. we need to conver it
+                    // to a leaf node or an extension node
+                    let (index, child_pointer) = existing_children[0];
+                    let child_location = child_pointer.location();
+                    let mut child_node = if child_location.cell_index().is_some() {
+                        slotted_page
+                            .get_value::<Node<TrieValue>>(child_location.cell_index().unwrap())?
+                    } else {
+                        let child_page_id = child_location.page_id().unwrap();
+                        let child_page = self.get_page(metadata, child_page_id)?;
+                        let child_slotted_page = SlottedPage::try_from(child_page)?;
+                        slotted_page.get_value::<Node<TrieValue>>(0)?
+                    };
+
+                    let mut nibbles = Nibbles::new();
+                    nibbles.push(index);
+                    if child_node.is_leaf() {
+                        nibbles = nibbles.join(child_node.prefix());
+                        child_node.set_prefix(nibbles.clone());
+                        storage_root_rlp_node = child_node.rlp_encode();
+                    } else {
+                        let mut extension_node: Node<TrieValue> = Node::new_branch(nibbles, None);
+                        extension_node.set_child(index, child_pointer.clone());
+                        storage_root_rlp_node = extension_node.rlp_encode();
+                    }
+                }
+            }
+
+            // this should never
+            _ => return Err(Error::InvalidAccount),
+        };
+
+        let current_account = node.value().unwrap();
+
         let new_account = AccountVec::new(
-            account.balance(),
-            account.nonce(),
-            account.code_hash(),
-            // TODO: need to update the storage root. setting to a random hash for now
-            // to "fake" the existence of a storage trie for tests
-            b256!("0x02aec41a1825308a87018897119fd23097b63eb96cbe092e52cc32a571a9ff81"),
+            current_account.balance(),
+            current_account.nonce(),
+            current_account.code_hash(),
+            storage_root_rlp_node.as_hash().unwrap(),
         );
 
         self.set_account(metadata, storage_path.clone().address, Some(new_account))
@@ -713,7 +802,7 @@ pub enum Error {
     InvalidPath,
     InvalidSnapshotId,
     AccountDoesNotExist(AddressPath),
-    ValueDeserialization(value::Error),
+    InvalidAccount,
     EngineClosed,
 }
 
@@ -725,8 +814,9 @@ impl From<PageError> for Error {
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::{address, b256, hex, keccak256, U256};
-    use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
+    use alloy_primitives::{address, b256, hex, keccak256, Address, StorageKey, B256, U256};
+    use alloy_rlp::encode;
+    use alloy_trie::{HashBuilder, EMPTY_ROOT_HASH, KECCAK_EMPTY};
 
     use super::*;
     use crate::{account::AccountVec, page::MmapPageManager};
@@ -1091,6 +1181,140 @@ mod tests {
             let read_storage_slot = storage_engine.get_storage(&metadata, storage_path).unwrap();
             let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
             assert_eq!(read_storage_slot, Some(storage_value));
+        }
+    }
+
+    #[test]
+    fn test_set_get_account_storage_roots() {
+        let (mut storage_engine, mut metadata) = create_test_engine(300, 256);
+
+        let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
+        let account = create_test_account(100, 1);
+        storage_engine
+            .set_account(
+                &mut metadata,
+                AddressPath::for_address(address),
+                Some(account.clone()),
+            )
+            .unwrap();
+        assert_eq!(metadata.root_subtrie_page_id, 257);
+
+        let test_cases = vec![
+            (
+                // storage key and storage value
+                b256!("0x0000000000000000000000000000000000000000000000000000000000000000"),
+                b256!("0x0000000000000000000000000000000000000000000000000000000062617365"),
+            ),
+            (
+                // storage key and storage value
+                b256!("0x0000000000000000000000000000000000000000000000000000000000000002"),
+                b256!("0x0000000000000000000000000000000000000000000000000000747269656462"),
+            ),
+            (
+                // storage key and storage value
+                b256!("0x0000000000000000000000000000000000000000000000000000000000000001"),
+                b256!("0x000000000000000000000000000000006274632040202439362c3434322e3735"),
+            ),
+            (
+                // storage key and storage value
+                b256!("0x0000000000000000000000000000000000000000000000000000000000000003"),
+                b256!("0x000000000000000000000000000000000000000000000000436f696e62617365"),
+            ),
+        ];
+
+        // Insert storage slots and verify they don't exist before insertion
+        for (storage_key, storage_value) in &test_cases {
+            let storage_path = StoragePath::for_address_and_slot(address.clone(), *storage_key);
+
+            let read_storage_slot = storage_engine
+                .get_storage(&metadata, storage_path.clone())
+                .unwrap();
+            assert_eq!(read_storage_slot, None);
+
+            let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
+
+            storage_engine
+                .set_storage::<AccountVec>(&mut metadata, storage_path, storage_value)
+                .unwrap();
+
+            metadata = metadata.next();
+        }
+
+        // Verify the storage roots is correct. The storage root should be equivalent to the hash
+        // of a trie that was initially empty and then filled with these key/values.
+        let mut hb = HashBuilder::default();
+        for (storage_key, storage_value) in &test_cases {
+            let storage_path = StoragePath::for_address_and_slot(address.clone(), *storage_key);
+            let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
+            hb.add_leaf(storage_path.slot, &encode(storage_value));
+        }
+
+        let expected_root = hb.root();
+
+        let account = storage_engine
+            .get_account::<AccountVec>(&metadata, AddressPath::for_address(address))
+            .unwrap()
+            .unwrap();
+
+        let storage_root = account.storage_root();
+        assert_eq!(storage_root, expected_root);
+    }
+
+    #[test]
+    fn test_set_get_many_accounts_storage_roots() {
+        let (mut storage_engine, mut metadata) = create_test_engine(2000, 256);
+
+        for i in 0..100 {
+            let address =
+                Address::from_slice(&keccak256((i as u32).to_le_bytes()).as_slice()[0..20]);
+            let path = AddressPath::for_address(address);
+            let account = create_test_account(i, i);
+            storage_engine
+                .set_account(&mut metadata, path.clone(), Some(account.clone()))
+                .unwrap();
+
+            metadata.snapshot_id += 1;
+        }
+
+        for i in 0..100 {
+            let address =
+                Address::from_slice(&keccak256((i as u32).to_le_bytes()).as_slice()[0..20]);
+            let path = AddressPath::for_address(address);
+            let mut keys_values = Vec::new();
+            for j in 0..25 {
+                let storage_slot_key: StorageKey = B256::repeat_byte(j as u8);
+                let storage_slot_value: StorageValue = B256::with_last_byte(j as u8).into();
+
+                let storage_path = StoragePath::for_address_and_slot(address, storage_slot_key);
+                storage_engine
+                    .set_storage::<AccountVec>(
+                        &mut metadata,
+                        storage_path.clone(),
+                        storage_slot_value,
+                    )
+                    .unwrap();
+
+                keys_values.push((storage_path.slot, storage_slot_value))
+            }
+
+            // sort by the torage_path.slot
+            keys_values.sort_unstable_by_key(|k| k.0.clone());
+            // HashBuilder is our "source of truth" trie
+            let mut hb = HashBuilder::default();
+            for (slot, storage_value) in keys_values {
+                hb.add_leaf(slot, &encode(storage_value))
+            }
+
+            let expected_root = hb.root();
+
+            // check the storage root of the account
+            let account = storage_engine
+                .get_account::<AccountVec>(&metadata, path)
+                .unwrap()
+                .unwrap();
+
+            let storage_root = account.storage_root();
+            assert_eq!(storage_root, expected_root);
         }
     }
 

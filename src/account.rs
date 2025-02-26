@@ -115,13 +115,37 @@ impl<'a> ValueRef<'a> for AccountSlice<'a> {
     }
 }
 
-impl Value for StorageValue {
+#[derive(Debug, Clone)]
+pub enum TrieValue {
+    Storage(StorageValue),
+    Account(AccountVec),
+}
+
+impl Value for TrieValue {
     fn to_bytes(self) -> Vec<u8> {
-        self.to_be_bytes::<32>().to_vec()
+        match self {
+            Self::Storage(storage_value) => storage_value.to_be_bytes::<32>().to_vec(),
+            Self::Account(account_vec) => account_vec.to_bytes(),
+        }
     }
 
     fn from_bytes(bytes: &[u8]) -> value::Result<Self> {
-        Ok(Self::from_be_slice(bytes))
+        if bytes.len() == 32 {
+            return Ok(Self::Storage(StorageValue::from_be_bytes::<32>(
+                bytes.try_into().expect("storage value should be 32 bytes"),
+            )));
+        }
+
+        Ok(Self::Account(AccountVec::from_bytes(bytes)?))
+    }
+}
+
+impl Encodable for TrieValue {
+    fn encode(&self, out: &mut dyn BufMut) {
+        match self {
+            Self::Storage(storage_value) => storage_value.encode(out),
+            Self::Account(account_vec) => account_vec.encode(out),
+        }
     }
 }
 
