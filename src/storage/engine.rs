@@ -797,7 +797,10 @@ impl From<PageError> for Error {
 mod tests {
     use alloy_primitives::{address, b256, hex, keccak256, Address, StorageKey, U256};
     use alloy_rlp::encode;
-    use alloy_trie::{HashBuilder, EMPTY_ROOT_HASH, KECCAK_EMPTY};
+    use alloy_trie::{
+        root::{storage_root_unhashed, storage_root_unsorted},
+        EMPTY_ROOT_HASH, KECCAK_EMPTY,
+    };
 
     use super::*;
     use crate::{account::AccountVec, page::MmapPageManager};
@@ -1243,14 +1246,12 @@ mod tests {
 
         // Verify the storage roots is correct. The storage root should be equivalent to the hash
         // of a trie that was initially empty and then filled with these key/values.
-        let mut hb = HashBuilder::default();
-        for (storage_key, storage_value) in &test_cases {
-            let storage_path = StoragePath::for_address_and_slot(address.clone(), *storage_key);
-            let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
-            hb.add_leaf(storage_path.get_slot(), &encode(storage_value));
-        }
-
-        let expected_root = hb.root();
+        let expected_root = storage_root_unhashed(test_cases.into_iter().map(|(key, value)| {
+            (
+                key,
+                U256::from_be_bytes::<32>(value.as_slice().try_into().unwrap()),
+            )
+        }));
 
         let account = storage_engine
             .get_account::<AccountVec>(&metadata, AddressPath::for_address(address))
@@ -1291,18 +1292,13 @@ mod tests {
                     .set_storage(&mut metadata, storage_path.clone(), storage_slot_value)
                     .unwrap();
 
-                keys_values.push((storage_path.get_slot(), storage_slot_value))
+                keys_values.push((
+                    B256::from_slice(storage_path.get_slot().pack().as_slice()),
+                    storage_slot_value,
+                ))
             }
 
-            // sort by the torage_path.slot
-            keys_values.sort_unstable_by_key(|k| k.0.clone());
-            // HashBuilder is our "source of truth" trie
-            let mut hb = HashBuilder::default();
-            for (slot, storage_value) in keys_values {
-                hb.add_leaf(slot, &encode(storage_value))
-            }
-
-            let expected_root = hb.root();
+            let expected_root = storage_root_unsorted(keys_values.into_iter());
 
             // check the storage root of the account
             let account = storage_engine
