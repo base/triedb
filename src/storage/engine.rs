@@ -785,11 +785,11 @@ impl From<PageError> for Error {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{address, b256, hex, keccak256, Address, StorageKey, U256};
-
     use alloy_trie::{
         root::{storage_root_unhashed, storage_root_unsorted},
         EMPTY_ROOT_HASH, KECCAK_EMPTY,
     };
+    use rand::{rngs::StdRng, seq::SliceRandom, RngCore, SeedableRng};
 
     use super::*;
     use crate::{account::AccountVec, page::MmapPageManager};
@@ -1000,6 +1000,59 @@ mod tests {
             metadata.state_root,
             b256!("0x6f78ee01791dd8a62b4e2e86fae3d7957df9fa7f7a717ae537f90bb0c79df296")
         );
+    }
+
+    #[test]
+    fn test_trie_state_root_order_independence() {
+        let mut rng = StdRng::seed_from_u64(1);
+
+        // create 200 accounts with random addresses and balances
+        let mut accounts = Vec::new();
+        for _ in 0..200 {
+            let address = address_path_for_idx(rng.next_u64());
+            let account = create_test_account(rng.next_u64(), rng.next_u64());
+            accounts.push((address, account));
+        }
+
+        let (storage_engine, mut metadata) = create_test_engine(300, 256);
+
+        // insert accounts in random order
+        accounts.shuffle(&mut rng);
+        for (address, account) in accounts.clone() {
+            storage_engine
+                .set_account(&mut metadata, address, Some(account))
+                .unwrap();
+        }
+
+        // commit the changes
+        storage_engine.commit(&metadata).unwrap();
+
+        let state_root = metadata.state_root;
+
+        let (storage_engine, mut metadata) = create_test_engine(300, 256);
+
+        // insert accounts in a different random order, but only after inserting different values first
+        accounts.shuffle(&mut rng);
+        for (address, _) in accounts.clone() {
+            storage_engine
+                .set_account(
+                    &mut metadata,
+                    address,
+                    Some(create_test_account(rng.next_u64(), rng.next_u64())),
+                )
+                .unwrap();
+        }
+        for (address, account) in accounts {
+            storage_engine
+                .set_account(&mut metadata, address, Some(account))
+                .unwrap();
+        }
+
+        // commit the changes
+        storage_engine.commit(&metadata).unwrap();
+
+        // verify the state root is the same
+        assert_eq!(state_root, metadata.state_root);
     }
 
     #[test]
