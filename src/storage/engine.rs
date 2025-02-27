@@ -15,6 +15,7 @@ use alloy_primitives::B256;
 use alloy_rlp::Encodable;
 use alloy_trie::{nodes::RlpNode, Nibbles, EMPTY_ROOT_HASH};
 use std::cmp::max;
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -718,10 +719,7 @@ impl<P: PageManager> StorageEngine<P> {
                 // and return the child pointer to our parent. if we are a root node,
                 // we will also orphan our current page as this means are page is now
                 // completely empty.
-
-                // delete ourself from disk
-                slotted_page.delete_value(page_index)?;
-
+                //
                 // ensure that the page has enough space (300 bytes) to overwrite.
                 // TODO: use a more accurate threshold
                 if child_slotted_page.num_free_bytes() < 300 {
@@ -729,6 +727,9 @@ impl<P: PageManager> StorageEngine<P> {
                     // Note: we are not returning Error::PageSplit here because
                     // we are not splitting our own page.
                 }
+
+                // delete ourself from disk
+                slotted_page.delete_value(page_index)?;
 
                 child_slotted_page.set_value(0, only_child_node)?;
 
@@ -926,29 +927,101 @@ impl<P: PageManager> StorageEngine<P> {
         slotted_page: &mut SlottedPage<'_, RW>,
         cell_index: u8,
     ) -> Result<(), Error> {
-        let node: Node<V> = slotted_page.get_value(cell_index)?;
-
-        if !node.has_children() {
-            // if we dont have any children, we're done
-            return Ok(());
+        if cell_index == 0 {
+            // if we are a root node, deleting ourself will orphan our entire page and
+            // all of our descendant pages. Instead of deleting each cell one-by-one
+            // we can orphan our entire page, and recursively orphan all our descendant
+            // pages as well.
+            return self.orphan_subtrie::<V>(metadata, slotted_page.page_id());
         }
 
-        let children = node.enumerate_children();
+        let node: Node<V> = slotted_page.get_value(cell_index)?;
 
-        for (_, child_ptr) in children {
-            if let Some(cell_index) = child_ptr.location().cell_index() {
-                self.delete_subtrie::<V>(metadata, slotted_page, cell_index)?;
-            } else {
-                let child_page = self.get_mut_clone(
-                    metadata,
-                    child_ptr.location().page_id().expect("page_id must exist"),
-                )?;
-                let mut child_slotted_page = SlottedPage::try_from(child_page)?;
-                self.delete_subtrie::<V>(metadata, &mut child_slotted_page, 0)?;
+        if node.has_children() {
+            let children = node.enumerate_children();
+
+            for (_, child_ptr) in children {
+                if let Some(cell_index) = child_ptr.location().cell_index() {
+                    self.delete_subtrie::<V>(metadata, slotted_page, cell_index)?
+                } else {
+                    // the child is a root of another page, and that child will be
+                    // deleted, essentially orphaning that page and all descendants of
+                    // that page.
+                    self.orphan_subtrie::<V>(
+                        metadata,
+                        child_ptr.location().page_id().expect("page_id must exist"),
+                    )?
+                }
             }
         }
 
         slotted_page.delete_value(cell_index)?;
+        Ok(())
+    }
+
+    fn orphan_subtrie<V: Value>(&self, metadata: &Metadata, page_id: u32) -> Result<(), Error> {
+        let page = self.get_page(metadata, page_id)?;
+        let slotted_page = SlottedPage::try_from(page)?;
+
+        let mut orphaned_page_ids = HashSet::new();
+        self.orphan_subtrie_helper::<V>(metadata, &slotted_page, 0, &mut orphaned_page_ids)?;
+
+        {
+            let mut inner = self.inner.write().unwrap();
+
+            for orphan_page_id in &orphaned_page_ids {
+                inner
+                    .orphan_manager
+                    .add_orphaned_page_id(metadata.snapshot_id, slotted_page.page_id())
+            }
+        }
+
+        Ok(())
+    }
+
+    fn orphan_subtrie_helper<V: Value>(
+        &self,
+        metadata: &Metadata,
+        slotted_page: &SlottedPage<'_, RO>,
+        cell_index: u8,
+        orphan_page_ids: &mut HashSet<PageId>,
+    ) -> Result<(), Error> {
+        let node: Node<V> = slotted_page.get_value(cell_index)?;
+
+        if node.has_children() {
+            let children = node.enumerate_children();
+
+            for (_, child_ptr) in children {
+                if let Some(cell_index) = child_ptr.location().cell_index() {
+                    self.orphan_subtrie_helper::<V>(
+                        metadata,
+                        slotted_page,
+                        cell_index,
+                        orphan_page_ids,
+                    )?;
+                } else {
+                    // the child is a root of another page, and that child will be
+                    // deleted, essentially orphaning that page and all descendants of
+                    // that page.
+                    let child_page = self.get_page(
+                        metadata,
+                        child_ptr.location().page_id().expect("page_id must exist"),
+                    )?;
+                    let child_slotted_page = SlottedPage::try_from(child_page)?;
+                    self.orphan_subtrie_helper::<V>(
+                        metadata,
+                        &child_slotted_page,
+                        0,
+                        orphan_page_ids,
+                    )?
+                }
+            }
+        }
+
+        if cell_index == 0 {
+            orphan_page_ids.insert(slotted_page.page_id());
+        }
+
         Ok(())
     }
 
