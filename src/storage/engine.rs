@@ -734,11 +734,11 @@ impl<P: PageManager> StorageEngine<P> {
 
                 let branch_page_id = slotted_page.page_id();
 
-                // in this case our child is the root node of another page, and we
-                // are a non-root page node. So we will delete ourself, write the new
-                // node as the child and return the child pointer to our parent.
-                // if we are a root node, we will also orphan our current page as
-                // this means are page is now completely empty.
+                // in this case our child is the root node of another page.
+                // So we will delete ourself, write the new node in the child location
+                // and return the child pointer to our parent. if we are a root node,
+                // we will also orphan our current page as this means are page is now
+                // completely empty.
 
                 // delete ourself from disk
                 slotted_page.delete_value(page_index)?;
@@ -2342,7 +2342,7 @@ mod tests {
             Err(Error::PageError(PageError::InvalidCellPointer))
         ));
 
-        // Verify the all the storage slots don't exist
+        // Verify all the storage slots don't exist
         for (storage_key, storage_value) in &test_cases {
             let storage_path = StoragePath::for_address_and_slot(address.clone(), *storage_key);
 
@@ -2355,7 +2355,7 @@ mod tests {
             ));
         }
 
-        // Now create a new account again and set storage
+        // Now create a new account with the same address again and set storage
         storage_engine
             .set_account(
                 &mut metadata,
@@ -2364,7 +2364,7 @@ mod tests {
             )
             .unwrap();
 
-        // Verify the all the storage slots don't exist
+        // Verify all the storage slots still don't exist
         for (storage_key, storage_value) in &test_cases {
             let storage_path = StoragePath::for_address_and_slot(address.clone(), *storage_key);
 
@@ -2448,7 +2448,7 @@ mod tests {
             .unwrap();
         let slotted_page = SlottedPage::try_from(page).unwrap();
         let node: Node<AccountVec> = slotted_page.get_value(0).unwrap();
-        assert_eq!(!node.is_branch(), true);
+        assert!(!node.is_branch());
     }
 
     #[test]
@@ -2500,11 +2500,11 @@ mod tests {
             .unwrap();
         let mut slotted_page1 = SlottedPage::try_from(page1).unwrap();
 
-        // page2 will hold our 1st children
+        // page2 will hold our 1st child
         let page2 = storage_engine.allocate_page(&metadata).unwrap();
         let mut slotted_page2 = SlottedPage::try_from(page2).unwrap();
 
-        // page3 will hold our 2nd children
+        // page3 will hold our 2nd child
         let page3 = storage_engine.allocate_page(&metadata).unwrap();
         let mut slotted_page3 = SlottedPage::try_from(page3).unwrap();
 
@@ -2585,7 +2585,7 @@ mod tests {
             slotted_page3.page_id()
         );
 
-        // check that the prefix for child 2 has chaned
+        // check that the prefix for child 2 has changed
         let child_2_node: Node<AccountVec> = slotted_page3.get_value(0).unwrap();
         assert!(!child_2_node.is_branch());
         assert_eq!(
@@ -2608,20 +2608,20 @@ mod tests {
     fn test_delete_single_child_root_branch_on_different_pages() {
         let (mut storage_engine, mut metadata) = create_test_engine(300, 256);
 
-        // GIVEN: a root branch node with 2 children where both children is on a different page
+        // GIVEN: a root branch node with 2 children where both children are on a different page
         //
         // first we construct our two children on separate pages.
         let test_account = create_test_account(424, 234);
 
-        // page2 will hold our 1st children
+        // page2 will hold our 1st child
         let page2 = storage_engine.allocate_page(&metadata).unwrap();
         let mut slotted_page2 = SlottedPage::try_from(page2).unwrap();
 
-        // page3 will hold our 2nd children
+        // page3 will hold our 2nd child
         let page3 = storage_engine.allocate_page(&metadata).unwrap();
         let mut slotted_page3 = SlottedPage::try_from(page3).unwrap();
 
-        // we will force add 2 children to our rood node
+        // we will force add 2 children to our root node
         let mut child_1_full_path = [0u8; 64];
         child_1_full_path[0] = 0; // root branch nibble
         child_1_full_path[2] = 10; // leaf prefix
@@ -2697,7 +2697,7 @@ mod tests {
             child_2_location.page_id().unwrap()
         );
 
-        // check that the prefix for root node has chaned
+        // check that the prefix for root node has changed
         assert_eq!(root_node.prefix().clone(), child_2_nibbles);
 
         // test that we can get child 2 and not child 1
