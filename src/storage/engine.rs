@@ -1300,9 +1300,10 @@ mod tests {
         }
     }
 
+    #[test]
     fn test_split_page_stress() {
         // Create a storage engine with limited pages to force splits
-        let (storage_engine, mut metadata) = create_test_engine(2000, 256);
+        let (storage_engine, mut metadata) = create_test_engine(4000, 256);
 
         // Create a large number of accounts with different patterns to stress the trie
 
