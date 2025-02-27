@@ -171,7 +171,7 @@ impl<P: PageManager> StorageEngine<P> {
 
         let remaining_path = path.slice(common_prefix_length..);
         if remaining_path.is_empty() {
-            return Ok(Some(node.to_value()));
+            return Ok(Some(node.into_value()));
         }
 
         let child_pointer = if !node.is_branch() {
@@ -498,7 +498,7 @@ impl<P: PageManager> StorageEngine<P> {
         metadata: &mut Metadata,
         page: &mut SlottedPage<'_, RW>,
     ) -> Result<(), Error> {
-        while page.num_free_bytes() < PAGE_DATA_SIZE / 3 as usize {
+        while page.num_free_bytes() < PAGE_DATA_SIZE / 3_usize {
             let child_page = self.allocate_page(metadata)?;
             let mut child_slotted_page = SlottedPage::try_from(child_page)?;
 
@@ -511,7 +511,7 @@ impl<P: PageManager> StorageEngine<P> {
                 .max_by_key(|(_, ptr)| {
                     // If pointer points to a cell in current page, count nodes in that subtrie
                     if let Some(cell_index) = ptr.location().cell_index() {
-                        self.count_subtrie_nodes::<V>(page, cell_index).unwrap_or(0)
+                        count_subtrie_nodes::<V>(page, cell_index).unwrap_or(0)
                     } else {
                         // If pointer points to another page, count as 0
                         0
@@ -531,36 +531,17 @@ impl<P: PageManager> StorageEngine<P> {
 
                 // Update the pointer in the root node to point to the new page
                 root_node.set_child(
-                    largest_child_index as u8,
-                    Pointer::new(location, largest_child_pointer.rlp().clone()),
+                    largest_child_index,
+                    Pointer::new(
+                        Location::for_page(child_slotted_page.page_id()),
+                        largest_child_pointer.rlp().clone(),
+                    ),
                 );
                 page.set_value(0, root_node)?;
             }
         }
 
         Ok(())
-    }
-
-    // Helper function to count nodes in a subtrie on the given page
-    fn count_subtrie_nodes<V: Value>(
-        &self,
-        page: &SlottedPage<'_, RW>,
-        root_index: u8,
-    ) -> Result<u8, Error> {
-        let mut count = 1; // Count the root node
-        let node: Node<V> = page.get_value(root_index)?;
-        if !node.has_children() {
-            return Ok(count);
-        }
-
-        // Count child nodes that are in this page
-        for (_, child_ptr) in node.enumerate_children() {
-            if let Some(child_index) = child_ptr.location().cell_index() {
-                count += self.count_subtrie_nodes::<V>(page, child_index)?;
-            }
-        }
-
-        Ok(count)
     }
 
     // Helper function to move an entire subtrie from one page to another.
@@ -607,7 +588,7 @@ impl<P: PageManager> StorageEngine<P> {
                         self.move_subtrie_nodes::<V>(source_page, child_index, target_page)?;
                     // update the pointer in the parent node
                     updated_node.set_child(
-                        branch_index as u8,
+                        branch_index,
                         Pointer::new(new_location, child_ptr.rlp().clone()),
                     );
                 }
@@ -715,12 +696,27 @@ impl<P: PageManager> StorageEngine<P> {
     }
 }
 
+// Helper function to count nodes in a subtrie on the given page
+fn count_subtrie_nodes<V: Value>(page: &SlottedPage<'_, RW>, root_index: u8) -> Result<u8, Error> {
+    let mut count = 1; // Count the root node
+    let node: Node<V> = page.get_value(root_index)?;
+    if !node.is_branch() {
+        return Ok(count);
+    }
+
+    // Count child nodes that are in this page
+    for (_, child_ptr) in node.enumerate_children() {
+        if let Some(child_index) = child_ptr.location().cell_index() {
+            count += count_subtrie_nodes::<V>(page, child_index)?;
+        }
+    }
+
+    Ok(count)
+}
+
 impl<P: PageManager> Inner<P> {
     fn is_closed(&self) -> bool {
-        match self.status {
-            Status::Closed => true,
-            _ => false,
-        }
+        matches!(self.status, Status::Closed)
     }
 
     fn allocate_page<'p>(&mut self, metadata: &Metadata) -> Result<Page<'p, RW>, Error> {
@@ -753,7 +749,7 @@ impl<P: PageManager> Inner<P> {
             .unwrap();
         // TODO: include the remaining metadata in the new root page.
         let mut new_root_page = RootPage::new(page_mut, metadata.state_root);
-        let orphaned_page_ids = self.orphan_manager.iter().copied().collect();
+        let orphaned_page_ids = self.orphan_manager.iter().copied().collect::<Vec<PageId>>();
         let num_orphan_pages_used = self.orphan_manager.get_num_orphan_pages_used();
         self.orphan_manager.reset_num_orphan_pages_used();
         new_root_page
@@ -789,7 +785,7 @@ impl From<PageError> for Error {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{address, b256, hex, keccak256, Address, StorageKey, U256};
-    use alloy_rlp::encode;
+
     use alloy_trie::{
         root::{storage_root_unhashed, storage_root_unsorted},
         EMPTY_ROOT_HASH, KECCAK_EMPTY,
@@ -1107,9 +1103,9 @@ mod tests {
         let storage_value =
             b256!("0x0000000000000000000000000000000000000000000000000000000062617365");
 
-        let storage_path = StoragePath::for_address_and_slot(address.clone(), storage_key);
+        let storage_path = StoragePath::for_address_and_slot(address, storage_key);
 
-        let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
+        let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
         storage_engine
             .set_storage(&mut metadata, storage_path, storage_value)
@@ -1156,14 +1152,14 @@ mod tests {
 
         // Insert storage slots and verify they don't exist before insertion
         for (storage_key, storage_value) in &test_cases {
-            let storage_path = StoragePath::for_address_and_slot(address.clone(), *storage_key);
+            let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
             let read_storage_slot = storage_engine
                 .get_storage(&metadata, storage_path.clone())
                 .unwrap();
             assert_eq!(read_storage_slot, None);
 
-            let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
+            let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             storage_engine
                 .set_storage(&mut metadata, storage_path, storage_value)
@@ -1174,9 +1170,9 @@ mod tests {
 
         // Verify all storage slots exist after insertion
         for (storage_key, storage_value) in &test_cases {
-            let storage_path = StoragePath::for_address_and_slot(address.clone(), *storage_key);
+            let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
             let read_storage_slot = storage_engine.get_storage(&metadata, storage_path).unwrap();
-            let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
+            let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
             assert_eq!(read_storage_slot, Some(storage_value));
         }
     }
@@ -1221,14 +1217,14 @@ mod tests {
 
         // Insert storage slots and verify they don't exist before insertion
         for (storage_key, storage_value) in &test_cases {
-            let storage_path = StoragePath::for_address_and_slot(address.clone(), *storage_key);
+            let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
             let read_storage_slot = storage_engine
                 .get_storage(&metadata, storage_path.clone())
                 .unwrap();
             assert_eq!(read_storage_slot, None);
 
-            let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
+            let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             storage_engine
                 .set_storage(&mut metadata, storage_path, storage_value)
@@ -1304,9 +1300,10 @@ mod tests {
         }
     }
 
+    #[test]
     fn test_split_page_stress() {
         // Create a storage engine with limited pages to force splits
-        let (storage_engine, mut metadata) = create_test_engine(2000, 256);
+        let (storage_engine, mut metadata) = create_test_engine(4000, 256);
 
         // Create a large number of accounts with different patterns to stress the trie
 
@@ -1419,7 +1416,9 @@ mod tests {
             let mut slotted_page = SlottedPage::try_from(page_result.unwrap()).unwrap();
 
             // Try to split this page
-            if let Ok(_) = storage_engine.split_page::<AccountVec>(&mut metadata, &mut slotted_page)
+            if storage_engine
+                .split_page::<AccountVec>(&mut metadata, &mut slotted_page)
+                .is_ok()
             {
                 // If split succeeded, add the new pages to be processed
                 pages_to_split.push(page_id + 1); // New page created by split

@@ -10,6 +10,12 @@ pub struct OrphanPageManager {
     num_orphan_pages_used: usize,
 }
 
+impl Default for OrphanPageManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OrphanPageManager {
     // Creates a new OrphanPageManager.
     pub fn new() -> Self {
@@ -23,7 +29,7 @@ impl OrphanPageManager {
     // Creates a new OrphanPageManager with provided unlocked page ids.
     pub fn new_with_unlocked_page_ids(unlocked_page_ids: Vec<PageId>) -> Self {
         Self {
-            unlocked_page_ids: unlocked_page_ids,
+            unlocked_page_ids,
             locked_page_ids: BTreeMap::new(),
             num_orphan_pages_used: 0,
         }
@@ -31,7 +37,7 @@ impl OrphanPageManager {
 
     // Returns an unlocked orphaned page id, if one exists.
     pub fn get_orphaned_page_id(&mut self) -> Option<PageId> {
-        self.num_orphan_pages_used = self.num_orphan_pages_used + 1;
+        self.num_orphan_pages_used += 1;
         self.unlocked_page_ids.pop()
     }
 

@@ -26,7 +26,7 @@ pub struct SlottedPage<'p, P: PageKind> {
     page: Page<'p, P>,
 }
 
-impl<'p, P: PageKind> SlottedPage<'p, P> {
+impl<P: PageKind> SlottedPage<'_, P> {
     pub fn page_id(&self) -> PageId {
         self.page.page_id()
     }
@@ -108,7 +108,7 @@ impl<'p, P: PageKind> SlottedPage<'p, P> {
     }
 }
 
-impl<'p, P: PageKind> std::fmt::Debug for SlottedPage<'p, P> {
+impl<P: PageKind> std::fmt::Debug for SlottedPage<'_, P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let num_cells = self.num_cells();
         write!(f, "SlottedPage {{ page_id: {}, num_cells: {}, cell_pointers: {:?}, free_bytes: {}, dead_bytes: {} }}",
@@ -129,7 +129,7 @@ impl<'p, P: PageKind, V: Value> SlottedStorage<'p, V> for SlottedPage<'p, P> {
     }
 }
 
-impl<'p> SlottedPage<'p, RW> {
+impl SlottedPage<'_, RW> {
     // Sets the value at the given index.
     pub fn set_value<V: Value>(&mut self, index: u8, value: V) -> Result<(), PageError> {
         let cell_pointer = self.get_cell_pointer(index)?;
@@ -212,11 +212,11 @@ impl<'p> SlottedPage<'p, RW> {
                 if new_num_cells > num_cells {
                     self.set_num_cells(new_num_cells);
                 }
-                return self.set_cell_pointer(index, offset, length);
+                self.set_cell_pointer(index, offset, length)
             }
             None => match self.defragment(index, length)? {
-                true => return self.allocate_cell_pointer(index, length),
-                false => return Err(PageError::PageIsFull),
+                true => self.allocate_cell_pointer(index, length),
+                false => Err(PageError::PageIsFull),
             },
         }
     }

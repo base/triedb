@@ -10,7 +10,7 @@ const BATCH_SIZE: usize = 1_000;
 
 fn generate_random_address(rng: &mut StdRng) -> AddressPath {
     let addr = Address::random_with(rng);
-    AddressPath::for_address(Address::from(addr))
+    AddressPath::for_address(addr)
 }
 
 fn setup_database(size: usize) -> (TempDir, Database<MmapPageManager>) {

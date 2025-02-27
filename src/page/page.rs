@@ -30,7 +30,7 @@ pub struct Page<'p, P: PageKind> {
     _marker: std::marker::PhantomData<P>,
 }
 
-impl<'p, P: PageKind> Page<'p, P> {
+impl<P: PageKind> Page<'_, P> {
     pub fn page_id(&self) -> PageId {
         self.id
     }

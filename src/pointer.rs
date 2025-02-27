@@ -1,4 +1,3 @@
-use alloy_rlp::{encode, Decodable};
 use alloy_trie::nodes::RlpNode;
 
 use crate::{
@@ -68,7 +67,7 @@ impl From<Pointer> for [u8; 37] {
         let location: u32 = pointer.location().into();
         data[..4].copy_from_slice(&location.to_be_bytes());
         let rlp = pointer.rlp();
-        data[4..4 + rlp.len()].copy_from_slice(&rlp);
+        data[4..4 + rlp.len()].copy_from_slice(rlp);
         data
     }
 }
@@ -79,7 +78,7 @@ impl From<&Pointer> for [u8; 37] {
         let location: u32 = pointer.location().into();
         data[..4].copy_from_slice(&location.to_be_bytes());
         let rlp = pointer.rlp();
-        data[4..4 + rlp.len()].copy_from_slice(&rlp);
+        data[4..4 + rlp.len()].copy_from_slice(rlp);
         data
     }
 }

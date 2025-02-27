@@ -7,6 +7,12 @@ pub struct TransactionManager {
     open_txs: Vec<SnapshotId>,
 }
 
+impl Default for TransactionManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TransactionManager {
     pub fn new() -> Self {
         Self {
@@ -80,17 +86,17 @@ mod tests {
         assert_eq!(manager.begin_ro(2).unwrap(), 1);
         assert_eq!(manager.begin_ro(3).unwrap(), 1);
 
-        assert_eq!(manager.remove_transaction(1, true).unwrap(), ());
+        assert!(manager.remove_transaction(1, true).is_ok());
         assert_eq!(manager.begin_ro(4).unwrap(), 2);
         assert_eq!(manager.begin_rw(5).unwrap(), 2);
 
-        assert_eq!(manager.remove_transaction(2, false).unwrap(), ());
-        assert_eq!(manager.remove_transaction(3, false).unwrap(), ());
-        assert_eq!(manager.remove_transaction(4, false).unwrap(), ());
-        assert_eq!(manager.remove_transaction(5, true).unwrap(), ());
+        assert!(manager.remove_transaction(2, false).is_ok());
+        assert!(manager.remove_transaction(3, false).is_ok());
+        assert!(manager.remove_transaction(4, false).is_ok());
+        assert!(manager.remove_transaction(5, true).is_ok());
 
         assert_eq!(manager.begin_ro(6).unwrap(), 6);
-        assert_eq!(manager.remove_transaction(6, false).unwrap(), ());
+        assert!(manager.remove_transaction(6, false).is_ok());
     }
 
     #[test]
