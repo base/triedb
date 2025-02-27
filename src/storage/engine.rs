@@ -1202,7 +1202,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_set_storage_slot_with_no_account_panics() {
-        let (mut storage_engine, mut metadata) = create_test_engine(300, 256);
+        let (storage_engine, mut metadata) = create_test_engine(300, 256);
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
 
         let storage_key =
@@ -1221,7 +1221,7 @@ mod tests {
 
     #[test]
     fn test_set_get_account_storage_slots() {
-        let (mut storage_engine, mut metadata) = create_test_engine(300, 256);
+        let (storage_engine, mut metadata) = create_test_engine(300, 256);
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
@@ -1286,7 +1286,7 @@ mod tests {
 
     #[test]
     fn test_set_get_account_storage_roots() {
-        let (mut storage_engine, mut metadata) = create_test_engine(300, 256);
+        let (storage_engine, mut metadata) = create_test_engine(300, 256);
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
@@ -1360,7 +1360,7 @@ mod tests {
 
     #[test]
     fn test_set_get_many_accounts_storage_roots() {
-        let (mut storage_engine, mut metadata) = create_test_engine(2000, 256);
+        let (storage_engine, mut metadata) = create_test_engine(2000, 256);
 
         for i in 0..100 {
             let address =
@@ -1420,12 +1420,12 @@ mod tests {
             // Create paths with common prefixes but different endings
             let mut nibbles = [0u8; 64];
             // First 32 nibbles are the same
-            for j in 0..32 {
-                nibbles[j] = (j % 16) as u8;
+            for (j, nibble) in nibbles[0..32].iter_mut().enumerate() {
+                *nibble = (j % 16) as u8;
             }
             // Last 30 nibbles vary
-            for j in 32..64 {
-                nibbles[j] = ((i + j) % 16) as u8;
+            for (j, nibble) in nibbles[32..64].iter_mut().enumerate() {
+                *nibble = ((i + j) % 16) as u8;
             }
 
             nibbles[61] = (i % 16) as u8;
@@ -1445,8 +1445,8 @@ mod tests {
             nibbles[1] = ((i / 16) % 16) as u8;
             nibbles[2] = ((i / 256) % 16) as u8;
             // Fill the rest with a pattern
-            for j in 3..64 {
-                nibbles[j] = ((i * j) % 16) as u8;
+            for (j, nibble) in nibbles[3..64].iter_mut().enumerate() {
+                *nibble = ((i * j) % 16) as u8;
             }
 
             let path = AddressPath::new(Nibbles::from_nibbles(nibbles));
@@ -1460,13 +1460,13 @@ mod tests {
             // First half of paths share prefix, second half different
             if i < 50 {
                 nibbles[0] = 10; // Arbitrary value
-                for j in 1..62 {
-                    nibbles[j] = ((i + j) % 16) as u8;
+                for (j, nibble) in nibbles[1..62].iter_mut().enumerate() {
+                    *nibble = ((i + j) % 16) as u8;
                 }
             } else {
                 nibbles[0] = 11; // Different arbitrary value
-                for j in 1..62 {
-                    nibbles[j] = ((i + j) % 16) as u8;
+                for (j, nibble) in nibbles[1..62].iter_mut().enumerate() {
+                    *nibble = ((i + j) % 16) as u8;
                 }
             }
 
@@ -1551,8 +1551,8 @@ mod tests {
             let mut nibbles = [0u8; 64];
             // Create some completely new paths
             nibbles[0] = 15; // Different from previous patterns
-            for j in 1..62 {
-                nibbles[j] = ((i * j + 7) % 16) as u8; // Different pattern
+            for (j, nibble) in nibbles[1..62].iter_mut().enumerate() {
+                *nibble = ((i * j + 7) % 16) as u8; // Different pattern
             }
 
             nibbles[62] = (i % 16) as u8;
@@ -1608,11 +1608,11 @@ mod tests {
 
         // Generate a large number of random accounts
         let mut accounts = Vec::new();
-        for i in 0..3000 {
+        for _ in 0..3000 {
             let mut nibbles = [0u8; 64];
             // Generate random nibbles
-            for j in 0..64 {
-                nibbles[j] = rng.gen_range(0..16) as u8;
+            for nibble in &mut nibbles {
+                *nibble = rng.gen_range(0..16) as u8;
             }
 
             let path = AddressPath::new(Nibbles::from_nibbles(nibbles));
@@ -1684,10 +1684,9 @@ mod tests {
         let mut updates = Vec::new();
 
         // Prepare updates for some existing accounts
-        for i in 0..accounts.len() {
+        for (i, (path, _)) in accounts.iter().enumerate() {
             if i % 5 == 0 {
                 // Update every 5th account
-                let (path, _) = &accounts[i];
                 let new_balance = rng.gen_range(0..1_000_000);
                 let new_nonce = rng.gen_range(0..100);
                 let new_account = create_test_account(new_balance, new_nonce);
