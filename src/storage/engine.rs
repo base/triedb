@@ -624,11 +624,11 @@ impl<P: PageManager> StorageEngine<P> {
                 // our direct child was deleted. we need to remove our child pointer.
                 // After, removing our child pointer:
                 // 1. if we are an account leaf just return our location and update our hash
-                // 1. if we are a branch node with more than 1 child just return our location and update our hash
-                // 2. if we are a branch node with 1 child:
-                //      2a: if our child is a leaf, merge with our child creating a new leaf with our child_index prepended
+                // 2. if we are a branch node with more than 1 child just return our location and update our hash
+                // 3. if we are a branch node with 1 child:
+                //      3a: if our child is a leaf, merge with our child creating a new leaf with our child_index prepended
                 //          to the leaf's prefix
-                //      2b: if our child is a branch, become a single nibble prefixed extension node to our child branch
+                //      3b: if our child is a branch, become a single nibble prefixed extension node to our child branch
                 node.remove_child(child_index);
 
                 let children = node.enumerate_children();
