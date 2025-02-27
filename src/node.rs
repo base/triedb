@@ -80,11 +80,7 @@ impl<V: Value> Node<V> {
     }
 
     pub fn has_children(&self) -> bool {
-        match self {
-            Self::AccountLeaf { .. } => true,
-            Self::Branch { .. } => true,
-            _ => false,
-        }
+        matches!(self, Self::Branch { .. } | Self::AccountLeaf { .. })
     }
 
     pub fn is_branch(&self) -> bool {
@@ -224,12 +220,11 @@ impl<V: Value> Value for Node<V> {
             let storage_root_bytes = &bytes[prefix_length + 2..prefix_length + 2 + 37];
             let value = V::from_bytes(&bytes[prefix_length + 2 + 37..])?;
 
-            let storage_root: Option<Pointer>;
-            if storage_root_bytes == [0; 37] {
-                storage_root = None
+            let storage_root = if storage_root_bytes == [0; 37] {
+                None
             } else {
-                storage_root = Some(Pointer::from_bytes(storage_root_bytes)?)
-            }
+                Some(Pointer::from_bytes(storage_root_bytes)?)
+            };
 
             Ok(Self::AccountLeaf {
                 prefix,
