@@ -34,9 +34,8 @@ pub enum LeafType {
 
 impl<V: Value> Node<V> {
     pub fn new_leaf(prefix: Nibbles, value: V, leaf_type: LeafType) -> Self {
-        assert_eq!(
+        assert!(
             prefix.len() <= 64,
-            true,
             "account and storage leaf prefix's must be at most 64 nibbles"
         );
         match leaf_type {
@@ -94,7 +93,7 @@ impl<V: Value> Node<V> {
 
     pub fn enumerate_children(&self) -> Vec<(u8, &Pointer)> {
         match self {
-            Self::AccountLeaf { storage_root, .. } => vec![storage_root]
+            Self::AccountLeaf { storage_root, .. } => [storage_root]
                 .iter()
                 .enumerate()
                 .filter_map(|(i, child)| child.as_ref().map(|p| (i as u8, p)))
@@ -200,7 +199,7 @@ impl<V: Value> Value for Node<V> {
                     .sum::<u16>();
                 data[prefix_length + 2..prefix_length + 2 + 2]
                     .copy_from_slice(&children_bitmask.to_be_bytes());
-                for child in children.into_iter() {
+                for child in children.iter() {
                     if let Some(child) = child {
                         data.extend_from_slice(&child.to_bytes());
                     } else {
@@ -263,7 +262,7 @@ impl<V: Value + Encodable> Encodable for Node<V> {
     fn encode(&self, out: &mut dyn BufMut) {
         match self {
             Self::StorageLeaf { prefix, value } => {
-                let value_rlp = encode(&value);
+                let value_rlp = encode(value);
                 LeafNodeRef {
                     key: prefix,
                     value: &value_rlp,
@@ -275,7 +274,7 @@ impl<V: Value + Encodable> Encodable for Node<V> {
                 value,
                 storage_root,
             } => {
-                let value_rlp = encode(&value);
+                let value_rlp = encode(value);
                 LeafNodeRef {
                     key: prefix,
                     value: &value_rlp,

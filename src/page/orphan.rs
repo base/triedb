@@ -10,6 +10,12 @@ pub struct OrphanPageManager {
     num_orphan_pages_used: usize,
 }
 
+impl Default for OrphanPageManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OrphanPageManager {
     // Creates a new OrphanPageManager.
     pub fn new() -> Self {

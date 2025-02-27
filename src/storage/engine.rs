@@ -498,7 +498,7 @@ impl<P: PageManager> StorageEngine<P> {
         metadata: &mut Metadata,
         page: &mut SlottedPage<'_, RW>,
     ) -> Result<(), Error> {
-        while page.num_free_bytes() < PAGE_DATA_SIZE / 3 as usize {
+        while page.num_free_bytes() < PAGE_DATA_SIZE / 3_usize {
             let child_page = self.allocate_page(metadata)?;
             let mut child_slotted_page = SlottedPage::try_from(child_page)?;
 
@@ -785,7 +785,7 @@ impl From<PageError> for Error {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{address, b256, hex, keccak256, Address, StorageKey, U256};
-    use alloy_rlp::encode;
+
     use alloy_trie::{
         root::{storage_root_unhashed, storage_root_unsorted},
         EMPTY_ROOT_HASH, KECCAK_EMPTY,
@@ -1103,9 +1103,9 @@ mod tests {
         let storage_value =
             b256!("0x0000000000000000000000000000000000000000000000000000000062617365");
 
-        let storage_path = StoragePath::for_address_and_slot(address.clone(), storage_key);
+        let storage_path = StoragePath::for_address_and_slot(address, storage_key);
 
-        let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
+        let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
         storage_engine
             .set_storage(&mut metadata, storage_path, storage_value)
@@ -1152,14 +1152,14 @@ mod tests {
 
         // Insert storage slots and verify they don't exist before insertion
         for (storage_key, storage_value) in &test_cases {
-            let storage_path = StoragePath::for_address_and_slot(address.clone(), *storage_key);
+            let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
             let read_storage_slot = storage_engine
                 .get_storage(&metadata, storage_path.clone())
                 .unwrap();
             assert_eq!(read_storage_slot, None);
 
-            let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
+            let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             storage_engine
                 .set_storage(&mut metadata, storage_path, storage_value)
@@ -1170,9 +1170,9 @@ mod tests {
 
         // Verify all storage slots exist after insertion
         for (storage_key, storage_value) in &test_cases {
-            let storage_path = StoragePath::for_address_and_slot(address.clone(), *storage_key);
+            let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
             let read_storage_slot = storage_engine.get_storage(&metadata, storage_path).unwrap();
-            let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
+            let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
             assert_eq!(read_storage_slot, Some(storage_value));
         }
     }
@@ -1217,14 +1217,14 @@ mod tests {
 
         // Insert storage slots and verify they don't exist before insertion
         for (storage_key, storage_value) in &test_cases {
-            let storage_path = StoragePath::for_address_and_slot(address.clone(), *storage_key);
+            let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
             let read_storage_slot = storage_engine
                 .get_storage(&metadata, storage_path.clone())
                 .unwrap();
             assert_eq!(read_storage_slot, None);
 
-            let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
+            let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             storage_engine
                 .set_storage(&mut metadata, storage_path, storage_value)
@@ -1415,7 +1415,9 @@ mod tests {
             let mut slotted_page = SlottedPage::try_from(page_result.unwrap()).unwrap();
 
             // Try to split this page
-            if let Ok(_) = storage_engine.split_page::<AccountVec>(&mut metadata, &mut slotted_page)
+            if storage_engine
+                .split_page::<AccountVec>(&mut metadata, &mut slotted_page)
+                .is_ok()
             {
                 // If split succeeded, add the new pages to be processed
                 pages_to_split.push(page_id + 1); // New page created by split

@@ -1,4 +1,4 @@
-use alloy_primitives::{hex, StorageValue, B256, U256};
+use alloy_primitives::{StorageValue, B256, U256};
 use alloy_rlp::{BufMut, Encodable, RlpEncodable};
 use std::fmt::Debug;
 

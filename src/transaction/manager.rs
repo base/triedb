@@ -7,6 +7,12 @@ pub struct TransactionManager {
     open_txs: Vec<SnapshotId>,
 }
 
+impl Default for TransactionManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TransactionManager {
     pub fn new() -> Self {
         Self {
