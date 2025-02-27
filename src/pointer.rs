@@ -34,7 +34,7 @@ impl Pointer {
 }
 
 impl Value for Pointer {
-    fn to_bytes(self) -> Vec<u8> {
+    fn to_bytes(&self) -> Vec<u8> {
         let arr: [u8; 37] = self.into();
         arr.to_vec()
     }
@@ -64,6 +64,17 @@ impl Value for Pointer {
 
 impl From<Pointer> for [u8; 37] {
     fn from(pointer: Pointer) -> Self {
+        let mut data = [0; 37];
+        let location: u32 = pointer.location().into();
+        data[..4].copy_from_slice(&location.to_be_bytes());
+        let rlp = pointer.rlp();
+        data[4..4 + rlp.len()].copy_from_slice(&rlp);
+        data
+    }
+}
+
+impl From<&Pointer> for [u8; 37] {
+    fn from(pointer: &Pointer) -> Self {
         let mut data = [0; 37];
         let location: u32 = pointer.location().into();
         data[..4].copy_from_slice(&location.to_be_bytes());

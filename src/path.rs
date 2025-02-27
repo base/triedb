@@ -1,7 +1,7 @@
 use alloy_primitives::{keccak256, Address, StorageKey};
 use alloy_trie::Nibbles;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AddressPath {
     path: Nibbles,
 }
@@ -42,5 +42,13 @@ impl StoragePath {
             address: address_nibbles,
             slot: slot_nibbles,
         }
+    }
+
+    pub fn full_path(&self) -> Nibbles {
+        self.address.path.join(&self.slot)
+    }
+
+    pub fn get_slot(&self) -> Nibbles {
+        self.slot.clone()
     }
 }

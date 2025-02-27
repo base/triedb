@@ -70,9 +70,10 @@ impl Database<MmapPageManager> {
         // TODO: handle the case where the file already exists.
         let mut page_manager = MmapPageManager::open(file_path).map_err(Error::PageError)?;
         // allocate the first 256 pages for the root, orphans, and root subtrie
-        page_manager.resize(300).map_err(Error::PageError)?;
-        for _ in 0..256 {
-            let _page = page_manager.allocate(0).map_err(Error::PageError)?;
+        page_manager.resize(3_000_000).map_err(Error::PageError)?;
+        for i in 0..256 {
+            let page = page_manager.allocate(0).map_err(Error::PageError)?;
+            assert_eq!(page.page_id(), i);
         }
 
         let orphan_manager = OrphanPageManager::new();
@@ -175,7 +176,7 @@ impl<P: PageManager> Database<P> {
         Ok(())
     }
 
-    pub fn close(&self) -> Result<(), Error> {
+    pub fn close(&mut self) -> Result<(), Error> {
         let metadata = self.inner.metadata.read().unwrap();
         let context = TransactionContext::new(metadata.clone());
         let storage_engine = self.inner.storage_engine.read().unwrap();
@@ -285,10 +286,10 @@ mod tests {
         // will create a database with N pages (see 'create' for N).
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
-        let db = Database::create(file_path.as_str()).unwrap();
+        let mut db = Database::create(file_path.as_str()).unwrap();
         let create_size = db.size();
 
-        assert_eq!(create_size, 300);
+        assert_eq!(create_size, 3000000);
 
         // WHEN: the database is closed
         db.close().unwrap();
@@ -317,7 +318,7 @@ mod tests {
             let db = Database::create(file_path.as_str()).unwrap();
 
             let create_size = db.size();
-            assert_eq!(create_size, 300);
+            assert_eq!(create_size, 3_000_000);
         }
 
         // WHEN: the database is dropped from scope

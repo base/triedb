@@ -1,4 +1,4 @@
-use alloy_primitives::{hex, B256, U256};
+use alloy_primitives::{hex, StorageValue, B256, U256};
 use alloy_rlp::{BufMut, Encodable, RlpEncodable};
 use std::fmt::Debug;
 
@@ -85,8 +85,8 @@ impl<'a> Account for AccountSlice<'a> {
 }
 
 impl Value for AccountVec {
-    fn to_bytes(self) -> Vec<u8> {
-        self.data
+    fn to_bytes(&self) -> Vec<u8> {
+        self.data.clone()
     }
 
     fn from_bytes(bytes: &[u8]) -> value::Result<Self> {
@@ -110,6 +110,40 @@ impl<'a> ValueRef<'a> for AccountSlice<'a> {
     fn to_owned(self) -> Self::Owned {
         AccountVec {
             data: self.data.to_vec(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum TrieValue {
+    Storage(StorageValue),
+    Account(AccountVec),
+}
+
+impl Value for TrieValue {
+    fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            Self::Storage(storage_value) => storage_value.to_be_bytes::<32>().to_vec(),
+            Self::Account(account_vec) => account_vec.to_bytes(),
+        }
+    }
+
+    fn from_bytes(bytes: &[u8]) -> value::Result<Self> {
+        if bytes.len() == 32 {
+            return Ok(Self::Storage(StorageValue::from_be_bytes::<32>(
+                bytes.try_into().expect("storage value should be 32 bytes"),
+            )));
+        }
+
+        Ok(Self::Account(AccountVec::from_bytes(bytes)?))
+    }
+}
+
+impl Encodable for TrieValue {
+    fn encode(&self, out: &mut dyn BufMut) {
+        match self {
+            Self::Storage(storage_value) => storage_value.encode(out),
+            Self::Account(account_vec) => account_vec.encode(out),
         }
     }
 }
