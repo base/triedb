@@ -14,7 +14,6 @@ use crate::{
 use alloy_primitives::B256;
 use alloy_rlp::Encodable;
 use alloy_trie::{nodes::RlpNode, Nibbles, EMPTY_ROOT_HASH};
-use log::{debug, trace};
 use std::cmp::max;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -143,8 +142,6 @@ impl<P: PageManager> StorageEngine<P> {
         let page = self.get_page(metadata, metadata.root_subtrie_page_id)?;
         let slotted_page = SlottedPage::try_from(page)?;
 
-        debug!("get_account(): {:?}", address_path);
-
         self.get_account_from_page::<A>(metadata, address_path.into(), slotted_page, 0)
     }
 
@@ -165,21 +162,14 @@ impl<P: PageManager> StorageEngine<P> {
         slotted_page: SlottedPage<'_, RO>,
         page_index: u8,
     ) -> Result<Option<V>, Error> {
-        trace!("get_account_from_page(): {:?} {:?}", path, page_index);
-
         let node: Node<V> = slotted_page.get_value(page_index)?;
-        trace!("node.prefix(): {:?}", node.prefix());
 
         let common_prefix_length = path.common_prefix_length(node.prefix());
-        let common_prefix = path.slice(0..common_prefix_length);
-        trace!("common_prefix: {:?}", common_prefix);
         if common_prefix_length < node.prefix().len() {
             return Ok(None);
         }
 
         let remaining_path = path.slice(common_prefix_length..);
-
-        trace!("remaining_path: {:?}", remaining_path);
         if remaining_path.is_empty() {
             return Ok(Some(node.to_value()));
         }
@@ -248,8 +238,6 @@ impl<P: PageManager> StorageEngine<P> {
         }
 
         let account = account.unwrap();
-        trace!("set_account(): {:?}", address_path);
-
         let root_subtrie_page_id = metadata.root_subtrie_page_id;
         let pointer = self.set_value_in_page(
             metadata,
@@ -1885,12 +1873,12 @@ mod tests {
             let mut nibbles = [0u8; 64];
             // Generate random nibbles
             for j in 0..64 {
-                nibbles[j] = rng.random_range(0..16) as u8;
+                nibbles[j] = rng.gen_range(0..16) as u8;
             }
 
             let path = AddressPath::new(Nibbles::from_nibbles(nibbles));
-            let balance = rng.random_range(0..1_000_000);
-            let nonce = rng.random_range(0..100);
+            let balance = rng.gen_range(0..1_000_000);
+            let nonce = rng.gen_range(0..100);
             let account = create_test_account(balance, nonce);
             accounts.push((path, account));
         }
@@ -1961,8 +1949,8 @@ mod tests {
             if i % 5 == 0 {
                 // Update every 5th account
                 let (path, _) = &accounts[i];
-                let new_balance = rng.random_range(0..1_000_000);
-                let new_nonce = rng.random_range(0..100);
+                let new_balance = rng.gen_range(0..1_000_000);
+                let new_nonce = rng.gen_range(0..100);
                 let new_account = create_test_account(new_balance, new_nonce);
 
                 updates.push((i, path.clone(), new_account));
