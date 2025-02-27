@@ -725,7 +725,8 @@ impl<P: PageManager> StorageEngine<P> {
                 if child_slotted_page.num_free_bytes() < 300 {
                     self.split_page::<V>(metadata, &mut child_slotted_page)?;
                     // Note: we are not returning Error::PageSplit here because
-                    // we are not splitting our own page.
+                    // we are not splitting the page we are currently traversing,
+                    // we are splitting on the **child** page.
                 }
 
                 // delete ourself from disk
@@ -963,17 +964,15 @@ impl<P: PageManager> StorageEngine<P> {
         let page = self.get_page(metadata, page_id)?;
         let slotted_page = SlottedPage::try_from(page)?;
 
-        let mut orphaned_page_ids = HashSet::new();
+        let mut orphaned_page_ids = Vec::new();
         self.orphan_subtrie_helper::<V>(metadata, &slotted_page, 0, &mut orphaned_page_ids)?;
 
         {
-            let mut inner = self.inner.write().unwrap();
-
-            for orphan_page_id in &orphaned_page_ids {
-                inner
-                    .orphan_manager
-                    .add_orphaned_page_id(metadata.snapshot_id, slotted_page.page_id())
-            }
+            self.inner
+                .write()
+                .unwrap()
+                .orphan_manager
+                .add_orphaned_page_ids(metadata.snapshot_id, orphaned_page_ids)
         }
 
         Ok(())
@@ -984,7 +983,7 @@ impl<P: PageManager> StorageEngine<P> {
         metadata: &Metadata,
         slotted_page: &SlottedPage<'_, RO>,
         cell_index: u8,
-        orphan_page_ids: &mut HashSet<PageId>,
+        orphan_page_ids: &mut Vec<PageId>,
     ) -> Result<(), Error> {
         let node: Node<V> = slotted_page.get_value(cell_index)?;
 
@@ -1019,7 +1018,7 @@ impl<P: PageManager> StorageEngine<P> {
         }
 
         if cell_index == 0 {
-            orphan_page_ids.insert(slotted_page.page_id());
+            orphan_page_ids.push(slotted_page.page_id());
         }
 
         Ok(())
