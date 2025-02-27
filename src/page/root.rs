@@ -603,12 +603,12 @@ mod tests {
 
         let page_256 = page_manager.get(42, 256 as PageId).unwrap();
         let page_256_contents = page_256.contents();
-        for i in 0..my_orphan_page_ids_for_page_256.len() {
+        for (i, expected_orphan_page_id) in my_orphan_page_ids_for_page_256.iter().enumerate() {
             let start = i * 4;
             let end = start + 4;
             let orphan_page_id =
                 PageId::from_le_bytes(page_256_contents[start..end].try_into().unwrap());
-            assert_eq!(orphan_page_id, my_orphan_page_ids_for_page_256[i])
+            assert_eq!(orphan_page_id, *expected_orphan_page_id)
         }
     }
 

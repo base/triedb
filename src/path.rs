@@ -1,7 +1,8 @@
 use alloy_primitives::{keccak256, Address, StorageKey};
 use alloy_trie::Nibbles;
+use proptest_derive::Arbitrary;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Arbitrary)]
 pub struct AddressPath {
     path: Nibbles,
 }
@@ -27,7 +28,7 @@ impl From<AddressPath> for Nibbles {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Arbitrary)]
 pub struct StoragePath {
     address: AddressPath,
     slot: Nibbles,
