@@ -125,7 +125,7 @@ impl<'p, P: PageKind, V: Value> SlottedStorage<'p, V> for SlottedPage<'p, P> {
     type Error = PageError;
 
     fn get_value(&self, index: u8) -> Result<V, Self::Error> {
-        self.get_value(index)
+        SlottedPage::get_value(self, index)
     }
 }
 
