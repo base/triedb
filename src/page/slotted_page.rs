@@ -52,7 +52,7 @@ impl<P: PageKind> SlottedPage<'_, P> {
         let start_index = (PAGE_DATA_SIZE as u16 - offset) as usize;
         let data = &self.page.contents()[start_index..start_index + length as usize];
 
-        V::from_bytes(data).map_err(|_| PageError::InvalidValue)
+        Ok(V::from_bytes(data).unwrap())
     }
 
     pub fn num_free_bytes(&self) -> usize {

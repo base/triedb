@@ -5,13 +5,16 @@ use std::{fmt::Debug, sync::RwLockReadGuard};
 use crate::{
     account::Account,
     database::{Database, TransactionContext},
+    node::TrieValue,
     page::PageManager,
     path::{AddressPath, StoragePath},
     storage::engine::StorageEngine,
 };
 use alloy_primitives::StorageValue;
+use alloy_trie::Nibbles;
 pub use manager::TransactionManager;
 use sealed::sealed;
+use std::collections::HashMap;
 
 #[sealed]
 pub trait TransactionKind: Debug {}
@@ -33,6 +36,7 @@ pub struct Transaction<'tx, K: TransactionKind, P: PageManager> {
     committed: bool,
     context: TransactionContext,
     database: &'tx Database<P>,
+    pending_changes: HashMap<Nibbles, Option<TrieValue>>,
     _lock: Option<RwLockReadGuard<'tx, StorageEngine<P>>>,
     _marker: std::marker::PhantomData<K>,
 }
@@ -41,13 +45,14 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
     pub(crate) fn new(
         context: TransactionContext,
         database: &'tx Database<P>,
-        _lock: Option<RwLockReadGuard<'tx, StorageEngine<P>>>,
+        lock: Option<RwLockReadGuard<'tx, StorageEngine<P>>>,
     ) -> Self {
         Self {
             committed: false,
             context,
             database,
-            _lock,
+            pending_changes: HashMap::new(),
+            _lock: lock,
             _marker: std::marker::PhantomData,
         }
     }
@@ -78,13 +83,8 @@ impl<P: PageManager> Transaction<'_, RW, P> {
         address_path: AddressPath,
         account: Option<Account>,
     ) -> Result<(), ()> {
-        let storage_engine = self.database.inner.storage_engine.read().unwrap();
-        storage_engine
-            .set_account(&mut self.context, address_path, account)
-            .unwrap();
-
-        self.database.update_metrics_rw(&self.context);
-
+        self.pending_changes
+            .insert(address_path.into(), account.map(TrieValue::Account));
         Ok(())
     }
 
@@ -93,19 +93,29 @@ impl<P: PageManager> Transaction<'_, RW, P> {
         storage_path: StoragePath,
         value: Option<StorageValue>,
     ) -> Result<(), ()> {
-        let storage_engine = self.database.inner.storage_engine.read().unwrap();
-        storage_engine
-            .set_storage(&mut self.context, storage_path, value)
-            .unwrap();
+        self.pending_changes
+            .insert(storage_path.full_path(), value.map(TrieValue::Storage));
         Ok(())
     }
 
     pub fn commit(mut self) -> Result<(), ()> {
+        let storage_engine = self.database.inner.storage_engine.read().unwrap();
+        let changes: Vec<(Nibbles, Option<TrieValue>)> = self.pending_changes.drain().collect();
+        if !changes.is_empty() {
+            storage_engine
+                .set_values(&mut self.context, changes)
+                .unwrap();
+        }
+
         let mut transaction_manager = self.database.inner.transaction_manager.write().unwrap();
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
         storage_engine.commit(&self.context).unwrap();
+
         let mut metadata = self.database.inner.metadata.write().unwrap();
         *metadata = self.context.metadata.clone();
+
+        self.database.update_metrics_rw(&self.context);
+
         transaction_manager.remove_transaction(self.context.metadata.snapshot_id, true)?;
 
         self.committed = true;
