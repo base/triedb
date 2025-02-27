@@ -65,7 +65,7 @@ impl<P: PageManager> StorageEngine<P> {
     // Allocates a new page from the underlying page manager.
     // If there is an orphaned page available as of the given snapshot id,
     // it is used to allocate a new page instead.
-    fn allocate_page<'p>(&self, metadata: &Metadata) -> Result<Page<'p, RW>, Error> {
+    fn allocate_page<'p>(&self, metadata: &mut Metadata) -> Result<Page<'p, RW>, Error> {
         let mut inner = self.inner.write().unwrap();
 
         if inner.is_closed() {
@@ -79,7 +79,7 @@ impl<P: PageManager> StorageEngine<P> {
     // The original page is marked as orphaned and a new page is allocated, potentially from an orphaned page.
     fn get_mut_clone<'p>(
         &self,
-        metadata: &Metadata,
+        metadata: &mut Metadata,
         page_id: PageId,
     ) -> Result<Page<'p, RW>, Error> {
         let mut inner = self.inner.write().unwrap();
@@ -1113,8 +1113,8 @@ impl<P: PageManager> StorageEngine<P> {
             .get(metadata.snapshot_id, metadata.root_page_id)?;
         let root_page = RootPage::try_from(underlying_root_page).map_err(Error::PageError)?;
 
-        // there will always be a minimum of 2 root pages
-        let max_page_count = max(root_page.max_page_number(), 2);
+        // there will always be a minimum of 256 pages (root pages + reserved orphan pages).
+        let max_page_count = max(metadata.max_page_number, 256);
         // resize the page manager so that we only store the exact amount of pages we need.
         inner.resize(max_page_count)?;
         // commit all outstanding data to disk.
@@ -1149,19 +1149,24 @@ impl<P: PageManager> Inner<P> {
         matches!(self.status, Status::Closed)
     }
 
-    fn allocate_page<'p>(&mut self, metadata: &Metadata) -> Result<Page<'p, RW>, Error> {
+    fn allocate_page<'p>(&mut self, metadata: &mut Metadata) -> Result<Page<'p, RW>, Error> {
         let snapshot_id = metadata.snapshot_id;
         let orphaned_page_id = self.orphan_manager.get_orphaned_page_id();
+        let page_to_return: Page<'p, RW>;
         if let Some(orphaned_page_id) = orphaned_page_id {
             let mut page = self.page_manager.get_mut(snapshot_id, orphaned_page_id)?;
             page.set_snapshot_id(snapshot_id);
             page.contents_mut().fill(0);
-            Ok(page)
+            page_to_return = page;
         } else {
-            self.page_manager
+            page_to_return = self
+                .page_manager
                 .allocate(snapshot_id)
-                .map_err(|e| e.into())
+                .map_err(|e| Error::from(e))?;
         }
+
+        metadata.max_page_number = max(metadata.max_page_number, page_to_return.page_id());
+        Ok(page_to_return)
     }
 
     fn resize(&mut self, new_page_count: PageId) -> Result<(), Error> {
@@ -1178,7 +1183,8 @@ impl<P: PageManager> Inner<P> {
             .get_mut(metadata.snapshot_id, metadata.root_page_id)
             .unwrap();
         // TODO: include the remaining metadata in the new root page.
-        let mut new_root_page = RootPage::new(page_mut, metadata.state_root);
+        let mut new_root_page =
+            RootPage::new(page_mut, metadata.state_root, metadata.max_page_number);
         let orphaned_page_ids = self.orphan_manager.iter().copied().collect::<Vec<PageId>>();
         let num_orphan_pages_used = self.orphan_manager.get_num_orphan_pages_used();
         self.orphan_manager.reset_num_orphan_pages_used();
@@ -1234,6 +1240,7 @@ mod tests {
         let metadata = Metadata {
             snapshot_id: 1,
             root_page_id: 0,
+            max_page_number: root_subtrie_page_id,
             root_subtrie_page_id,
             state_root: EMPTY_ROOT_HASH,
         };
@@ -1254,7 +1261,7 @@ mod tests {
         let (storage_engine, mut metadata) = create_test_engine(10, 1);
 
         // Initial allocation
-        let mut page = storage_engine.allocate_page(&metadata).unwrap();
+        let mut page = storage_engine.allocate_page(&mut metadata).unwrap();
         assert_eq!(page.page_id(), 2);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 1);
@@ -1271,14 +1278,14 @@ mod tests {
         assert_eq!(page.snapshot_id(), 1);
 
         // cloning a page should allocate a new page and orphan the original page
-        let cloned_page = storage_engine.get_mut_clone(&metadata, 2).unwrap();
+        let cloned_page = storage_engine.get_mut_clone(&mut metadata, 2).unwrap();
         assert_eq!(cloned_page.page_id(), 3);
         assert_eq!(cloned_page.contents()[0], 123);
         assert_eq!(cloned_page.snapshot_id(), 2);
         assert_ne!(cloned_page.page_id(), page.page_id());
 
         // the next allocation should not come from the orphaned page, as the snapshot id is the same as when the page was orphaned
-        let page = storage_engine.allocate_page(&metadata).unwrap();
+        let page = storage_engine.allocate_page(&mut metadata).unwrap();
         assert_eq!(page.page_id(), 4);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 2);
@@ -1287,7 +1294,7 @@ mod tests {
         metadata = metadata.next();
 
         // the next allocation should not come from the orphaned page, as the snapshot has not been unlocked yet
-        let page = storage_engine.allocate_page(&metadata).unwrap();
+        let page = storage_engine.allocate_page(&mut metadata).unwrap();
         assert_eq!(page.page_id(), 5);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 3);
@@ -1296,7 +1303,7 @@ mod tests {
 
         // the next allocation should come from the orphaned page because the snapshot id has increased.
         // The page data should be zeroed out.
-        let page = storage_engine.allocate_page(&metadata).unwrap();
+        let page = storage_engine.allocate_page(&mut metadata).unwrap();
         assert_eq!(page.page_id(), 2);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 3);
@@ -2658,11 +2665,11 @@ mod tests {
         let mut slotted_page1 = SlottedPage::try_from(page1).unwrap();
 
         // page2 will hold our 1st child
-        let page2 = storage_engine.allocate_page(&metadata).unwrap();
+        let page2 = storage_engine.allocate_page(&mut metadata).unwrap();
         let mut slotted_page2 = SlottedPage::try_from(page2).unwrap();
 
         // page3 will hold our 2nd child
-        let page3 = storage_engine.allocate_page(&metadata).unwrap();
+        let page3 = storage_engine.allocate_page(&mut metadata).unwrap();
         let mut slotted_page3 = SlottedPage::try_from(page3).unwrap();
 
         // we will force add 2 children to this branch node
@@ -2771,11 +2778,11 @@ mod tests {
         let test_account = create_test_account(424, 234);
 
         // page2 will hold our 1st child
-        let page2 = storage_engine.allocate_page(&metadata).unwrap();
+        let page2 = storage_engine.allocate_page(&mut metadata).unwrap();
         let mut slotted_page2 = SlottedPage::try_from(page2).unwrap();
 
         // page3 will hold our 2nd child
-        let page3 = storage_engine.allocate_page(&metadata).unwrap();
+        let page3 = storage_engine.allocate_page(&mut metadata).unwrap();
         let mut slotted_page3 = SlottedPage::try_from(page3).unwrap();
 
         // we will force add 2 children to our root node

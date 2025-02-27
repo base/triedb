@@ -32,6 +32,7 @@ pub(crate) struct Inner<P: PageManager> {
 pub(crate) struct Metadata {
     pub(crate) root_page_id: PageId,
     pub(crate) root_subtrie_page_id: PageId,
+    pub(crate) max_page_number: PageId,
     pub(crate) snapshot_id: SnapshotId,
     pub(crate) state_root: B256,
 }
@@ -41,6 +42,7 @@ impl Metadata {
         Self {
             snapshot_id: self.snapshot_id + 1,
             root_page_id: (self.root_page_id + 1) % 2,
+            max_page_number: self.max_page_number,
             root_subtrie_page_id: self.root_subtrie_page_id,
             state_root: self.state_root,
         }
@@ -73,6 +75,7 @@ impl Database<MmapPageManager> {
         let metadata = Metadata {
             snapshot_id: 0,
             root_page_id: 0,
+            max_page_number: 256,
             root_subtrie_page_id: 256,
             state_root: EMPTY_ROOT_HASH,
         };
@@ -181,6 +184,7 @@ impl<'p, P: PageKind> From<RootPage<'p, P>> for Metadata {
         Self {
             root_page_id: root_page.page_id(),
             root_subtrie_page_id: root_page.root_subtrie_page_id(),
+            max_page_number: root_page.max_page_number(),
             snapshot_id: root_page.snapshot_id(),
             state_root: root_page.state_root(),
         }
