@@ -31,7 +31,6 @@ impl TransactionKind for RO {}
 #[derive(Debug)]
 pub struct Transaction<'tx, K: TransactionKind, P: PageManager> {
     committed: bool,
-    // metadata: Metadata,
     context: TransactionContext,
     database: &'tx Database<P>,
     lock: Option<RwLockReadGuard<'tx, StorageEngine<P>>>,
