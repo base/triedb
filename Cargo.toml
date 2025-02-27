@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-alloy-primitives = { version = "0.8.19", features = ["rand"] }
+alloy-primitives = { version = "0.8.21", features = ["rand"] }
 alloy-rlp = "0.3.11"
 alloy-trie = { version = "0.7.6", features=[ "ethereum" ]}
 log = "0.4.25"

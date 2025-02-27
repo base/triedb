@@ -621,7 +621,7 @@ impl<P: PageManager> StorageEngine<P> {
     }
 
     pub fn set_storage(
-        &mut self,
+        &self,
         metadata: &mut Metadata,
         storage_path: StoragePath,
         value: StorageValue,
@@ -785,11 +785,11 @@ impl From<PageError> for Error {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{address, b256, hex, keccak256, Address, StorageKey, U256};
-
     use alloy_trie::{
         root::{storage_root_unhashed, storage_root_unsorted},
         EMPTY_ROOT_HASH, KECCAK_EMPTY,
     };
+    use rand::{rngs::StdRng, seq::SliceRandom, Rng, RngCore, SeedableRng};
 
     use super::*;
     use crate::{account::AccountVec, page::MmapPageManager};
@@ -808,6 +808,10 @@ mod tests {
         };
         let storage_engine = StorageEngine::new(manager, orphan_manager);
         (storage_engine, metadata)
+    }
+
+    fn random_test_account(rng: &mut StdRng) -> AccountVec {
+        create_test_account(rng.next_u64(), rng.next_u64())
     }
 
     fn create_test_account(balance: u64, nonce: u64) -> AccountVec {
@@ -1000,6 +1004,108 @@ mod tests {
             metadata.state_root,
             b256!("0x6f78ee01791dd8a62b4e2e86fae3d7957df9fa7f7a717ae537f90bb0c79df296")
         );
+    }
+
+    #[test]
+    fn test_trie_state_root_order_independence() {
+        let mut rng = StdRng::seed_from_u64(1);
+
+        // create 100 accounts with random addresses, balances, and storage values
+        let mut accounts = Vec::new();
+        for _ in 0..100 {
+            let address = Address::random_with(&mut rng);
+            let account = random_test_account(&mut rng);
+            let mut storage = Vec::new();
+            if rng.next_u64() % 10 == 0 {
+                for _ in 0..rng.gen_range(1..25) {
+                    let slot = StorageKey::random_with(&mut rng);
+                    storage.push((slot, StorageValue::from(rng.next_u64())));
+                }
+            }
+            accounts.push((address, account, storage));
+        }
+
+        let (storage_engine, mut metadata) = create_test_engine(350, 256);
+
+        // insert accounts and storage in random order
+        accounts.shuffle(&mut rng);
+        for (address, account, mut storage) in accounts.clone() {
+            storage_engine
+                .set_account(
+                    &mut metadata,
+                    AddressPath::for_address(address),
+                    Some(account),
+                )
+                .unwrap();
+            storage.shuffle(&mut rng);
+            for (slot, value) in storage {
+                storage_engine
+                    .set_storage(
+                        &mut metadata,
+                        StoragePath::for_address_and_slot(address, slot),
+                        value,
+                    )
+                    .unwrap();
+            }
+        }
+
+        // commit the changes
+        storage_engine.commit(&metadata).unwrap();
+
+        let state_root = metadata.state_root;
+
+        let (storage_engine, mut metadata) = create_test_engine(350, 256);
+
+        // insert accounts in a different random order, but only after inserting different values first
+        accounts.shuffle(&mut rng);
+        for (address, _, mut storage) in accounts.clone() {
+            storage_engine
+                .set_account(
+                    &mut metadata,
+                    AddressPath::for_address(address),
+                    Some(random_test_account(&mut rng)),
+                )
+                .unwrap();
+
+            storage.shuffle(&mut rng);
+            for (slot, _) in storage {
+                storage_engine
+                    .set_storage(
+                        &mut metadata,
+                        StoragePath::for_address_and_slot(address, slot),
+                        StorageValue::from(rng.next_u64()),
+                    )
+                    .unwrap();
+            }
+        }
+
+        accounts.shuffle(&mut rng);
+        for (address, account, mut storage) in accounts {
+            storage_engine
+                .set_account(
+                    &mut metadata,
+                    AddressPath::for_address(address),
+                    Some(account),
+                )
+                .unwrap();
+
+            storage.shuffle(&mut rng);
+            for (slot, value) in storage {
+                storage_engine
+                    .set_storage(
+                        &mut metadata,
+                        StoragePath::for_address_and_slot(address, slot),
+                        value,
+                    )
+                    .unwrap();
+            }
+        }
+
+        // commit the changes
+        storage_engine.commit(&metadata).unwrap();
+
+        // verify the state root is the same
+        assert_eq!(state_root, metadata.state_root);
     }
 
     #[test]
