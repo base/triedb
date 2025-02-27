@@ -261,7 +261,7 @@ mod tests {
         // max_page_size + buffer
         let open_size = db.size();
 
-        let max_page_size = 0; // fresh db
+        let max_page_size = 256; // fresh db has root pages + reserved orphan pages
         assert_eq!(open_size, max_page_size + 20);
 
         // cleanup
@@ -286,7 +286,7 @@ mod tests {
 
         // THEN: the size of the database should be the
         // max_page_size
-        let max_page_size = 2; // fresh db so at least 2 pages for the root pages
+        let max_page_size = 256; // fresh db so at least 256 pages for the root pages + orphan pages
         let file = File::options().read(true).open(file_path.as_str()).unwrap();
         let file_len = file.metadata().unwrap().len();
         assert_eq!(file_len, max_page_size * 4096);
@@ -313,7 +313,7 @@ mod tests {
 
         // WHEN: the database is dropped from scope
         // THEN: the database should be closed and the file should be truncated
-        let max_page_size = 2; // fresh db so at least 2 pages for the root pages
+        let max_page_size = 256; // fresh db so at least 256 pages for the root pages + orphan pages
         let file = File::options().read(true).open(file_path.as_str()).unwrap();
         let file_len = file.metadata().unwrap().len();
         assert_eq!(file_len, max_page_size * 4096);
