@@ -176,9 +176,8 @@ impl<P: PageManager> Database<P> {
     }
 
     pub fn close(&self) -> Result<(), Error> {
-        // TODO: is it safe to clone the metadata here?
-        let metadata = self.inner.metadata.read().unwrap().clone();
-        let context = TransactionContext::new(metadata);
+        let metadata = self.inner.metadata.read().unwrap();
+        let context = TransactionContext::new(metadata.clone());
         let storage_engine = self.inner.storage_engine.read().unwrap();
         storage_engine.close(&context).map_err(Error::CloseError)?;
         Ok(())
