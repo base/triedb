@@ -499,7 +499,7 @@ impl<P: PageManager> StorageEngine<P> {
         );
         match result {
             // This case means the root node was deleted so return a pointer to the cloned page
-            // with the empty Hash
+            // with an empty RlpNode
             Ok(None) => Ok(Some(Pointer::new(
                 Location::from(new_slotted_page.page_id()),
                 RlpNode::default(),
