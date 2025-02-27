@@ -1307,6 +1307,9 @@ mod tests {
         assert_eq!(page.page_id(), 2);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 3);
+
+        // assert that the metadata tracks the largest page number
+        assert_eq!(metadata.max_page_number, 5);
     }
 
     #[test]
