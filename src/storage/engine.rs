@@ -495,15 +495,6 @@ impl<P: PageManager> StorageEngine<P> {
             Ok(pointer) => Ok(pointer),
             // No deletion occurred because the value didn't exist
             Err(Error::InvalidPath) => Ok(None),
-            // In the case of a page split, re-attempt the operation from scratch. This ensures that a page will be
-            // consistently evaluated, and not modified in the middle of an operation, which could result in
-            // inconsistent cell pointers.
-            Err(Error::PageSplit) => self.delete_value_in_cloned_page::<V>(
-                metadata,
-                path,
-                &mut new_slotted_page,
-                page_index,
-            ),
             Err(Error::PageError(PageError::PageIsFull)) => {
                 panic!("Page is full!");
             }
@@ -701,17 +692,17 @@ impl<P: PageManager> StorageEngine<P> {
                         .cell_index()
                         .expect("cell index should exist");
                     slotted_page.delete_value(child_cell_index)?;
+                    slotted_page.delete_value(page_index)?;
 
-                    // ensure that the page has enough space (300 bytes) to overwrite.
-                    // TODO: use a more accurate threshold
-                    if slotted_page.num_free_bytes() < 300 {
-                        self.split_page::<V>(metadata, slotted_page)?;
-                        return Err(Error::PageSplit);
+                    let only_child_node_index = slotted_page.insert_value(only_child_node)?;
+                    if page_index == 0 {
+                        // adding this just for sanity checks. if we are the root of the page,
+                        // we must insert the new node at index 0
+                        assert_eq!(only_child_node_index, page_index);
                     }
 
-                    slotted_page.set_value(page_index, only_child_node)?;
                     return Ok(Some(Pointer::new(
-                        self.node_location(slotted_page.page_id(), page_index),
+                        self.node_location(slotted_page.page_id(), only_child_node_index),
                         rlp_node,
                     )));
                 }
@@ -735,7 +726,8 @@ impl<P: PageManager> StorageEngine<P> {
                 // TODO: use a more accurate threshold
                 if child_slotted_page.num_free_bytes() < 300 {
                     self.split_page::<V>(metadata, &mut child_slotted_page)?;
-                    return Err(Error::PageSplit);
+                    // Note: we are not returning Error::PageSplit here because
+                    // we are not splitting our own page.
                 }
 
                 child_slotted_page.set_value(0, only_child_node)?;
