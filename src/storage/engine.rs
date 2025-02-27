@@ -763,7 +763,7 @@ impl<P: PageManager> StorageEngine<P> {
     ) -> Result<Pointer, Error> {
         // We are at an AccountLeaf and our storage just changed. Let's update our storage root.
         let value = node.value().expect("must be account leaf");
-        let account: AccountVec = AccountVec::from_bytes(value.to_bytes().as_slice())
+        let account: AccountVec = AccountVec::from_bytes(value.serialize().unwrap().as_slice())
             .expect("valid account vector encoding");
         let updated_account = AccountVec::new(
             account.balance(),

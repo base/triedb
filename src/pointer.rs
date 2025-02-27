@@ -38,9 +38,18 @@ impl Pointer {
 }
 
 impl Value for Pointer {
-    fn to_bytes(&self) -> Vec<u8> {
+    fn size(&self) -> usize {
+        37 // Fixed size: 4 bytes location + 33 bytes max RLP
+    }
+
+    fn serialize_into(&self, buf: &mut [u8]) -> value::Result<usize> {
+        if buf.len() < 37 {
+            return Err(value::Error::InvalidEncoding);
+        }
+
         let arr: [u8; 37] = self.into();
-        arr.to_vec()
+        buf[..37].copy_from_slice(&arr);
+        Ok(37)
     }
 
     fn from_bytes(bytes: &[u8]) -> value::Result<Self> {
@@ -115,28 +124,28 @@ mod tests {
     fn test_pointer_to_bytes() {
         let rlp_hash = RlpNode::word_rlp(&EMPTY_ROOT_HASH);
         let pointer = Pointer::new(Location::for_cell(1), rlp_hash);
-        let bytes = pointer.to_bytes();
+        let bytes = pointer.serialize().unwrap();
         let mut expected = vec![0, 0, 0, 1, 160];
         expected.extend(EMPTY_ROOT_HASH);
         assert_eq!(bytes, expected);
 
         let short_rlp = RlpNode::from_rlp(&encode(42u64));
         let pointer = Pointer::new(Location::for_cell(1), short_rlp);
-        let bytes = pointer.to_bytes();
+        let bytes = pointer.serialize().unwrap();
         let mut expected = vec![0, 0, 0, 1, 42];
         expected.extend([0; 32]);
         assert_eq!(bytes, expected);
 
         let zero_rlp = RlpNode::from_rlp(&encode(0u64));
         let pointer = Pointer::new(Location::for_cell(1), zero_rlp);
-        let bytes = pointer.to_bytes();
+        let bytes = pointer.serialize().unwrap();
         let mut expected = vec![0, 0, 0, 1, 128];
         expected.extend([0; 32]);
         assert_eq!(bytes, expected);
 
         let short_string_rlp = RlpNode::from_rlp(&encode("hello world"));
         let pointer = Pointer::new(Location::for_cell(1), short_string_rlp);
-        let bytes = pointer.to_bytes();
+        let bytes = pointer.serialize().unwrap();
         let mut expected = vec![0, 0, 0, 1, 139];
         expected.extend(b"hello world");
         expected.extend([0; 21]);
@@ -174,7 +183,7 @@ mod tests {
     proptest! {
         #[test]
         fn fuzz_pointer_to_from_bytes(pointer: Pointer) {
-            let bytes = pointer.clone().to_bytes();
+            let bytes = pointer.serialize().unwrap();
             let decoded = Pointer::from_bytes(&bytes).unwrap();
             assert_eq!(pointer, decoded);
         }
