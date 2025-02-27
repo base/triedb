@@ -193,7 +193,7 @@ mod tests {
     use std::fs::File;
     use tempdir::TempDir;
 
-    use crate::{account::AccountVec, path::AddressPath};
+    use crate::{account::AccountVec, path::Path};
 
     use super::*;
 
@@ -207,32 +207,28 @@ mod tests {
 
         let account1 = AccountVec::new(U256::from(100), 1, B256::ZERO, B256::ZERO);
         let mut tx = db.begin_rw().unwrap();
-        tx.set_account(AddressPath::for_address(address), Some(account1.clone()))
+        tx.set_account(&Path::for_address(address), Some(account1.clone()))
             .unwrap();
 
         tx.commit().unwrap();
 
         let account2 = AccountVec::new(U256::from(123), 456, B256::ZERO, B256::ZERO);
         let mut tx = db.begin_rw().unwrap();
-        tx.set_account(AddressPath::for_address(address), Some(account2.clone()))
+        tx.set_account(&Path::for_address(address), Some(account2.clone()))
             .unwrap();
 
         let ro_tx = db.begin_ro().unwrap();
         tx.commit().unwrap();
 
         // The read transaction was created before the write was committed, so it should not see the changes.
-        let read_account = ro_tx
-            .get_account(AddressPath::for_address(address))
-            .unwrap();
+        let read_account = ro_tx.get_account(&Path::for_address(address)).unwrap();
 
         assert_eq!(account1, read_account.unwrap());
 
         // The writer transaction is committed, so the read transaction should see the changes.
         let ro_tx = db.begin_ro().unwrap();
 
-        let read_account = ro_tx
-            .get_account(AddressPath::for_address(address))
-            .unwrap();
+        let read_account = ro_tx.get_account(&Path::for_address(address)).unwrap();
 
         assert_eq!(account2, read_account.unwrap());
 

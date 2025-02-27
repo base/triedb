@@ -3,14 +3,14 @@ use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::prelude::*;
 use tempdir::TempDir;
-use triedb::{account::AccountVec, path::AddressPath, Database, MmapPageManager};
+use triedb::{account::AccountVec, path::Path, Database, MmapPageManager};
 
 const SIZES: &[usize] = &[1_000_000, 3_000_000];
 const BATCH_SIZE: usize = 1_000;
 
-fn generate_random_address(rng: &mut StdRng) -> AddressPath {
+fn generate_random_address(rng: &mut StdRng) -> Path {
     let addr = Address::random_with(rng);
-    AddressPath::for_address(addr)
+    Path::for_address(addr)
 }
 
 fn setup_database(size: usize) -> (TempDir, Database<MmapPageManager>) {
@@ -31,7 +31,7 @@ fn setup_database(size: usize) -> (TempDir, Database<MmapPageManager>) {
                 EMPTY_ROOT_HASH,
             );
 
-            tx.set_account(address, Some(account)).unwrap();
+            tx.set_account(&address, Some(account)).unwrap();
         }
 
         tx.commit().unwrap();
@@ -46,7 +46,7 @@ fn bench_reads(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database(size);
         let mut rng = StdRng::seed_from_u64(42);
-        let addresses: Vec<AddressPath> = (0..BATCH_SIZE)
+        let addresses: Vec<Path> = (0..BATCH_SIZE)
             .map(|_| generate_random_address(&mut rng))
             .collect();
 
@@ -55,7 +55,7 @@ fn bench_reads(c: &mut Criterion) {
             b.iter(|| {
                 let tx = db.begin_ro().unwrap();
                 for addr in &addresses {
-                    let a: Option<AccountVec> = tx.get_account(addr.clone()).unwrap();
+                    let a: Option<AccountVec> = tx.get_account(addr).unwrap();
                     assert!(a.is_some());
                 }
                 tx.commit().unwrap();
@@ -71,7 +71,7 @@ fn bench_inserts(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database(size);
         let mut rng = StdRng::seed_from_u64(43);
-        let addresses: Vec<AddressPath> = (0..BATCH_SIZE)
+        let addresses: Vec<Path> = (0..BATCH_SIZE)
             .map(|_| generate_random_address(&mut rng))
             .collect();
 
@@ -82,7 +82,7 @@ fn bench_inserts(c: &mut Criterion) {
                 for addr in &addresses {
                     let account =
                         AccountVec::new(U256::from(1000u64), 1, KECCAK_EMPTY, EMPTY_ROOT_HASH);
-                    tx.set_account(addr.clone(), Some(account)).unwrap();
+                    tx.set_account(addr, Some(account)).unwrap();
                 }
                 tx.commit().unwrap();
             });
@@ -97,7 +97,7 @@ fn bench_updates(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database(size);
         let mut rng = StdRng::seed_from_u64(42);
-        let addresses: Vec<AddressPath> = (0..BATCH_SIZE)
+        let addresses: Vec<Path> = (0..BATCH_SIZE)
             .map(|_| generate_random_address(&mut rng))
             .collect();
 
@@ -112,7 +112,7 @@ fn bench_updates(c: &mut Criterion) {
                         KECCAK_EMPTY,
                         EMPTY_ROOT_HASH,
                     );
-                    tx.set_account(addr.clone(), Some(new_account)).unwrap();
+                    tx.set_account(addr, Some(new_account)).unwrap();
                 }
                 tx.commit().unwrap();
             });
@@ -163,7 +163,7 @@ fn bench_mixed_operations(c: &mut Criterion) {
                         0 => {
                             // Read
                             let address = generate_random_address(&mut read_rng);
-                            let account: Option<AccountVec> = tx.get_account(address).unwrap();
+                            let account: Option<AccountVec> = tx.get_account(&address).unwrap();
                             assert!(account.is_some());
                         }
                         1 => {
@@ -175,7 +175,7 @@ fn bench_mixed_operations(c: &mut Criterion) {
                                 KECCAK_EMPTY,
                                 EMPTY_ROOT_HASH,
                             );
-                            tx.set_account(address.clone(), Some(account)).unwrap();
+                            tx.set_account(&address, Some(account)).unwrap();
                         }
                         2 => {
                             // Update
@@ -186,7 +186,7 @@ fn bench_mixed_operations(c: &mut Criterion) {
                                 KECCAK_EMPTY,
                                 EMPTY_ROOT_HASH,
                             );
-                            tx.set_account(address.clone(), Some(new_account)).unwrap();
+                            tx.set_account(&address, Some(new_account)).unwrap();
                         }
                         // 3 => {
                         //     // Delete

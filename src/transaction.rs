@@ -6,7 +6,7 @@ use crate::{
     account::Account,
     database::{Database, Metadata},
     page::PageManager,
-    path::AddressPath,
+    path::Path,
     storage::{engine::StorageEngine, value::Value},
 };
 use alloy_rlp::Encodable;
@@ -54,7 +54,7 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
 
     pub fn get_account<A: Account + Value>(
         &'tx self,
-        address_path: AddressPath,
+        address_path: &Path,
     ) -> Result<Option<A>, ()> {
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
         let account = storage_engine
@@ -71,7 +71,7 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
 impl<P: PageManager> Transaction<'_, RW, P> {
     pub fn set_account<A: Account + Value + Encodable + Clone>(
         &mut self,
-        address_path: AddressPath,
+        address_path: &Path,
         account: Option<A>,
     ) -> Result<(), ()> {
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
