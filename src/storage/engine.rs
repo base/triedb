@@ -214,6 +214,20 @@ impl<P: PageManager> StorageEngine<P> {
         )
     }
 
+    pub fn set_storage(
+        &self,
+        context: &mut TransactionContext,
+        storage_changes: Vec<(StoragePath, Option<StorageValue>)>,
+    ) -> Result<(), Error> {
+        self.set_values(
+            context,
+            storage_changes
+                .into_iter()
+                .map(|(path, value)| (path.full_path(), value.map(TrieValue::Storage)))
+                .collect(),
+        )
+    }
+
     pub fn set_values(
         &self,
         context: &mut TransactionContext,
@@ -999,37 +1013,6 @@ impl<P: PageManager> StorageEngine<P> {
             Some(TrieValue::Storage(storage_value)) => Ok(Some(storage_value)),
             _ => Ok(None),
         }
-    }
-
-    pub fn set_storage(
-        &self,
-        context: &mut TransactionContext,
-        mut storage_changes: Vec<(StoragePath, Option<StorageValue>)>,
-    ) -> Result<(), Error> {
-        storage_changes.sort_by(|a, b| a.0.full_path().cmp(&b.0.full_path()));
-        let pointer = self.set_values_in_page(
-            context,
-            &storage_changes
-                .into_iter()
-                .map(|(path, value)| (path.full_path(), value.map(TrieValue::Storage)))
-                .collect::<Vec<_>>(),
-            0,
-            context.metadata.root_subtrie_page_id,
-            0,
-        )?;
-
-        match pointer {
-            Some(pointer) => {
-                context.metadata.root_subtrie_page_id = pointer.location().page_id().unwrap();
-                context.metadata.state_root = pointer.rlp().as_hash().unwrap();
-            }
-            None => {
-                context.metadata.root_subtrie_page_id = self.allocate_page(context)?.page_id();
-                context.metadata.state_root = EMPTY_ROOT_HASH;
-            }
-        }
-
-        Ok(())
     }
 
     pub fn commit(&self, context: &TransactionContext) -> Result<(), Error> {
