@@ -1205,6 +1205,54 @@ impl<P: PageManager> Inner<P> {
 
         Ok(())
     }
+
+    // a wrapper around the page manager get_mut that increments the pages read metric
+    fn page_manager_get_mut<'p>(
+        &mut self,
+        context: &TransactionContext,
+        page_id: PageId,
+    ) -> Result<Page<'p, RW>, Error> {
+        let page = self
+            .page_manager
+            .get_mut(context.metadata.snapshot_id, page_id)?;
+        context.metrics_inc_pages_read();
+        Ok(page)
+    }
+
+    // a wrapper around the page manager get that increments the pages read metric
+    fn page_manager_get<'p>(
+        &self,
+        context: &TransactionContext,
+        page_id: PageId,
+    ) -> Result<Page<'p, RO>, Error> {
+        let page = self
+            .page_manager
+            .get(context.metadata.snapshot_id, page_id)?;
+        context.metrics_inc_pages_read();
+        Ok(page)
+    }
+
+    // a wrapper around the page manager allocate that increments the pages allocated metric
+    fn page_manager_allocate<'p>(
+        &mut self,
+        context: &TransactionContext,
+    ) -> Result<Page<'p, RW>, Error> {
+        let page = self.page_manager.allocate(context.metadata.snapshot_id)?;
+        context.metrics_inc_pages_allocated();
+        Ok(page)
+    }
+
+    fn page_manager_reallocate<'p>(
+        &mut self,
+        context: &TransactionContext,
+        orphaned_page_id: PageId,
+    ) -> Result<Page<'p, RW>, Error> {
+        let mut page = self.page_manager_get_mut(context, orphaned_page_id)?;
+        page.set_snapshot_id(context.metadata.snapshot_id);
+        page.contents_mut().fill(0);
+        context.metrics_inc_pages_reallocated();
+        Ok(page)
+    }
 }
 
 #[derive(Debug)]

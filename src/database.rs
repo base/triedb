@@ -259,6 +259,9 @@ impl<P: PageManager> Database<P> {
         self.metrics
             .rw_transaction_pages_allocated
             .record(context.metrics_pages_allocated_take() as f64);
+        self.metrics
+            .rw_transaction_pages_reallocated
+            .record(context.metrics_pages_reallocated_take() as f64);
     }
 }
 

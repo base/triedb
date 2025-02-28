@@ -16,6 +16,9 @@ pub struct DatabaseMetrics {
     /// The number of pages allocated by a read-write transaction
     #[metrics(describe = "The number of pages allocated by a read-write transaction")]
     pub(crate) rw_transaction_pages_allocated: Histogram,
+    /// The number of pages reallocated by a read-write transaction
+    #[metrics(describe = "The number of pages reallocated by a read-write transaction")]
+    pub(crate) rw_transaction_pages_reallocated: Histogram,
 }
 
 #[derive(Debug, Default, Clone)]
