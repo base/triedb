@@ -1,3 +1,5 @@
+use crate::metrics::DatabaseMetrics;
+use crate::metrics::TransactionMetrics;
 use crate::page::MmapPageManager;
 use crate::page::OrphanPageManager;
 use crate::page::PageError;
@@ -13,12 +15,14 @@ use crate::transaction::TransactionManager;
 use crate::transaction::{RO, RW};
 use alloy_primitives::B256;
 use alloy_trie::EMPTY_ROOT_HASH;
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::RwLock;
 
 #[derive(Debug, Clone)]
 pub struct Database<P: PageManager> {
     pub(crate) inner: Arc<Inner<P>>,
+    metrics: DatabaseMetrics,
 }
 
 #[derive(Debug)]
@@ -50,12 +54,61 @@ impl Metadata {
 #[derive(Debug)]
 pub(crate) struct TransactionContext {
     pub(crate) metadata: Metadata,
-    // TODO: add others for transaction context like metrics, etc.
+    pub(crate) transaction_metrics: RefCell<TransactionMetrics>,
 }
 
 impl TransactionContext {
     pub fn new(metadata: Metadata) -> Self {
-        Self { metadata }
+        Self {
+            metadata,
+            transaction_metrics: RefCell::new(Default::default()),
+        }
+    }
+}
+
+impl TransactionContext {
+    pub fn metrics_inc_pages_read(&self) {
+        self.transaction_metrics.borrow_mut().pages_read += 1;
+    }
+
+    pub fn metrics_inc_pages_written(&self) {
+        self.transaction_metrics.borrow_mut().pages_written += 1;
+    }
+
+    pub fn metrics_inc_pages_allocated(&self) {
+        self.transaction_metrics.borrow_mut().pages_allocated += 1;
+    }
+
+    pub fn metrics_inc_pages_reallocated(&self) {
+        self.transaction_metrics.borrow_mut().pages_reallocated += 1;
+    }
+
+    pub fn metrics_pages_read_take(&self) -> u32 {
+        let mut metrics = self.transaction_metrics.borrow_mut();
+        let pages_read = metrics.pages_read;
+        metrics.pages_read = 0;
+        pages_read
+    }
+
+    pub fn metrics_pages_written_take(&self) -> u32 {
+        let mut metrics = self.transaction_metrics.borrow_mut();
+        let pages_written = metrics.pages_written;
+        metrics.pages_written = 0;
+        pages_written
+    }
+
+    pub fn metrics_pages_allocated_take(&self) -> u32 {
+        let mut metrics = self.transaction_metrics.borrow_mut();
+        let pages_allocated = metrics.pages_allocated;
+        metrics.pages_allocated = 0;
+        pages_allocated
+    }
+
+    pub fn metrics_pages_reallocated_take(&self) -> u32 {
+        let mut metrics = self.transaction_metrics.borrow_mut();
+        let pages_reallocated = metrics.pages_reallocated;
+        metrics.pages_reallocated = 0;
+        pages_reallocated
     }
 }
 
@@ -148,6 +201,7 @@ impl<P: PageManager> Database<P> {
                 storage_engine: RwLock::new(storage_engine),
                 transaction_manager: RwLock::new(TransactionManager::new()),
             }),
+            metrics: DatabaseMetrics::default(),
         }
     }
 
@@ -187,6 +241,24 @@ impl<P: PageManager> Database<P> {
     pub fn size(&self) -> u32 {
         let storage_engine = self.inner.storage_engine.read().unwrap();
         storage_engine.size()
+    }
+
+    pub fn update_metrics_ro(&self, context: &TransactionContext) {
+        self.metrics
+            .ro_transaction_pages_read
+            .record(context.metrics_pages_read_take() as f64);
+    }
+
+    pub fn update_metrics_rw(&self, context: &TransactionContext) {
+        self.metrics
+            .rw_transaction_pages_read
+            .record(context.metrics_pages_read_take() as f64);
+        self.metrics
+            .rw_transaction_pages_written
+            .record(context.metrics_pages_written_take() as f64);
+        self.metrics
+            .rw_transaction_pages_allocated
+            .record(context.metrics_pages_allocated_take() as f64);
     }
 }
 
