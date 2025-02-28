@@ -88,9 +88,7 @@ impl<P: PageManager> StorageEngine<P> {
             return Err(Error::EngineClosed);
         }
 
-        let original_page = inner
-            .page_manager
-            .get_mut(context.metadata.snapshot_id, page_id)?;
+        let original_page = inner.page_manager_get_mut(context, page_id)?;
         // if the page already has the correct snapshot id, return it without cloning.
         if original_page.snapshot_id() == context.metadata.snapshot_id {
             return Ok(original_page);
@@ -118,10 +116,7 @@ impl<P: PageManager> StorageEngine<P> {
             return Err(Error::EngineClosed);
         }
 
-        inner
-            .page_manager
-            .get(context.metadata.snapshot_id, page_id)
-            .map_err(|e| e.into())
+        inner.page_manager_get(context, page_id)
     }
 
     fn get_mut_page<'p>(
@@ -135,10 +130,7 @@ impl<P: PageManager> StorageEngine<P> {
             return Err(Error::EngineClosed);
         }
 
-        inner
-            .page_manager
-            .get_mut(context.metadata.snapshot_id, page_id)
-            .map_err(|e| e.into())
+        inner.page_manager_get_mut(context, page_id)
     }
 
     pub fn get_account<A: Account + Value>(
@@ -1160,17 +1152,17 @@ impl<P: PageManager> Inner<P> {
     }
 
     fn allocate_page<'p>(&mut self, context: &TransactionContext) -> Result<Page<'p, RW>, Error> {
-        let snapshot_id = context.metadata.snapshot_id;
         let orphaned_page_id = self.orphan_manager.get_orphaned_page_id();
         if let Some(orphaned_page_id) = orphaned_page_id {
-            let mut page = self.page_manager.get_mut(snapshot_id, orphaned_page_id)?;
-            page.set_snapshot_id(snapshot_id);
+            let mut page = self.page_manager_get_mut(context, orphaned_page_id)?;
+            page.set_snapshot_id(context.metadata.snapshot_id);
             page.contents_mut().fill(0);
+            context.metrics_inc_pages_reallocated();
             Ok(page)
         } else {
-            self.page_manager
-                .allocate(snapshot_id)
-                .map_err(|e| e.into())
+            let page = self.page_manager.allocate(context.metadata.snapshot_id)?;
+            context.metrics_inc_pages_allocated();
+            Ok(page)
         }
     }
 
@@ -1229,28 +1221,6 @@ impl<P: PageManager> Inner<P> {
             .page_manager
             .get(context.metadata.snapshot_id, page_id)?;
         context.metrics_inc_pages_read();
-        Ok(page)
-    }
-
-    // a wrapper around the page manager allocate that increments the pages allocated metric
-    fn page_manager_allocate<'p>(
-        &mut self,
-        context: &TransactionContext,
-    ) -> Result<Page<'p, RW>, Error> {
-        let page = self.page_manager.allocate(context.metadata.snapshot_id)?;
-        context.metrics_inc_pages_allocated();
-        Ok(page)
-    }
-
-    fn page_manager_reallocate<'p>(
-        &mut self,
-        context: &TransactionContext,
-        orphaned_page_id: PageId,
-    ) -> Result<Page<'p, RW>, Error> {
-        let mut page = self.page_manager_get_mut(context, orphaned_page_id)?;
-        page.set_snapshot_id(context.metadata.snapshot_id);
-        page.contents_mut().fill(0);
-        context.metrics_inc_pages_reallocated();
         Ok(page)
     }
 }
