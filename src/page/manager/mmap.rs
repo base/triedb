@@ -19,6 +19,7 @@ impl MmapPageManager {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(file_path)
             .map_err(PageError::IO)?;
         let file_len = file.metadata().map_err(PageError::IO)?.len();

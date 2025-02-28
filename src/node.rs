@@ -3,13 +3,15 @@ use alloy_trie::{
     nodes::{BranchNode, ExtensionNodeRef, LeafNodeRef, RlpNode},
     Nibbles, TrieMask,
 };
+use proptest::prelude::{any, prop, Strategy};
+use proptest_derive::Arbitrary;
 
 use crate::{
     pointer::Pointer,
     storage::value::{self, Value},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Arbitrary)]
 pub enum Node<V> {
     AccountLeaf {
         prefix: Nibbles,
@@ -22,6 +24,7 @@ pub enum Node<V> {
     },
     Branch {
         prefix: Nibbles,
+        #[proptest(strategy = "arb_children()")]
         children: [Option<Pointer>; 16],
     },
 }
@@ -34,9 +37,8 @@ pub enum LeafType {
 
 impl<V: Value> Node<V> {
     pub fn new_leaf(prefix: Nibbles, value: V, leaf_type: LeafType) -> Self {
-        assert_eq!(
+        assert!(
             prefix.len() <= 64,
-            true,
             "account and storage leaf prefix's must be at most 64 nibbles"
         );
         match leaf_type {
@@ -81,23 +83,16 @@ impl<V: Value> Node<V> {
     }
 
     pub fn has_children(&self) -> bool {
-        match self {
-            Self::AccountLeaf { .. } => true,
-            Self::Branch { .. } => true,
-            _ => false,
-        }
+        matches!(self, Self::Branch { .. } | Self::AccountLeaf { .. })
     }
 
     pub fn is_branch(&self) -> bool {
-        match self {
-            Self::Branch { .. } => true,
-            _ => false,
-        }
+        matches!(self, Self::Branch { .. })
     }
 
     pub fn enumerate_children(&self) -> Vec<(u8, &Pointer)> {
         match self {
-            Self::AccountLeaf { storage_root, .. } => vec![storage_root]
+            Self::AccountLeaf { storage_root, .. } => [storage_root]
                 .iter()
                 .enumerate()
                 .filter_map(|(i, child)| child.as_ref().map(|p| (i as u8, p)))
@@ -133,6 +128,14 @@ impl<V: Value> Node<V> {
         }
     }
 
+    pub fn remove_child(&mut self, index: u8) {
+        match self {
+            Self::AccountLeaf { storage_root, .. } => *storage_root = None,
+            Self::Branch { children, .. } => children[index as usize] = None,
+            _ => panic!("cannot set child of non-branch node"),
+        }
+    }
+
     pub fn value(&self) -> Option<&V> {
         match self {
             Self::StorageLeaf { value, .. } => Some(value),
@@ -141,7 +144,7 @@ impl<V: Value> Node<V> {
         }
     }
 
-    pub fn to_value(self) -> V {
+    pub fn into_value(self) -> V {
         match self {
             Self::AccountLeaf { value, .. } => value,
             Self::StorageLeaf { value, .. } => value,
@@ -152,7 +155,7 @@ impl<V: Value> Node<V> {
 
 impl<V: Value + Encodable> Node<V> {
     pub fn rlp_encode(&self) -> RlpNode {
-        RlpNode::from_rlp(&encode(&self))
+        RlpNode::from_rlp(&encode(self))
     }
 }
 
@@ -203,7 +206,7 @@ impl<V: Value> Value for Node<V> {
                     .sum::<u16>();
                 data[prefix_length + 2..prefix_length + 2 + 2]
                     .copy_from_slice(&children_bitmask.to_be_bytes());
-                for child in children.into_iter() {
+                for child in children.iter() {
                     if let Some(child) = child {
                         data.extend_from_slice(&child.to_bytes());
                     } else {
@@ -228,12 +231,11 @@ impl<V: Value> Value for Node<V> {
             let storage_root_bytes = &bytes[prefix_length + 2..prefix_length + 2 + 37];
             let value = V::from_bytes(&bytes[prefix_length + 2 + 37..])?;
 
-            let storage_root: Option<Pointer>;
-            if storage_root_bytes == [0; 37] {
-                storage_root = None
+            let storage_root = if storage_root_bytes == [0; 37] {
+                None
             } else {
-                storage_root = Some(Pointer::from_bytes(storage_root_bytes)?)
-            }
+                Some(Pointer::from_bytes(storage_root_bytes)?)
+            };
 
             Ok(Self::AccountLeaf {
                 prefix,
@@ -266,7 +268,7 @@ impl<V: Value + Encodable> Encodable for Node<V> {
     fn encode(&self, out: &mut dyn BufMut) {
         match self {
             Self::StorageLeaf { prefix, value } => {
-                let value_rlp = encode(&value);
+                let value_rlp = encode(value);
                 LeafNodeRef {
                     key: prefix,
                     value: &value_rlp,
@@ -278,7 +280,7 @@ impl<V: Value + Encodable> Encodable for Node<V> {
                 value,
                 storage_root,
             } => {
-                let value_rlp = encode(&value);
+                let value_rlp = encode(value);
                 LeafNodeRef {
                     key: prefix,
                     value: &value_rlp,
@@ -326,10 +328,21 @@ impl<V: Value + Encodable> Encodable for Node<V> {
     }
 }
 
+fn arb_children() -> impl Strategy<Value = [Option<Pointer>; 16]> {
+    (prop::collection::vec(any::<Pointer>(), 2..16), 1..15).prop_map(|(children, spacing)| {
+        let mut result = [const { None }; 16];
+        for (i, child) in children.iter().enumerate() {
+            result[(i + spacing as usize) % 16] = Some(child.clone());
+        }
+        result
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{b256, hex, B256, U256};
     use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
+    use proptest::prelude::*;
 
     use crate::account::AccountVec;
 
@@ -643,5 +656,20 @@ mod tests {
             rlp_encoded.as_slice(),
             hex!("0xa00d9348243d7357c491e6a61f4b1305e77dc6acacdb8cc708e662f6a9bab6ca02")
         );
+    }
+
+    proptest! {
+        #[test]
+        fn fuzz_node_to_from_bytes(node: Node<AccountVec>) {
+            let bytes = node.clone().to_bytes();
+            let decoded = Node::from_bytes(&bytes).unwrap();
+            assert_eq!(node, decoded);
+        }
+
+        #[test]
+        fn fuzz_node_rlp_encode(node: Node<AccountVec>) {
+            let mut bytes = vec![];
+            node.encode(&mut bytes);
+        }
     }
 }

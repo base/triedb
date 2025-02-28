@@ -4,11 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-alloy-primitives = { version = "0.8.19", features = ["rand"] }
+alloy-primitives = { version = "0.8.21", features = ["arbitrary", "rand"] }
 alloy-rlp = "0.3.11"
-alloy-trie = { version = "0.7.6", features=[ "ethereum" ]}
+alloy-trie = { version = "0.7.6", features=["arbitrary", "ethereum"]}
 log = "0.4.25"
 memmap2 = "0.9.5"
+proptest = "1.6.0"
+proptest-derive = "0.5.1"
 sealed = "0.6.0"
 pprof = { version = "0.14", features = ["criterion", "protobuf-codec"] }
 

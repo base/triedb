@@ -68,7 +68,7 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
     // }
 }
 
-impl<'tx, P: PageManager> Transaction<'tx, RW, P> {
+impl<P: PageManager> Transaction<'_, RW, P> {
     pub fn set_account<A: Account + Value + Encodable + Clone>(
         &mut self,
         address_path: AddressPath,
@@ -108,7 +108,7 @@ impl<'tx, P: PageManager> Transaction<'tx, RW, P> {
     }
 }
 
-impl<'tx, P: PageManager> Transaction<'tx, RO, P> {
+impl<P: PageManager> Transaction<'_, RO, P> {
     pub fn commit(mut self) -> Result<(), ()> {
         let mut transaction_manager = self.database.inner.transaction_manager.write().unwrap();
         transaction_manager.remove_transaction(self.context.metadata.snapshot_id, false)?;
@@ -118,7 +118,7 @@ impl<'tx, P: PageManager> Transaction<'tx, RO, P> {
     }
 }
 
-impl<'tx, K: TransactionKind, P: PageManager> Drop for Transaction<'tx, K, P> {
+impl<K: TransactionKind, P: PageManager> Drop for Transaction<'_, K, P> {
     fn drop(&mut self) {
         // TODO: panic if the transaction is not committed
     }

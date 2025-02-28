@@ -1,14 +1,18 @@
-use alloy_rlp::{encode, Decodable};
 use alloy_trie::nodes::RlpNode;
 
 use crate::{
     location::Location,
     storage::value::{self, Value},
 };
+use alloy_primitives::{B256, U256};
+use alloy_rlp::encode;
+use proptest::prelude::*;
+use proptest_derive::Arbitrary;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Arbitrary)]
 pub struct Pointer {
     location: Location,
+    #[proptest(strategy = "u256_or_hash()")]
     rlp: RlpNode,
 }
 
@@ -68,7 +72,7 @@ impl From<Pointer> for [u8; 37] {
         let location: u32 = pointer.location().into();
         data[..4].copy_from_slice(&location.to_be_bytes());
         let rlp = pointer.rlp();
-        data[4..4 + rlp.len()].copy_from_slice(&rlp);
+        data[4..4 + rlp.len()].copy_from_slice(rlp);
         data
     }
 }
@@ -79,9 +83,25 @@ impl From<&Pointer> for [u8; 37] {
         let location: u32 = pointer.location().into();
         data[..4].copy_from_slice(&location.to_be_bytes());
         let rlp = pointer.rlp();
-        data[4..4 + rlp.len()].copy_from_slice(&rlp);
+        data[4..4 + rlp.len()].copy_from_slice(rlp);
         data
     }
+}
+
+fn u256_or_hash() -> impl Strategy<Value = RlpNode> {
+    prop_oneof![arb_u256_rlp(), arb_hash_rlp(),]
+}
+
+fn arb_u256_rlp() -> impl Strategy<Value = RlpNode> {
+    any::<U256>()
+        .prop_map(|u| RlpNode::from_rlp(&encode(u)))
+        .boxed()
+}
+
+fn arb_hash_rlp() -> impl Strategy<Value = RlpNode> {
+    any::<B256>()
+        .prop_map(|h: B256| RlpNode::word_rlp(&h))
+        .boxed()
 }
 
 #[cfg(test)]
@@ -149,5 +169,14 @@ mod tests {
         let pointer = Pointer::from_bytes(&short_string_rlp_bytes).unwrap();
         assert_eq!(pointer.location(), Location::for_cell(1));
         assert_eq!(pointer.rlp(), &RlpNode::from_rlp(&encode("hello world")));
+    }
+
+    proptest! {
+        #[test]
+        fn fuzz_pointer_to_from_bytes(pointer: Pointer) {
+            let bytes = pointer.clone().to_bytes();
+            let decoded = Pointer::from_bytes(&bytes).unwrap();
+            assert_eq!(pointer, decoded);
+        }
     }
 }
