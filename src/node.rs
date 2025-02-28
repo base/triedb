@@ -1,3 +1,4 @@
+use alloy_primitives::B256;
 use alloy_rlp::{encode, BufMut, Encodable};
 use alloy_trie::{
     nodes::{BranchNode, ExtensionNodeRef, LeafNodeRef, RlpNode},
@@ -369,6 +370,56 @@ impl<V: Value + Encodable> Encodable for Node<V> {
                         child: &RlpNode::from_rlp(&branch_rlp),
                     }
                     .encode(out);
+                }
+            }
+        }
+    }
+
+    fn length(&self) -> usize {
+        match self {
+            Self::StorageLeaf { prefix, value } => {
+                let value_rlp = encode(value);
+                LeafNodeRef {
+                    key: prefix,
+                    value: &value_rlp,
+                }
+                .length()
+            }
+            Self::AccountLeaf {
+                prefix,
+                value,
+                storage_root,
+            } => {
+                let value_rlp = encode(value);
+                LeafNodeRef {
+                    key: prefix,
+                    value: &value_rlp,
+                }
+                .length()
+            }
+            Self::Branch { prefix, children } => {
+                if prefix.is_empty() {
+                    BranchNode {
+                        stack: children
+                            .iter()
+                            .filter_map(|child| child.as_ref().map(|p| p.rlp().clone()))
+                            .collect(),
+                        state_mask: TrieMask::new(
+                            children
+                                .iter()
+                                .enumerate()
+                                .map(|(i, child)| (child.is_some() as u16) << i)
+                                .sum(),
+                        ),
+                    }
+                    .length()
+                } else {
+                    ExtensionNodeRef {
+                        key: prefix,
+                        // hack: we know that
+                        child: &RlpNode::word_rlp(&B256::ZERO),
+                    }
+                    .length()
                 }
             }
         }
