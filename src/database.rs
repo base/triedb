@@ -50,6 +50,18 @@ impl Metadata {
 }
 
 #[derive(Debug)]
+pub(crate) struct TransactionContext {
+    pub(crate) metadata: Metadata,
+    // TODO: add others for transaction context like metrics, etc.
+}
+
+impl TransactionContext {
+    pub fn new(metadata: Metadata) -> Self {
+        Self { metadata }
+    }
+}
+
+#[derive(Debug)]
 pub enum Error {
     PageError(PageError),
     CloseError(engine::Error),
@@ -148,7 +160,8 @@ impl<P: PageManager> Database<P> {
         let metadata = self.inner.metadata.read().unwrap().next();
         let min_snapshot_id = transaction_manager.begin_rw(metadata.snapshot_id)?;
         storage_engine.unlock(min_snapshot_id - 1);
-        Ok(Transaction::new(metadata, self, None))
+        let context = TransactionContext::new(metadata);
+        Ok(Transaction::new(context, self, None))
     }
 
     pub fn begin_ro(&self) -> Result<Transaction<'_, RO, P>, ()> {
@@ -156,7 +169,8 @@ impl<P: PageManager> Database<P> {
         let storage_engine = self.inner.storage_engine.read().unwrap();
         let metadata = self.inner.metadata.read().unwrap().clone();
         transaction_manager.begin_ro(metadata.snapshot_id)?;
-        Ok(Transaction::new(metadata, self, Some(storage_engine)))
+        let context = TransactionContext::new(metadata);
+        Ok(Transaction::new(context, self, Some(storage_engine)))
     }
 
     pub(crate) fn resize(&self, new_page_count: PageId) -> Result<(), ()> {
@@ -165,11 +179,11 @@ impl<P: PageManager> Database<P> {
         Ok(())
     }
 
-    pub fn close(&self) -> Result<(), Error> {
+    pub fn close(&mut self) -> Result<(), Error> {
         let metadata = self.inner.metadata.read().unwrap();
+        let context = TransactionContext::new(metadata.clone());
         let storage_engine = self.inner.storage_engine.read().unwrap();
-
-        storage_engine.close(&metadata).map_err(Error::CloseError)?;
+        storage_engine.close(&context).map_err(Error::CloseError)?;
         Ok(())
     }
 
@@ -276,7 +290,7 @@ mod tests {
         // will create a database with N pages (see 'create' for N).
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
-        let db = Database::create(file_path.as_str()).unwrap();
+        let mut db = Database::create(file_path.as_str()).unwrap();
         let create_size = db.size();
 
         assert_eq!(create_size, 3000000);

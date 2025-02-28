@@ -4,7 +4,7 @@ use std::{fmt::Debug, sync::RwLockReadGuard};
 
 use crate::{
     account::Account,
-    database::{Database, Metadata},
+    database::{Database, Metadata, TransactionContext},
     page::PageManager,
     path::AddressPath,
     storage::{engine::StorageEngine, value::Value},
@@ -31,7 +31,7 @@ impl TransactionKind for RO {}
 #[derive(Debug)]
 pub struct Transaction<'tx, K: TransactionKind, P: PageManager> {
     committed: bool,
-    metadata: Metadata,
+    context: TransactionContext,
     database: &'tx Database<P>,
     lock: Option<RwLockReadGuard<'tx, StorageEngine<P>>>,
     _marker: std::marker::PhantomData<K>,
@@ -39,13 +39,13 @@ pub struct Transaction<'tx, K: TransactionKind, P: PageManager> {
 
 impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
     pub(crate) fn new(
-        metadata: Metadata,
+        context: TransactionContext,
         database: &'tx Database<P>,
         lock: Option<RwLockReadGuard<'tx, StorageEngine<P>>>,
     ) -> Self {
         Self {
             committed: false,
-            metadata,
+            context,
             database,
             lock,
             _marker: std::marker::PhantomData,
@@ -58,7 +58,7 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
     ) -> Result<Option<A>, ()> {
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
         let account = storage_engine
-            .get_account(&self.metadata, address_path)
+            .get_account(&self.context, address_path)
             .unwrap();
         Ok(account)
     }
@@ -76,7 +76,7 @@ impl<P: PageManager> Transaction<'_, RW, P> {
     ) -> Result<(), ()> {
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
         storage_engine
-            .set_account(&mut self.metadata, address_path, account)
+            .set_account(&mut self.context, address_path, account)
             .unwrap();
         Ok(())
     }
@@ -88,10 +88,10 @@ impl<P: PageManager> Transaction<'_, RW, P> {
     pub fn commit(mut self) -> Result<(), ()> {
         let mut transaction_manager = self.database.inner.transaction_manager.write().unwrap();
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
-        storage_engine.commit(&self.metadata).unwrap();
+        storage_engine.commit(&self.context).unwrap();
         let mut metadata = self.database.inner.metadata.write().unwrap();
-        *metadata = self.metadata.clone();
-        transaction_manager.remove_transaction(self.metadata.snapshot_id, true)?;
+        *metadata = self.context.metadata.clone();
+        transaction_manager.remove_transaction(self.context.metadata.snapshot_id, true)?;
 
         self.committed = true;
         Ok(())
@@ -100,8 +100,8 @@ impl<P: PageManager> Transaction<'_, RW, P> {
     pub fn rollback(mut self) -> Result<(), ()> {
         let mut transaction_manager = self.database.inner.transaction_manager.write().unwrap();
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
-        storage_engine.rollback(&self.metadata).unwrap();
-        transaction_manager.remove_transaction(self.metadata.snapshot_id, true)?;
+        storage_engine.rollback(&self.context).unwrap();
+        transaction_manager.remove_transaction(self.context.metadata.snapshot_id, true)?;
 
         self.committed = false;
         Ok(())
@@ -111,7 +111,7 @@ impl<P: PageManager> Transaction<'_, RW, P> {
 impl<P: PageManager> Transaction<'_, RO, P> {
     pub fn commit(mut self) -> Result<(), ()> {
         let mut transaction_manager = self.database.inner.transaction_manager.write().unwrap();
-        transaction_manager.remove_transaction(self.metadata.snapshot_id, false)?;
+        transaction_manager.remove_transaction(self.context.metadata.snapshot_id, false)?;
 
         self.committed = true;
         Ok(())
