@@ -107,9 +107,10 @@ impl<P: PageKind> RootPage<'_, P> {
 }
 
 impl<'p> RootPage<'p, RW> {
-    pub fn new(mut page_mut: Page<'p, RW>, state_root: B256) -> Self {
+    pub fn new(mut page_mut: Page<'p, RW>, state_root: B256, max_page_number: PageId) -> Self {
         let contents = page_mut.contents_mut();
         contents[0..32].copy_from_slice(state_root.as_slice());
+        contents[36..40].copy_from_slice(&max_page_number.to_le_bytes());
 
         Self { page: page_mut }
     }
@@ -284,7 +285,7 @@ mod tests {
         // GIVEN: a root page with orphan ids
         let mut page_manager = MmapPageManager::new_anon(20, 0).unwrap();
         let page = page_manager.allocate(42).unwrap();
-        let mut root_page = RootPage::new(page, B256::default());
+        let mut root_page = RootPage::new(page, B256::default(), 0);
         let my_orphan_page_ids: &[PageId] = &[2, 3, 4, 5, 6, 7, 8, 9, 10];
         root_page
             .add_orphaned_page_ids(my_orphan_page_ids, 0, &mut page_manager)
@@ -302,7 +303,7 @@ mod tests {
         // GIVEN: a root page with no orphan ids
         let mut page_manager = MmapPageManager::new_anon(20, 0).unwrap();
         let page = page_manager.allocate(42).unwrap();
-        let root_page = RootPage::new(page, B256::default());
+        let root_page = RootPage::new(page, B256::default(), 0);
 
         // WHEN: the list of orphan ids are requested
         let orphan_page_ids = root_page.get_orphaned_page_ids(&page_manager).unwrap();
@@ -320,7 +321,7 @@ mod tests {
         let mut page2 = page_manager.allocate(42).unwrap();
         let mut my_orphan_page_ids: Vec<PageId> = Vec::new();
 
-        let mut root_page = RootPage::new(page0, B256::default());
+        let mut root_page = RootPage::new(page0, B256::default(), 0);
         // we should be able to store MAX_ORPHANS orphan page ids in a root page.
         // the last 4 bytes of the root page will be the next page id containing
         // the remainder of the list of orphan page ids
@@ -362,7 +363,7 @@ mod tests {
         // GIVEN: a root page with a list of orphan page ids
         let mut page_manager = MmapPageManager::new_anon(20, 0).unwrap();
         let page = page_manager.allocate(42).unwrap();
-        let mut root_page = RootPage::new(page, B256::default());
+        let mut root_page = RootPage::new(page, B256::default(), 0);
         let my_orphan_page_ids: &[PageId] = &[1, 2, 3, 4, 5, 6, 7, 8, 9];
         root_page
             .add_orphaned_page_ids(&my_orphan_page_ids.to_vec(), 0, &mut page_manager)
@@ -390,7 +391,7 @@ mod tests {
         // GIVEN: a root page with a list of orphan page ids spanning 2 pages
         let mut page_manager = MmapPageManager::new_anon(20, 0).unwrap();
         let page = page_manager.allocate(42).unwrap();
-        let mut root_page = RootPage::new(page, B256::default());
+        let mut root_page = RootPage::new(page, B256::default(), 0);
 
         // page 0 allocated. our pages for this test will spill into page 2
         // so allocate at least 2 more pages.
@@ -435,7 +436,7 @@ mod tests {
         // GIVEN: a root page with a list of orphan page ids spanning 2 pages
         let mut page_manager = MmapPageManager::new_anon(20, 0).unwrap();
         let page = page_manager.allocate(42).unwrap();
-        let mut root_page = RootPage::new(page, B256::default());
+        let mut root_page = RootPage::new(page, B256::default(), 0);
 
         // page 0 allocated. our pages for this test will spill into page 2
         // so allocate at least 2 more pages.
@@ -487,7 +488,7 @@ mod tests {
         let mut page_manager = MmapPageManager::new_anon(257, 0).unwrap();
         let page0 = page_manager.allocate(42).unwrap();
         assert_eq!(page0.page_id(), 0);
-        let mut root_page = RootPage::new(page0, B256::default());
+        let mut root_page = RootPage::new(page0, B256::default(), 0);
 
         let page1 = page_manager.allocate(42).unwrap();
         assert_eq!(page1.page_id(), 1);
@@ -516,7 +517,7 @@ mod tests {
         let mut page_manager = MmapPageManager::new_anon(20, 0).unwrap();
         let page0 = page_manager.allocate(42).unwrap();
         assert_eq!(page0.page_id(), 0);
-        let mut root_page = RootPage::new(page0, B256::default());
+        let mut root_page = RootPage::new(page0, B256::default(), 0);
 
         let page1 = page_manager.allocate(42).unwrap();
         assert_eq!(page1.page_id(), 1);
@@ -566,7 +567,7 @@ mod tests {
         let mut page_manager = MmapPageManager::new_anon(257, 0).unwrap();
         let page = page_manager.allocate(42).unwrap();
         assert_eq!(page.page_id(), 0);
-        let mut root_page = RootPage::new(page, B256::default());
+        let mut root_page = RootPage::new(page, B256::default(), 0);
 
         // page 0 allocated. allocate 255 more pages
         for _ in 1..256 {
@@ -618,7 +619,7 @@ mod tests {
         let mut page_manager = MmapPageManager::new_anon(257, 0).unwrap();
         let page = page_manager.allocate(42).unwrap();
         assert_eq!(page.page_id(), 0);
-        let mut root_page = RootPage::new(page, B256::default());
+        let mut root_page = RootPage::new(page, B256::default(), 0);
 
         // page 0 allocated. allocate 255 more pages
         for _ in 1..256 {
