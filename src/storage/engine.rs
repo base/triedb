@@ -2867,10 +2867,6 @@ mod tests {
             .unwrap();
 
         // THEN: the branch node should be deleted and the root node should go to child 2 leaf at index 5
-        // let root_node_page = storage_engine
-        //     .get_page(&context, context.metadata.root_subtrie_page_id)
-        //     .unwrap();
-        // let root_node_slotted = SlottedPage::try_from(root_node_page).unwrap();
         let root_node: Node = slotted_page.get_value(0).unwrap();
         assert!(root_node.is_branch());
         let child_2_pointer = root_node.child(5).unwrap();
