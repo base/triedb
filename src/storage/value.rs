@@ -9,12 +9,22 @@ pub enum Error {
 
 /// A trait for types that can be stored as values in the database
 pub trait Value: Sized + Debug {
-    /// Convert this value into a byte vec for storage
-    fn to_bytes(&self) -> Vec<u8>;
+    /// The size of the value in bytes
+    fn size(&self) -> usize;
+
+    /// Serialize this value into a byte slice, returning the number of bytes written
+    fn serialize_into(&self, buf: &mut [u8]) -> Result<usize>;
 
     /// Create a value from a byte slice
     /// Returns Error::InvalidEncoding if the bytes don't represent a valid value
     fn from_bytes(bytes: &[u8]) -> Result<Self>;
+
+    /// Serialize this value into a buffer
+    fn serialize(&self) -> Result<Vec<u8>> {
+        let mut bytes = vec![0; self.size()];
+        self.serialize_into(&mut bytes)?;
+        Ok(bytes)
+    }
 }
 
 /// A trait for references to values stored in the database
@@ -36,8 +46,13 @@ pub trait ValueRef<'v>: Sized + Debug {
 
 // Example implementation for a string-like type
 impl Value for String {
-    fn to_bytes(&self) -> Vec<u8> {
-        self.clone().into_bytes()
+    fn size(&self) -> usize {
+        self.len()
+    }
+
+    fn serialize_into(&self, buf: &mut [u8]) -> Result<usize> {
+        buf.copy_from_slice(self.as_bytes());
+        Ok(self.len())
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
@@ -66,8 +81,13 @@ impl<'v> ValueRef<'v> for &'v str {
 
 // Example implementation for a vector of bytes, useful for testing purposes
 impl Value for Vec<u8> {
-    fn to_bytes(&self) -> Vec<u8> {
-        self.clone()
+    fn size(&self) -> usize {
+        self.len()
+    }
+
+    fn serialize_into(&self, buf: &mut [u8]) -> Result<usize> {
+        buf.copy_from_slice(self);
+        Ok(self.len())
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {

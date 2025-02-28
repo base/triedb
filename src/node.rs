@@ -160,17 +160,11 @@ impl<V: Value + Encodable> Node<V> {
 }
 
 impl<V: Value> Value for Node<V> {
-    fn to_bytes(&self) -> Vec<u8> {
+    fn size(&self) -> usize {
         match self {
             Self::StorageLeaf { prefix, value } => {
                 let prefix_length = prefix.len();
-                let value_bytes = value.to_bytes();
-                let mut data = vec![0; prefix_length + value_bytes.len() + 2];
-                data[0] = 0; // first byte 0 signifies a StorageLeaf
-                data[1] = prefix_length as u8;
-                data[2..2 + prefix_length].copy_from_slice(prefix.as_slice());
-                data[prefix_length + 2..].copy_from_slice(&value_bytes);
-                data
+                2 + prefix_length + value.size() // 2 bytes for type and prefix length
             }
             Self::AccountLeaf {
                 prefix,
@@ -178,42 +172,95 @@ impl<V: Value> Value for Node<V> {
                 storage_root,
             } => {
                 let prefix_length = prefix.len();
-                let value_bytes = value.to_bytes();
-                let mut data = vec![0; prefix_length + 37 + value_bytes.len() + 2];
-                data[0] = 1; // first byte 1 signifies a AccountLeaf
-                data[1] = prefix_length as u8;
-                data[2..2 + prefix_length].copy_from_slice(prefix.as_slice());
-                if let Some(storage) = storage_root {
-                    data[prefix_length + 2..prefix_length + 2 + 37]
-                        .copy_from_slice(&storage.to_bytes());
-                } else {
-                    data[prefix_length + 2..prefix_length + 2 + 37].copy_from_slice(&[0; 37]);
-                };
-
-                data[prefix_length + 2 + 37..].copy_from_slice(&value_bytes);
-                data
+                2 + prefix_length + 37 + value.size() // 2 bytes for type and prefix length, 37 for storage root
             }
             Self::Branch { prefix, children } => {
                 let prefix_length = prefix.len();
-                let mut data = vec![0; prefix_length + 4];
-                data[0] = 2; // first byte 2 signifies a Branch
-                data[1] = prefix_length as u8;
-                data[2..2 + prefix_length].copy_from_slice(prefix.as_slice());
+                2 + prefix_length + 2 + 16 * 37 // 2 bytes for type and prefix length, 2 for bitmask, 37 for each child pointer
+            }
+        }
+    }
+
+    fn serialize_into(&self, buf: &mut [u8]) -> value::Result<usize> {
+        match self {
+            Self::StorageLeaf { prefix, value } => {
+                let prefix_length = prefix.len();
+                let total_size = 2 + prefix_length + value.size();
+                if buf.len() < total_size {
+                    return Err(value::Error::InvalidEncoding);
+                }
+
+                buf[0] = 0; // StorageLeaf type
+                buf[1] = prefix_length as u8;
+                buf[2..2 + prefix_length].copy_from_slice(prefix.as_slice());
+                let bytes_written = value.serialize_into(&mut buf[2 + prefix_length..])?;
+
+                Ok(2 + prefix_length + bytes_written)
+            }
+            Self::AccountLeaf {
+                prefix,
+                value,
+                storage_root,
+            } => {
+                let prefix_length = prefix.len();
+                let total_size = 2 + prefix_length + 37 + value.size();
+                if buf.len() < total_size {
+                    return Err(value::Error::InvalidEncoding);
+                }
+
+                buf[0] = 1; // AccountLeaf type
+                buf[1] = prefix_length as u8;
+                buf[2..2 + prefix_length].copy_from_slice(prefix.as_slice());
+
+                let storage_offset = 2 + prefix_length;
+                if let Some(storage) = storage_root {
+                    // Serialize the pointer
+                    storage.serialize_into(&mut buf[storage_offset..storage_offset + 37])?;
+                } else {
+                    // Fill with zeros if no storage root
+                    buf[storage_offset..storage_offset + 37].fill(0);
+                }
+
+                let bytes_written = value.serialize_into(&mut buf[storage_offset + 37..])?;
+
+                Ok(storage_offset + 37 + bytes_written)
+            }
+            Self::Branch { prefix, children } => {
+                let prefix_length = prefix.len();
+                let mut total_size = 2 + prefix_length + 2; // Type, prefix length, bitmask
+                for child in children.iter().flatten() {
+                    total_size += 37; // Each pointer is 37 bytes
+                }
+
+                if buf.len() < total_size {
+                    return Err(value::Error::InvalidEncoding);
+                }
+
+                buf[0] = 2; // Branch type
+                buf[1] = prefix_length as u8;
+                buf[2..2 + prefix_length].copy_from_slice(prefix.as_slice());
+
+                // Calculate and store the children bitmask
                 let children_bitmask = children
                     .iter()
                     .enumerate()
                     .map(|(idx, child)| (child.is_some() as u16) << (15 - idx))
                     .sum::<u16>();
-                data[prefix_length + 2..prefix_length + 2 + 2]
+                buf[prefix_length + 2..prefix_length + 4]
                     .copy_from_slice(&children_bitmask.to_be_bytes());
+
+                // Store each child pointer
+                let mut offset = prefix_length + 4;
                 for child in children.iter() {
                     if let Some(child) = child {
-                        data.extend_from_slice(&child.to_bytes());
+                        child.serialize_into(&mut buf[offset..offset + 37])?;
                     } else {
-                        data.extend_from_slice(&[0; 37]);
+                        buf[offset..offset + 37].fill(0);
                     }
+                    offset += 37;
                 }
-                data
+
+                Ok(offset)
             }
         }
     }
@@ -349,24 +396,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_storage_leaf_node_to_bytes() {
+    fn test_storage_leaf_node_serialize() {
         let node = Node::new_storage_leaf(Nibbles::from_nibbles([0xa, 0xb]), vec![4, 5, 6]);
-        let bytes = node.to_bytes();
+        let bytes = node.serialize().unwrap();
         assert_eq!(bytes, hex!("00020a0b040506"));
 
         let node = Node::new_storage_leaf(Nibbles::from_nibbles([0xa, 0xb, 0xc]), vec![4, 5, 6, 7]);
-        let bytes = node.to_bytes();
+        let bytes = node.serialize().unwrap();
         assert_eq!(bytes, hex!("00030a0b0c04050607"));
 
         let node = Node::new_storage_leaf(Nibbles::new(), vec![0xf, 0xf, 0xf, 0xf]);
-        let bytes = node.to_bytes();
+        let bytes = node.serialize().unwrap();
         assert_eq!(bytes, hex!("00000f0f0f0f"));
     }
 
     #[test]
-    fn test_account_leaf_node_to_bytes() {
+    fn test_account_leaf_node_serialize() {
         let node = Node::new_account_leaf(Nibbles::from_nibbles([0xa, 0xb]), vec![4, 5, 6], None);
-        let bytes = node.to_bytes();
+        let bytes = node.serialize().unwrap();
         assert_eq!(bytes, hex!("01020a0b00000000000000000000000000000000000000000000000000000000000000000000000000040506"));
 
         let node = Node::new_account_leaf(
@@ -374,22 +421,22 @@ mod tests {
             vec![4, 5, 6, 7],
             None,
         );
-        let bytes = node.to_bytes();
+        let bytes = node.serialize().unwrap();
         assert_eq!(bytes, hex!("01030a0b0c0000000000000000000000000000000000000000000000000000000000000000000000000004050607"));
 
         let node = Node::new_account_leaf(Nibbles::new(), vec![0xf, 0xf, 0xf, 0xf], None);
-        let bytes = node.to_bytes();
+        let bytes = node.serialize().unwrap();
         assert_eq!(bytes, hex!("0100000000000000000000000000000000000000000000000000000000000000000000000000000f0f0f0f"));
     }
 
     #[test]
-    fn test_branch_node_to_bytes() {
+    fn test_branch_node_serialize() {
         let mut node: Node<Vec<u8>> = Node::new_branch(Nibbles::new());
         let hash1 = b256!("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
         let hash2 = b256!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
         node.set_child(0, Pointer::new(42.into(), RlpNode::word_rlp(&hash1)));
         node.set_child(11, Pointer::new(11.into(), RlpNode::word_rlp(&hash2)));
-        let bytes = node.to_bytes();
+        let bytes = node.serialize().unwrap();
         // branch, no prefix
         let mut expected = Vec::from([2, 0]);
         // children bitmask (10000000 00010000)
@@ -412,7 +459,7 @@ mod tests {
         let hash2 = b256!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
         node.set_child(2, Pointer::new(2.into(), RlpNode::word_rlp(&hash1)));
         node.set_child(3, Pointer::new(3.into(), RlpNode::word_rlp(&hash2)));
-        let bytes = node.to_bytes();
+        let bytes = node.serialize().unwrap();
         // branch, length, prefix
         let mut expected = Vec::from([2, 5, 10, 11, 12, 13, 14]);
         // children bitmask (00110000 00000000)
@@ -434,7 +481,7 @@ mod tests {
         let v2 = encode("hello world");
         node.set_child(1, Pointer::new(99999.into(), RlpNode::from_rlp(&v1)));
         node.set_child(2, Pointer::new(8675309.into(), RlpNode::from_rlp(&v2)));
-        let bytes = node.to_bytes();
+        let bytes = node.serialize().unwrap();
 
         // branch, length, prefix
         let mut expected = Vec::from([2, 2, 0, 0]);
@@ -661,7 +708,7 @@ mod tests {
     proptest! {
         #[test]
         fn fuzz_node_to_from_bytes(node: Node<AccountVec>) {
-            let bytes = node.clone().to_bytes();
+            let bytes = node.serialize().unwrap();
             let decoded = Node::from_bytes(&bytes).unwrap();
             assert_eq!(node, decoded);
         }

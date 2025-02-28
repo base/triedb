@@ -133,40 +133,44 @@ impl SlottedPage<'_, RW> {
     // Sets the value at the given index.
     pub fn set_value<V: Value>(&mut self, index: u8, value: V) -> Result<(), PageError> {
         let cell_pointer = self.get_cell_pointer(index)?;
-        let value_data = value.to_bytes();
+        let value_length = value.size();
 
         let mut offset = cell_pointer.offset();
         let mut length = cell_pointer.length();
 
-        if value_data.len() > length as usize {
+        if value_length > length as usize {
             // the value is larger than the current cell, so we need to allocate a new cell
-            let cell_pointer = self.allocate_cell_pointer(index, value_data.len() as u16)?;
+            let cell_pointer = self.allocate_cell_pointer(index, value_length as u16)?;
             (offset, length) = (cell_pointer.offset(), cell_pointer.length());
-        } else if value_data.len() < length as usize {
+        } else if value_length < length as usize {
             // the value is smaller than the current cell, so we can shrink the cell in place
-            length = value_data.len() as u16;
+            length = value_length as u16;
             self.set_cell_pointer(index, offset, length)?;
         }
 
         let start_index = (PAGE_DATA_SIZE as u16 - offset) as usize;
         let end_index = (PAGE_DATA_SIZE as u16 - offset + length) as usize;
         let data = &mut self.page.contents_mut()[start_index..end_index];
-        data.copy_from_slice(&value_data);
+        value
+            .serialize_into(data)
+            .map_err(|_| PageError::InvalidValue)?;
         Ok(())
     }
 
     // Inserts a value into the page and returns the index of the new value.
     pub fn insert_value<V: Value>(&mut self, value: V) -> Result<u8, PageError> {
         let cell_index = self.next_free_cell_index()?;
-        let value_data = value.to_bytes();
-        let cell_pointer = self.allocate_cell_pointer(cell_index, value_data.len() as u16)?;
+        let value_length = value.size();
+        let cell_pointer = self.allocate_cell_pointer(cell_index, value_length as u16)?;
 
         let offset = cell_pointer.offset();
         let length = cell_pointer.length();
         let start_index = (PAGE_DATA_SIZE as u16 - offset) as usize;
         let end_index = (PAGE_DATA_SIZE as u16 - offset + length) as usize;
         let data = &mut self.page.contents_mut()[start_index..end_index];
-        data.copy_from_slice(&value_data);
+        value
+            .serialize_into(data)
+            .map_err(|_| PageError::InvalidValue)?;
         Ok(cell_index)
     }
 
