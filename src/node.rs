@@ -378,24 +378,16 @@ impl<V: Value + Encodable> Encodable for Node<V> {
     fn length(&self) -> usize {
         match self {
             Self::StorageLeaf { prefix, value } => {
-                let value_rlp = encode(value);
-                LeafNodeRef {
-                    key: prefix,
-                    value: &value_rlp,
-                }
-                .length()
+                // this just has to be an estimate for `Vec::with_capacity`
+                prefix.len() + value.size() + 10 // 10 is just a buffer
             }
             Self::AccountLeaf {
                 prefix,
                 value,
                 storage_root,
             } => {
-                let value_rlp = encode(value);
-                LeafNodeRef {
-                    key: prefix,
-                    value: &value_rlp,
-                }
-                .length()
+                // this just has to be an estimate for `Vec::with_capacity`
+                prefix.len() + value.size() + 10 // 10 is just a buffer
             }
             Self::Branch { prefix, children } => {
                 if prefix.is_empty() {
@@ -416,7 +408,9 @@ impl<V: Value + Encodable> Encodable for Node<V> {
                 } else {
                     ExtensionNodeRef {
                         key: prefix,
-                        // hack: we know that
+                        // hack: we know that a branch node will always be a
+                        // RlpNode hash. since we only need the length, we use
+                        // a dummy zero value here.
                         child: &RlpNode::word_rlp(&B256::ZERO),
                     }
                     .length()
