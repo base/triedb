@@ -4,11 +4,12 @@ use std::{fmt::Debug, sync::RwLockReadGuard};
 
 use crate::{
     account::Account,
-    database::{Database, Metadata, TransactionContext},
+    database::{Database, TransactionContext},
     page::PageManager,
-    path::AddressPath,
+    path::{AddressPath, StoragePath},
     storage::{engine::StorageEngine, value::Value},
 };
+use alloy_primitives::StorageValue;
 use alloy_rlp::Encodable;
 pub use manager::TransactionManager;
 use sealed::sealed;
@@ -63,9 +64,13 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
         Ok(account)
     }
 
-    // pub fn get_storage_slot(&self, address_path: AddressPath, slot_key: StorageSlotKey) -> Result<StorageSlot, ()> {
-    //     todo!()
-    // }
+    pub fn get_storage_slot(&self, storage_path: StoragePath) -> Result<Option<StorageValue>, ()> {
+        let storage_engine = self.database.inner.storage_engine.read().unwrap();
+        let storage_slot = storage_engine
+            .get_storage(&self.context, storage_path)
+            .unwrap();
+        Ok(storage_slot)
+    }
 }
 
 impl<P: PageManager> Transaction<'_, RW, P> {
@@ -81,9 +86,17 @@ impl<P: PageManager> Transaction<'_, RW, P> {
         Ok(())
     }
 
-    // pub fn set_storage_slot(&mut self, address_path: AddressPath, slot_key: StorageSlotKey, slot: StorageSlot) -> Result<(), ()> {
-    //     todo!()
-    // }
+    pub fn set_storage_slot(
+        &mut self,
+        storage_path: StoragePath,
+        value: Option<StorageValue>,
+    ) -> Result<(), ()> {
+        let storage_engine = self.database.inner.storage_engine.read().unwrap();
+        storage_engine
+            .set_storage(&mut self.context, storage_path, value)
+            .unwrap();
+        Ok(())
+    }
 
     pub fn commit(mut self) -> Result<(), ()> {
         let mut transaction_manager = self.database.inner.transaction_manager.write().unwrap();
