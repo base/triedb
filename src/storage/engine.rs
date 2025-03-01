@@ -275,14 +275,17 @@ impl<P: PageManager> StorageEngine<P> {
             // In the case of a page split, re-attempt the operation from scratch. This ensures that a page will be
             // consistently evaluated, and not modified in the middle of an operation, which could result in
             // inconsistent cell pointers.
-            Err(Error::PageSplit) => self.set_value_in_cloned_page(
-                context,
-                path,
-                value,
-                &mut new_slotted_page,
-                page_index,
-                leaf_type,
-            ),
+            Err(Error::PageSplit) => {
+                context.metrics_inc_pages_split();
+                self.set_value_in_cloned_page(
+                    context,
+                    path,
+                    value,
+                    &mut new_slotted_page,
+                    page_index,
+                    leaf_type,
+                )
+            }
             Err(Error::PageError(PageError::PageIsFull)) => {
                 panic!("Page is full!");
             }
@@ -1174,7 +1177,6 @@ impl<P: PageManager> Inner<P> {
     fn commit(&mut self, context: &TransactionContext) -> Result<(), Error> {
         // First commit to ensure all changes are written before writing the new root page.
         self.page_manager.commit(context.metadata.snapshot_id)?;
-        context.metrics_inc_commit();
 
         let page_mut = self
             .page_manager
@@ -1195,7 +1197,6 @@ impl<P: PageManager> Inner<P> {
 
         // Second commit to ensure the new root page is written to disk.
         self.page_manager.commit(context.metadata.snapshot_id)?;
-        context.metrics_inc_commit();
 
         Ok(())
     }
@@ -1487,12 +1488,15 @@ mod tests {
         storage_engine
             .set_account(&mut context, path1, Some(account1.clone()))
             .unwrap();
+        assert_metrics(&context, 1, 1, 0, 0);
         storage_engine
             .set_account(&mut context, path2, Some(account2.clone()))
             .unwrap();
+        assert_metrics(&context, 2, 1, 0, 0);
         storage_engine
             .set_account(&mut context, path3, Some(account3.clone()))
             .unwrap();
+        assert_metrics(&context, 3, 1, 0, 0);
 
         assert_eq!(
             context.metadata.state_root,

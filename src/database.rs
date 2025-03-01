@@ -71,8 +71,8 @@ impl TransactionContext {
         self.transaction_metrics.borrow_mut().pages_read += 1;
     }
 
-    pub fn metrics_inc_commit(&self) {
-        self.transaction_metrics.borrow_mut().commit += 1;
+    pub fn metrics_inc_pages_split(&self) {
+        self.transaction_metrics.borrow_mut().pages_split += 1;
     }
 
     pub fn metrics_inc_pages_allocated(&self) {
@@ -90,11 +90,11 @@ impl TransactionContext {
         pages_read
     }
 
-    pub fn metrics_commit_take(&self) -> u32 {
+    pub fn metrics_pages_split_take(&self) -> u32 {
         let mut metrics = self.transaction_metrics.borrow_mut();
-        let pages_written = metrics.commit;
-        metrics.commit = 0;
-        pages_written
+        let pages_split = metrics.pages_split;
+        metrics.pages_split = 0;
+        pages_split
     }
 
     pub fn metrics_pages_allocated_take(&self) -> u32 {
@@ -260,8 +260,8 @@ impl<P: PageManager> Database<P> {
             .rw_transaction_pages_reallocated
             .record(context.metrics_pages_reallocated_take() as f64);
         self.metrics
-            .rw_transaction_commit
-            .record(context.metrics_commit_take() as f64);
+            .rw_transaction_pages_split
+            .record(context.metrics_pages_split_take() as f64);
     }
 }
 
