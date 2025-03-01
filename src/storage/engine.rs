@@ -1174,6 +1174,7 @@ impl<P: PageManager> Inner<P> {
     fn commit(&mut self, context: &TransactionContext) -> Result<(), Error> {
         // First commit to ensure all changes are written before writing the new root page.
         self.page_manager.commit(context.metadata.snapshot_id)?;
+        context.metrics_inc_commit();
 
         let page_mut = self
             .page_manager
@@ -1194,6 +1195,7 @@ impl<P: PageManager> Inner<P> {
 
         // Second commit to ensure the new root page is written to disk.
         self.page_manager.commit(context.metadata.snapshot_id)?;
+        context.metrics_inc_commit();
 
         Ok(())
     }
@@ -1283,6 +1285,7 @@ mod tests {
         pages_read: u32,
         pages_allocated: u32,
         pages_reallocated: u32,
+        commit: u32,
     ) {
         assert_eq!(context.transaction_metrics.borrow().pages_read, pages_read);
         assert_eq!(
@@ -1293,6 +1296,7 @@ mod tests {
             context.transaction_metrics.borrow().pages_reallocated,
             pages_reallocated
         );
+        assert_eq!(context.transaction_metrics.borrow().commit, commit);
     }
 
     #[test]
@@ -1304,7 +1308,7 @@ mod tests {
         assert_eq!(page.page_id(), 2);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 1);
-        assert_metrics(&context, 0, 1, 0);
+        assert_metrics(&context, 0, 1, 0, 0);
 
         // mutation
         page.contents_mut()[0] = 123;
@@ -1317,7 +1321,7 @@ mod tests {
         assert_eq!(page.page_id(), 2);
         assert_eq!(page.contents()[0], 123);
         assert_eq!(page.snapshot_id(), 1);
-        assert_metrics(&context, 1, 0, 0);
+        assert_metrics(&context, 1, 0, 0, 0);
 
         // cloning a page should allocate a new page and orphan the original page
         let cloned_page = storage_engine.get_mut_clone(&context, 2).unwrap();
@@ -1325,14 +1329,14 @@ mod tests {
         assert_eq!(cloned_page.contents()[0], 123);
         assert_eq!(cloned_page.snapshot_id(), 2);
         assert_ne!(cloned_page.page_id(), page.page_id());
-        assert_metrics(&context, 2, 1, 0);
+        assert_metrics(&context, 2, 1, 0, 0);
 
         // the next allocation should not come from the orphaned page, as the snapshot id is the same as when the page was orphaned
         let page = storage_engine.allocate_page(&context).unwrap();
         assert_eq!(page.page_id(), 4);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 2);
-        assert_metrics(&context, 2, 2, 0);
+        assert_metrics(&context, 2, 2, 0, 0);
 
         storage_engine.commit(&context).unwrap();
         context = TransactionContext::new(context.metadata.next());
@@ -1342,7 +1346,7 @@ mod tests {
         assert_eq!(page.page_id(), 5);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 3);
-        assert_metrics(&context, 0, 1, 0);
+        assert_metrics(&context, 0, 1, 0, 0);
 
         storage_engine.unlock(3);
 
@@ -1352,7 +1356,7 @@ mod tests {
         assert_eq!(page.page_id(), 2);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 3);
-        assert_metrics(&context, 1, 1, 1);
+        assert_metrics(&context, 1, 1, 1, 0);
     }
 
     #[test]
@@ -1361,16 +1365,17 @@ mod tests {
 
         let page1 = storage_engine.get_page(&context, 1).unwrap();
         assert_eq!(page1.contents()[0], 0);
-        assert_metrics(&context, 1, 0, 0);
+        assert_metrics(&context, 1, 0, 0, 0);
 
         let mut page2 = storage_engine.get_mut_page(&context, 1).unwrap();
         page2.contents_mut()[0] = 123;
-        assert_metrics(&context, 2, 0, 0);
+        assert_metrics(&context, 2, 0, 0, 0);
 
         storage_engine.commit(&context).unwrap();
 
         assert_eq!(page1.contents()[0], 123);
         assert_eq!(page2.contents()[0], 123);
+        assert_metrics(&context, 2, 0, 0, 2);
     }
 
     #[test]
@@ -1387,6 +1392,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(context.metadata.root_subtrie_page_id, 257);
+        assert_metrics(&context, 1, 1, 0, 0);
 
         let test_cases = vec![
             (
@@ -1445,9 +1451,11 @@ mod tests {
         storage_engine
             .set_account(&mut context, path1, Some(account1.clone()))
             .unwrap();
+        assert_metrics(&context, 1, 1, 0, 0);
         storage_engine
             .set_account(&mut context, path2, Some(account2.clone()))
             .unwrap();
+        assert_metrics(&context, 2, 1, 0, 0);
 
         assert_eq!(
             context.metadata.state_root,
