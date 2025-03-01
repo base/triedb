@@ -70,11 +70,11 @@ impl Value for AccountVec {
 }
 
 #[derive(RlpEncodable, Debug)]
-struct RlpAccount {
-    nonce: u64,
-    balance: U256,
-    storage_root: B256,
-    code_hash: B256,
+pub(crate) struct RlpAccount {
+    pub(crate) nonce: u64,
+    pub(crate) balance: U256,
+    pub(crate) storage_root: B256,
+    pub(crate) code_hash: B256,
 }
 
 impl Encodable for AccountVec {
@@ -158,7 +158,7 @@ impl<'a> ValueRef<'a> for AccountSlice<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrieValue {
     Storage(StorageValue),
     Account(AccountVec),
