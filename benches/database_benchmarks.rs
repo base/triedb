@@ -6,7 +6,7 @@ use tempdir::TempDir;
 use triedb::{account::AccountVec, path::AddressPath, Database, MmapPageManager};
 
 const SIZES: &[usize] = &[1_000_000, 3_000_000];
-const BATCH_SIZE: usize = 1_000;
+const BATCH_SIZE: usize = 10_000;
 
 fn generate_random_address(rng: &mut StdRng) -> AddressPath {
     let addr = Address::random_with(rng);
@@ -121,54 +121,60 @@ fn bench_updates(c: &mut Criterion) {
     group.finish();
 }
 
-// fn bench_deletes(c: &mut Criterion) {
-//     let mut group = c.benchmark_group("delete_operations");
+fn bench_deletes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("delete_operations");
 
-//     for &size in SIZES {
-//         let (_dir, db) = setup_database(size);
-//         let mut rng = StdRng::seed_from_u64(42);
-//         let addresses: Vec<AddressPath> = (0..BATCH_SIZE)
-//             .map(|_| generate_random_address(&mut rng))
-//             .collect();
+    for &size in SIZES {
+        let (_dir, db) = setup_database(size);
+        let mut rng = StdRng::seed_from_u64(42);
+        let addresses: Vec<AddressPath> = (0..BATCH_SIZE)
+            .map(|_| generate_random_address(&mut rng))
+            .collect();
 
-//         group.bench_with_input(BenchmarkId::new("batch_deletes", size), &size, |b, _| {
-//             b.iter(|| {
-//                 let mut tx = db.begin_rw().unwrap();
-//                 for addr in &addresses {
-//                     tx.set_account(addr.clone(), None::<AccountVec>).unwrap();
-//                 }
-//                 tx.commit().unwrap();
-//             });
-//         });
-//     }
-//     group.finish();
-// }
+        group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+        group.bench_with_input(BenchmarkId::new("batch_deletes", size), &size, |b, _| {
+            b.iter(|| {
+                let mut tx = db.begin_rw().unwrap();
+                for addr in &addresses {
+                    tx.set_account(addr.clone(), None::<AccountVec>).unwrap();
+                }
+                tx.commit().unwrap();
+            });
+        });
+    }
+    group.finish();
+}
 
 fn bench_mixed_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("mixed_operations");
 
     for &size in SIZES {
         let (_dir, db) = setup_database(size);
+        let mut rng = StdRng::seed_from_u64(42);
+        let existing_addresses: Vec<AddressPath> = (0..BATCH_SIZE)
+            .map(|_| generate_random_address(&mut rng))
+            .collect();
+        let new_addresses: Vec<AddressPath> = (0..BATCH_SIZE)
+            .map(|_| generate_random_address(&mut rng))
+            .collect();
 
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
         group.bench_with_input(BenchmarkId::new("mixed_workload", size), &size, |b, _| {
             b.iter(|| {
-                let mut rng = StdRng::seed_from_u64(1337);
-                let mut read_rng = StdRng::seed_from_u64(42);
                 let mut tx = db.begin_rw().unwrap();
-                for _ in 0..BATCH_SIZE {
+                for i in 0..BATCH_SIZE {
                     let op = rng.gen_range(0..3);
 
                     match op {
                         0 => {
                             // Read
-                            let address = generate_random_address(&mut read_rng);
+                            let address = existing_addresses[i].clone();
                             let account: Option<AccountVec> = tx.get_account(address).unwrap();
                             assert!(account.is_some());
                         }
                         1 => {
                             // Insert
-                            let address = generate_random_address(&mut rng);
+                            let address = new_addresses[i].clone();
                             let account = AccountVec::new(
                                 U256::from(1000u64),
                                 1,
@@ -179,7 +185,7 @@ fn bench_mixed_operations(c: &mut Criterion) {
                         }
                         2 => {
                             // Update
-                            let address = generate_random_address(&mut read_rng);
+                            let address = existing_addresses[i].clone();
                             let new_account = AccountVec::new(
                                 U256::from(999_999_999u64),
                                 123,
@@ -188,10 +194,11 @@ fn bench_mixed_operations(c: &mut Criterion) {
                             );
                             tx.set_account(address.clone(), Some(new_account)).unwrap();
                         }
-                        // 3 => {
-                        //     // Delete
-                        //     tx.set_account(address.clone(), None::<AccountVec>).unwrap();
-                        // }
+                        3 => {
+                            // Delete
+                            let address = existing_addresses[i].clone();
+                            tx.set_account(address.clone(), None::<AccountVec>).unwrap();
+                        }
                         _ => unreachable!(),
                     }
                 }
@@ -207,7 +214,7 @@ criterion_group!(
     bench_reads,
     bench_inserts,
     bench_updates,
-    // bench_deletes,
+    bench_deletes,
     bench_mixed_operations
 );
 criterion_main!(benches);

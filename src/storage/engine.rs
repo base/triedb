@@ -1,6 +1,6 @@
 use crate::{
     account::{Account, AccountVec, TrieValue},
-    database::{Metadata, TransactionContext},
+    database::TransactionContext,
     location::Location,
     node::{LeafType, Node},
     page::{
@@ -15,7 +15,6 @@ use alloy_primitives::B256;
 use alloy_rlp::Encodable;
 use alloy_trie::{nodes::RlpNode, Nibbles, EMPTY_ROOT_HASH};
 use std::cmp::max;
-use std::collections::HashSet;
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -65,7 +64,7 @@ impl<P: PageManager> StorageEngine<P> {
     // Allocates a new page from the underlying page manager.
     // If there is an orphaned page available as of the given snapshot id,
     // it is used to allocate a new page instead.
-    fn allocate_page<'p>(&self, context: &TransactionContext) -> Result<Page<'p, RW>, Error> {
+    fn allocate_page<'p>(&self, context: &mut TransactionContext) -> Result<Page<'p, RW>, Error> {
         let mut inner = self.inner.write().unwrap();
 
         if inner.is_closed() {
@@ -79,7 +78,7 @@ impl<P: PageManager> StorageEngine<P> {
     // The original page is marked as orphaned and a new page is allocated, potentially from an orphaned page.
     fn get_mut_clone<'p>(
         &self,
-        context: &TransactionContext,
+        context: &mut TransactionContext,
         page_id: PageId,
     ) -> Result<Page<'p, RW>, Error> {
         let mut inner = self.inner.write().unwrap();
@@ -215,22 +214,18 @@ impl<P: PageManager> StorageEngine<P> {
         account: Option<A>,
     ) -> Result<(), Error> {
         if account.is_none() {
-            match self.delete_value_in_page::<A>(
+            if let Some(pointer) = self.delete_value_in_page::<A>(
                 context,
                 address_path.clone().into(),
                 context.metadata.root_subtrie_page_id,
                 0,
             )? {
-                Some(pointer) => {
-                    context.metadata.root_subtrie_page_id = pointer.location().page_id().unwrap();
-                    if pointer.rlp().is_empty() {
-                        context.metadata.state_root = EMPTY_ROOT_HASH;
-                    } else {
-                        context.metadata.state_root = pointer.rlp().as_hash().unwrap();
-                    }
+                context.metadata.root_subtrie_page_id = pointer.location().page_id().unwrap();
+                if pointer.rlp().is_empty() {
+                    context.metadata.state_root = EMPTY_ROOT_HASH;
+                } else {
+                    context.metadata.state_root = pointer.rlp().as_hash().unwrap();
                 }
-                // In this case the value did not exist
-                None => (),
             }
 
             return Ok(());
@@ -764,7 +759,7 @@ impl<P: PageManager> StorageEngine<P> {
     ) -> Result<Pointer, Error> {
         // We are at an AccountLeaf and our storage just changed. Let's update our storage root.
         let value = node.value().expect("must be account leaf");
-        let account: AccountVec = AccountVec::from_bytes(value.to_bytes().as_slice())
+        let account: AccountVec = AccountVec::from_bytes(value.serialize().unwrap().as_slice())
             .expect("valid account vector encoding");
         let updated_account = AccountVec::new(
             account.balance(),
@@ -1033,36 +1028,15 @@ impl<P: PageManager> StorageEngine<P> {
         &self,
         context: &mut TransactionContext,
         storage_path: StoragePath,
-        value: StorageValue,
+        value: Option<StorageValue>,
     ) -> Result<(), Error> {
-        let trie_value = TrieValue::Storage(value);
-        let pointer = self.set_value_in_page::<TrieValue>(
-            context,
-            storage_path.full_path(),
-            trie_value,
-            context.metadata.root_subtrie_page_id,
-            0,
-            LeafType::StorageLeaf,
-        )?;
-
-        context.metadata.root_subtrie_page_id = pointer.location().page_id().unwrap();
-        context.metadata.state_root = pointer.rlp().as_hash().unwrap();
-
-        Ok(())
-    }
-
-    pub fn delete_storage(
-        &mut self,
-        context: &mut TransactionContext,
-        storage_path: StoragePath,
-    ) -> Result<(), Error> {
-        match self.delete_value_in_page::<TrieValue>(
-            context,
-            storage_path.full_path(),
-            context.metadata.root_subtrie_page_id,
-            0,
-        )? {
-            Some(pointer) => {
+        if value.is_none() {
+            if let Some(pointer) = self.delete_value_in_page::<TrieValue>(
+                context,
+                storage_path.full_path(),
+                context.metadata.root_subtrie_page_id,
+                0,
+            )? {
                 context.metadata.root_subtrie_page_id = pointer.location().page_id().unwrap();
                 if pointer.rlp().is_empty() {
                     context.metadata.state_root = EMPTY_ROOT_HASH;
@@ -1070,8 +1044,19 @@ impl<P: PageManager> StorageEngine<P> {
                     context.metadata.state_root = pointer.rlp().as_hash().unwrap();
                 }
             }
-            // In this case the value did not exist
-            None => (),
+        } else {
+            let trie_value = TrieValue::Storage(value.unwrap());
+            let pointer = self.set_value_in_page::<TrieValue>(
+                context,
+                storage_path.full_path(),
+                trie_value,
+                context.metadata.root_subtrie_page_id,
+                0,
+                LeafType::StorageLeaf,
+            )?;
+
+            context.metadata.root_subtrie_page_id = pointer.location().page_id().unwrap();
+            context.metadata.state_root = pointer.rlp().as_hash().unwrap();
         }
 
         Ok(())
@@ -1118,8 +1103,8 @@ impl<P: PageManager> StorageEngine<P> {
             .get(context.metadata.snapshot_id, context.metadata.root_page_id)?;
         let root_page = RootPage::try_from(underlying_root_page).map_err(Error::PageError)?;
 
-        // there will always be a minimum of 2 root pages
-        let max_page_count = max(root_page.max_page_number(), 2);
+        // there will always be a minimum of 256 pages (root pages + reserved orphan pages).
+        let max_page_count = max(context.metadata.max_page_number, 256);
         // resize the page manager so that we only store the exact amount of pages we need.
         inner.resize(max_page_count)?;
         // commit all outstanding data to disk.
@@ -1154,19 +1139,26 @@ impl<P: PageManager> Inner<P> {
         matches!(self.status, Status::Closed)
     }
 
-    fn allocate_page<'p>(&mut self, context: &TransactionContext) -> Result<Page<'p, RW>, Error> {
+    fn allocate_page<'p>(
+        &mut self,
+        context: &mut TransactionContext,
+    ) -> Result<Page<'p, RW>, Error> {
         let orphaned_page_id = self.orphan_manager.get_orphaned_page_id();
+        let page_to_return: Page<'p, RW>;
         if let Some(orphaned_page_id) = orphaned_page_id {
             let mut page = self.page_manager_get_mut(context, orphaned_page_id)?;
             page.set_snapshot_id(context.metadata.snapshot_id);
             page.contents_mut().fill(0);
             context.metrics_inc_pages_reallocated();
-            Ok(page)
+            page_to_return = page;
         } else {
-            let page = self.page_manager.allocate(context.metadata.snapshot_id)?;
+            page_to_return = self.page_manager.allocate(context.metadata.snapshot_id)?;
             context.metrics_inc_pages_allocated();
-            Ok(page)
         }
+
+        context.metadata.max_page_number =
+            max(context.metadata.max_page_number, page_to_return.page_id());
+        Ok(page_to_return)
     }
 
     fn resize(&mut self, new_page_count: PageId) -> Result<(), Error> {
@@ -1183,7 +1175,11 @@ impl<P: PageManager> Inner<P> {
             .get_mut(context.metadata.snapshot_id, context.metadata.root_page_id)
             .unwrap();
         // TODO: include the remaining metadata in the new root page.
-        let mut new_root_page = RootPage::new(page_mut, context.metadata.state_root);
+        let mut new_root_page = RootPage::new(
+            page_mut,
+            context.metadata.state_root,
+            context.metadata.max_page_number,
+        );
         let orphaned_page_ids = self.orphan_manager.iter().copied().collect::<Vec<PageId>>();
         let num_orphan_pages_used = self.orphan_manager.get_num_orphan_pages_used();
         self.orphan_manager.reset_num_orphan_pages_used();
@@ -1266,6 +1262,7 @@ mod tests {
         let metadata = Metadata {
             snapshot_id: 1,
             root_page_id: 0,
+            max_page_number: root_subtrie_page_id,
             root_subtrie_page_id,
             state_root: EMPTY_ROOT_HASH,
         };
@@ -1308,7 +1305,7 @@ mod tests {
         let (storage_engine, mut context) = create_test_engine(10, 1);
 
         // Initial allocation
-        let mut page = storage_engine.allocate_page(&context).unwrap();
+        let mut page = storage_engine.allocate_page(&mut context).unwrap();
         assert_eq!(page.page_id(), 2);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 1);
@@ -1328,7 +1325,7 @@ mod tests {
         assert_metrics(&context, 1, 0, 0, 0);
 
         // cloning a page should allocate a new page and orphan the original page
-        let cloned_page = storage_engine.get_mut_clone(&context, 2).unwrap();
+        let cloned_page = storage_engine.get_mut_clone(&mut context, 2).unwrap();
         assert_eq!(cloned_page.page_id(), 3);
         assert_eq!(cloned_page.contents()[0], 123);
         assert_eq!(cloned_page.snapshot_id(), 2);
@@ -1336,7 +1333,7 @@ mod tests {
         assert_metrics(&context, 2, 1, 0, 0);
 
         // the next allocation should not come from the orphaned page, as the snapshot id is the same as when the page was orphaned
-        let page = storage_engine.allocate_page(&context).unwrap();
+        let page = storage_engine.allocate_page(&mut context).unwrap();
         assert_eq!(page.page_id(), 4);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 2);
@@ -1346,7 +1343,7 @@ mod tests {
         context = TransactionContext::new(context.metadata.next());
 
         // the next allocation should not come from the orphaned page, as the snapshot has not been unlocked yet
-        let page = storage_engine.allocate_page(&context).unwrap();
+        let page = storage_engine.allocate_page(&mut context).unwrap();
         assert_eq!(page.page_id(), 5);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 3);
@@ -1356,11 +1353,14 @@ mod tests {
 
         // the next allocation should come from the orphaned page because the snapshot id has increased.
         // The page data should be zeroed out.
-        let page = storage_engine.allocate_page(&context).unwrap();
+        let page = storage_engine.allocate_page(&mut context).unwrap();
         assert_eq!(page.page_id(), 2);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 3);
         assert_metrics(&context, 1, 1, 1, 0);
+
+        // assert that the metadata tracks the largest page number
+        assert_eq!(context.metadata.max_page_number, 5);
     }
 
     #[test]
@@ -1544,7 +1544,7 @@ mod tests {
                     .set_storage(
                         &mut context,
                         StoragePath::for_address_and_slot(address, slot),
-                        value,
+                        Some(value),
                     )
                     .unwrap();
             }
@@ -1574,7 +1574,7 @@ mod tests {
                     .set_storage(
                         &mut context,
                         StoragePath::for_address_and_slot(address, slot),
-                        StorageValue::from(rng.next_u64()),
+                        Some(StorageValue::from(rng.next_u64())),
                     )
                     .unwrap();
             }
@@ -1596,7 +1596,7 @@ mod tests {
                     .set_storage(
                         &mut context,
                         StoragePath::for_address_and_slot(address, slot),
-                        value,
+                        Some(value),
                     )
                     .unwrap();
             }
@@ -1715,7 +1715,7 @@ mod tests {
         let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
         storage_engine
-            .set_storage(&mut context, storage_path, storage_value)
+            .set_storage(&mut context, storage_path, Some(storage_value))
             .unwrap();
     }
 
@@ -1769,7 +1769,7 @@ mod tests {
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             storage_engine
-                .set_storage(&mut context, storage_path, storage_value)
+                .set_storage(&mut context, storage_path, Some(storage_value))
                 .unwrap();
 
             context.metadata = context.metadata.next();
@@ -1834,7 +1834,7 @@ mod tests {
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             storage_engine
-                .set_storage(&mut context, storage_path, storage_value)
+                .set_storage(&mut context, storage_path, Some(storage_value))
                 .unwrap();
 
             context.metadata = context.metadata.next();
@@ -1885,7 +1885,7 @@ mod tests {
 
                 let storage_path = StoragePath::for_address_and_slot(address, storage_slot_key);
                 storage_engine
-                    .set_storage(&mut context, storage_path.clone(), storage_slot_value)
+                    .set_storage(&mut context, storage_path.clone(), Some(storage_slot_value))
                     .unwrap();
 
                 keys_values.push((
@@ -2374,7 +2374,7 @@ mod tests {
 
     #[test]
     fn test_delete_storage() {
-        let (mut storage_engine, mut context) = create_test_engine(300, 256);
+        let (storage_engine, mut context) = create_test_engine(300, 256);
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
@@ -2412,17 +2412,17 @@ mod tests {
 
         // Insert storage slots and verify they don't exist before insertion
         for (storage_key, storage_value) in &test_cases {
-            let storage_path = StoragePath::for_address_and_slot(address.clone(), *storage_key);
+            let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
             let read_storage_slot = storage_engine
                 .get_storage(&context, storage_path.clone())
                 .unwrap();
             assert_eq!(read_storage_slot, None);
 
-            let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
+            let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             storage_engine
-                .set_storage(&mut context, storage_path, storage_value)
+                .set_storage(&mut context, storage_path, Some(storage_value))
                 .unwrap();
 
             context = TransactionContext::new(context.metadata.next());
@@ -2430,9 +2430,9 @@ mod tests {
 
         // Verify that we get all the storage values
         for (storage_key, storage_value) in &test_cases {
-            let storage_path = StoragePath::for_address_and_slot(address.clone(), *storage_key);
+            let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
-            let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
+            let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             let read_storage_slot = storage_engine
                 .get_storage(&context, storage_path.clone())
@@ -2451,9 +2451,9 @@ mod tests {
                 )
             })
             .collect();
-        let expected_root = storage_root_unhashed(keys_values.clone().into_iter());
+        let expected_root = storage_root_unhashed(keys_values.clone());
         let account = storage_engine
-            .get_account::<AccountVec>(&context, AddressPath::for_address(address.clone()))
+            .get_account::<AccountVec>(&context, AddressPath::for_address(address))
             .unwrap()
             .unwrap();
 
@@ -2461,13 +2461,11 @@ mod tests {
         assert_eq!(storage_root, expected_root);
 
         // Delete storage one at a time
-        for (storage_key, storage_value) in &test_cases {
-            let storage_path = StoragePath::for_address_and_slot(address.clone(), *storage_key);
-
-            let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
+        for (storage_key, _) in &test_cases {
+            let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
             storage_engine
-                .delete_storage(&mut context, storage_path.clone())
+                .set_storage(&mut context, storage_path.clone(), None)
                 .unwrap();
 
             let read_storage_slot = storage_engine
@@ -2480,7 +2478,7 @@ mod tests {
             keys_values.remove(0);
             let expected_root = storage_root_unhashed(keys_values.clone());
             let account = storage_engine
-                .get_account::<AccountVec>(&context, AddressPath::for_address(address.clone()))
+                .get_account::<AccountVec>(&context, AddressPath::for_address(address))
                 .unwrap()
                 .unwrap();
 
@@ -2491,7 +2489,7 @@ mod tests {
 
     #[test]
     fn test_delete_account_also_deletes_storage() {
-        let (mut storage_engine, mut context) = create_test_engine(300, 256);
+        let (storage_engine, mut context) = create_test_engine(300, 256);
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
@@ -2529,17 +2527,17 @@ mod tests {
 
         // Insert storage slots and verify they don't exist before insertion
         for (storage_key, storage_value) in &test_cases {
-            let storage_path = StoragePath::for_address_and_slot(address.clone(), *storage_key);
+            let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
             let read_storage_slot = storage_engine
                 .get_storage(&context, storage_path.clone())
                 .unwrap();
             assert_eq!(read_storage_slot, None);
 
-            let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
+            let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             storage_engine
-                .set_storage(&mut context, storage_path, storage_value)
+                .set_storage(&mut context, storage_path, Some(storage_value))
                 .unwrap();
 
             context = TransactionContext::new(context.metadata.next());
@@ -2547,9 +2545,9 @@ mod tests {
 
         // Verify that we get all the storage values
         for (storage_key, storage_value) in &test_cases {
-            let storage_path = StoragePath::for_address_and_slot(address.clone(), *storage_key);
+            let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
-            let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
+            let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             let read_storage_slot = storage_engine
                 .get_storage(&context, storage_path.clone())
@@ -2572,9 +2570,9 @@ mod tests {
 
         // Verify all the storage slots don't exist
         for (storage_key, storage_value) in &test_cases {
-            let storage_path = StoragePath::for_address_and_slot(address.clone(), *storage_key);
+            let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
-            let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
+            let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             let res = storage_engine.get_storage(&context, storage_path.clone());
             assert!(matches!(
@@ -2594,9 +2592,9 @@ mod tests {
 
         // Verify all the storage slots still don't exist
         for (storage_key, storage_value) in &test_cases {
-            let storage_path = StoragePath::for_address_and_slot(address.clone(), *storage_key);
+            let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
-            let storage_value = StorageValue::from_be_slice(&storage_value.as_slice());
+            let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             let read_storage = storage_engine
                 .get_storage(&context, storage_path.clone())
@@ -2607,7 +2605,7 @@ mod tests {
 
     #[test]
     fn test_delete_single_child_branch_on_same_page() {
-        let (mut storage_engine, mut context) = create_test_engine(300, 256);
+        let (storage_engine, mut context) = create_test_engine(300, 256);
 
         // GIVEN: a branch node with 2 children, where all the children live on the same page
         let mut account_1_nibbles = [0u8; 64];
@@ -2640,7 +2638,7 @@ mod tests {
             .unwrap();
         let slotted_page = SlottedPage::try_from(page).unwrap();
         let node: Node<AccountVec> = slotted_page.get_value(0).unwrap();
-        assert_eq!(node.is_branch(), true);
+        assert!(node.is_branch());
 
         // WHEN: one of these accounts is deleted
         storage_engine
@@ -2681,7 +2679,7 @@ mod tests {
 
     #[test]
     fn test_delete_single_child_non_root_branch_on_different_pages() {
-        let (mut storage_engine, mut context) = create_test_engine(300, 256);
+        let (storage_engine, mut context) = create_test_engine(300, 256);
 
         // GIVEN: a non-root branch node with 2 children where both children are on a different pages
         //
@@ -2716,7 +2714,7 @@ mod tests {
             .unwrap();
         let slotted_page = SlottedPage::try_from(page).unwrap();
         let mut root_node: Node<AccountVec> = slotted_page.get_value(0).unwrap();
-        assert_eq!(root_node.is_branch(), true);
+        assert!(root_node.is_branch());
 
         let test_account = create_test_account(424, 234);
 
@@ -2729,11 +2727,11 @@ mod tests {
         let mut slotted_page1 = SlottedPage::try_from(page1).unwrap();
 
         // page2 will hold our 1st child
-        let page2 = storage_engine.allocate_page(&context).unwrap();
+        let page2 = storage_engine.allocate_page(&mut context).unwrap();
         let mut slotted_page2 = SlottedPage::try_from(page2).unwrap();
 
         // page3 will hold our 2nd child
-        let page3 = storage_engine.allocate_page(&context).unwrap();
+        let page3 = storage_engine.allocate_page(&mut context).unwrap();
         let mut slotted_page3 = SlottedPage::try_from(page3).unwrap();
 
         // we will force add 2 children to this branch node
@@ -2765,7 +2763,7 @@ mod tests {
 
         // child 2 is the root of page3
         slotted_page3.insert_value(child_2).unwrap();
-        let child_2_location = Location::from(slotted_page3.page_id() as u32);
+        let child_2_location = Location::from(slotted_page3.page_id());
 
         let mut new_branch_node: Node<AccountVec> = Node::new_branch(Nibbles::new());
         new_branch_node.set_child(0, Pointer::new(child_1_location, RlpNode::default()));
@@ -2782,8 +2780,8 @@ mod tests {
         storage_engine.commit(&context).unwrap();
 
         // assert we can get the child account we just added:
-        let child_1_nibbles = Nibbles::from_nibbles(&child_1_full_path.clone());
-        let child_2_nibbles = Nibbles::from_nibbles(&child_2_full_path.clone());
+        let child_1_nibbles = Nibbles::from_nibbles(child_1_full_path.clone());
+        let child_2_nibbles = Nibbles::from_nibbles(child_2_full_path.clone());
         let read_account1 = storage_engine
             .get_account::<AccountVec>(&context, AddressPath::new(child_1_nibbles.clone()))
             .unwrap();
@@ -2794,7 +2792,7 @@ mod tests {
         assert_eq!(read_account2, Some(test_account.clone()));
 
         // WHEN: child 1 is deleted
-        let child_1_path = Nibbles::from_nibbles(&child_1_full_path.clone());
+        let child_1_path = Nibbles::from_nibbles(child_1_full_path.clone());
         storage_engine
             .set_account::<AccountVec>(&mut context, AddressPath::new(child_1_path), None)
             .unwrap();
@@ -2805,7 +2803,7 @@ mod tests {
             .unwrap();
         let root_node_slotted = SlottedPage::try_from(root_node_page).unwrap();
         let root_node: Node<AccountVec> = slotted_page.get_value(0).unwrap();
-        assert_eq!(root_node.is_branch(), true);
+        assert!(root_node.is_branch());
         let child_2_pointer = root_node.child(5).unwrap();
         assert!(child_2_pointer.location().page_id().is_some());
         assert_eq!(
@@ -2834,7 +2832,7 @@ mod tests {
 
     #[test]
     fn test_delete_single_child_root_branch_on_different_pages() {
-        let (mut storage_engine, mut context) = create_test_engine(300, 256);
+        let (storage_engine, mut context) = create_test_engine(300, 256);
 
         // GIVEN: a root branch node with 2 children where both children are on a different page
         //
@@ -2842,11 +2840,11 @@ mod tests {
         let test_account = create_test_account(424, 234);
 
         // page2 will hold our 1st child
-        let page2 = storage_engine.allocate_page(&context).unwrap();
+        let page2 = storage_engine.allocate_page(&mut context).unwrap();
         let mut slotted_page2 = SlottedPage::try_from(page2).unwrap();
 
         // page3 will hold our 2nd child
-        let page3 = storage_engine.allocate_page(&context).unwrap();
+        let page3 = storage_engine.allocate_page(&mut context).unwrap();
         let mut slotted_page3 = SlottedPage::try_from(page3).unwrap();
 
         // we will force add 2 children to our root node
@@ -2876,7 +2874,7 @@ mod tests {
 
         // child 2 is the root of page3
         slotted_page3.insert_value(child_2).unwrap();
-        let child_2_location = Location::from(slotted_page3.page_id() as u32);
+        let child_2_location = Location::from(slotted_page3.page_id());
 
         // next we create and update our root node
         let mut root_node: Node<AccountVec> = Node::new_branch(Nibbles::new());
@@ -2893,8 +2891,8 @@ mod tests {
         storage_engine.commit(&context).unwrap();
 
         // assert we can get the children accounts we just added:
-        let child_1_nibbles = Nibbles::from_nibbles(&child_1_full_path.clone());
-        let child_2_nibbles = Nibbles::from_nibbles(&child_2_full_path.clone());
+        let child_1_nibbles = Nibbles::from_nibbles(child_1_full_path.clone());
+        let child_2_nibbles = Nibbles::from_nibbles(child_2_full_path.clone());
         let read_account1 = storage_engine
             .get_account::<AccountVec>(&context, AddressPath::new(child_1_nibbles.clone()))
             .unwrap();

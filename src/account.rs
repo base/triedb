@@ -50,8 +50,16 @@ impl Account for AccountVec {
 }
 
 impl Value for AccountVec {
-    fn to_bytes(&self) -> Vec<u8> {
-        self.data.clone()
+    fn size(&self) -> usize {
+        self.data.len()
+    }
+
+    fn serialize_into(&self, buf: &mut [u8]) -> value::Result<usize> {
+        if buf.len() < self.data.len() {
+            return Err(value::Error::InvalidEncoding);
+        }
+        buf[..self.data.len()].copy_from_slice(&self.data);
+        Ok(self.data.len())
     }
 
     fn from_bytes(bytes: &[u8]) -> value::Result<Self> {
@@ -157,10 +165,23 @@ pub enum TrieValue {
 }
 
 impl Value for TrieValue {
-    fn to_bytes(&self) -> Vec<u8> {
+    fn size(&self) -> usize {
         match self {
-            Self::Storage(storage_value) => storage_value.to_be_bytes::<32>().to_vec(),
-            Self::Account(account_vec) => account_vec.to_bytes(),
+            Self::Storage(_) => 32,
+            Self::Account(account) => account.size(),
+        }
+    }
+
+    fn serialize_into(&self, buf: &mut [u8]) -> value::Result<usize> {
+        match self {
+            Self::Storage(storage_value) => {
+                if buf.len() < 32 {
+                    return Err(value::Error::InvalidEncoding);
+                }
+                buf[..32].copy_from_slice(&storage_value.to_be_bytes::<32>());
+                Ok(32)
+            }
+            Self::Account(account) => account.serialize_into(buf),
         }
     }
 
@@ -201,7 +222,7 @@ mod tests {
 
         #[test]
         fn fuzz_account_to_from_bytes(account: AccountVec) {
-            let bytes = account.clone().to_bytes();
+            let bytes = account.serialize().unwrap();
             let decoded = AccountVec::from_bytes(&bytes).unwrap();
             assert_eq!(account, decoded);
         }
