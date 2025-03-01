@@ -2220,6 +2220,43 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_delete_account() {
+        let (storage_engine, mut context) = create_test_engine(300, 256);
+
+        let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
+        let account = create_test_account(100, 1);
+        storage_engine
+            .set_account(
+                &mut context,
+                AddressPath::for_address(address),
+                Some(account.clone()),
+            )
+            .unwrap();
+        assert_metrics(&context, 1, 1, 0, 0);
+
+        // Check that the account exists
+        let read_account = storage_engine
+            .get_account::<AccountVec>(&context, AddressPath::for_address(address))
+            .unwrap();
+        assert_eq!(read_account, Some(account.clone()));
+
+        // Reset the context metrics
+        let mut context = TransactionContext::new(context.metadata);
+        storage_engine
+            .set_account::<AccountVec>(&mut context, AddressPath::for_address(address), None)
+            .unwrap();
+        assert_metrics(&context, 2, 0, 0, 0);
+
+        // Verify the account is deleted
+        let read_account =
+            storage_engine.get_account::<AccountVec>(&context, AddressPath::for_address(address));
+        // The error is an InvalidCellPointer error, and not None
+        // TODO: does it make sense to have an error here?
+        assert!(read_account.is_err());
+    }
+
     #[test]
     fn test_delete_accounts() {
         let (storage_engine, mut context) = create_test_engine(300, 256);
