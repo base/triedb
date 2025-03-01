@@ -1286,7 +1286,7 @@ mod tests {
         pages_read: u32,
         pages_allocated: u32,
         pages_reallocated: u32,
-        commit: u32,
+        pages_split: u32,
     ) {
         assert_eq!(context.transaction_metrics.borrow().pages_read, pages_read);
         assert_eq!(
@@ -1297,7 +1297,10 @@ mod tests {
             context.transaction_metrics.borrow().pages_reallocated,
             pages_reallocated
         );
-        assert_eq!(context.transaction_metrics.borrow().commit, commit);
+        assert_eq!(
+            context.transaction_metrics.borrow().pages_split,
+            pages_split
+        );
     }
 
     #[test]
@@ -1376,7 +1379,7 @@ mod tests {
 
         assert_eq!(page1.contents()[0], 123);
         assert_eq!(page2.contents()[0], 123);
-        assert_metrics(&context, 2, 0, 0, 2);
+        assert_metrics(&context, 2, 0, 0, 0);
     }
 
     #[test]
@@ -2090,6 +2093,8 @@ mod tests {
                 "New account not found"
             );
         }
+        // Verify the pages split metric
+        assert!(context.transaction_metrics.borrow().pages_split > 0);
     }
 
     #[test]
