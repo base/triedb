@@ -1,8 +1,9 @@
-use alloy_rlp::{encode, BufMut, Encodable};
+use alloy_rlp::{encode, encode_fixed_size, BufMut, Encodable, MaxEncodedLen};
 use alloy_trie::{
     nodes::{BranchNode, ExtensionNodeRef, LeafNodeRef, RlpNode},
     Nibbles, TrieMask,
 };
+use either::Either;
 use proptest::prelude::{any, prop, Strategy};
 use proptest_derive::Arbitrary;
 
@@ -90,19 +91,28 @@ impl<V: Value> Node<V> {
         matches!(self, Self::Branch { .. })
     }
 
-    pub fn enumerate_children(&self) -> Vec<(u8, &Pointer)> {
+    pub fn num_children(&self) -> usize {
         match self {
-            Self::AccountLeaf { storage_root, .. } => [storage_root]
-                .iter()
-                .enumerate()
-                .filter_map(|(i, child)| child.as_ref().map(|p| (i as u8, p)))
-                .collect(),
-            Self::Branch { children, .. } => children
-                .iter()
-                .enumerate()
-                .filter_map(|(i, child)| child.as_ref().map(|p| (i as u8, p)))
-                .collect(),
-            _ => panic!("cannot enumerate children of non-branch node"),
+            Self::AccountLeaf { storage_root, .. } => storage_root.as_ref().map_or(0, |_| 1),
+            Self::Branch { children, .. } => {
+                children.iter().filter(|child| child.is_some()).count()
+            }
+            _ => 0,
+        }
+    }
+
+    pub fn enumerate_children(&self) -> impl Iterator<Item = (u8, &Pointer)> {
+        match self {
+            Self::AccountLeaf { storage_root, .. } => Either::Left(Either::Left(
+                storage_root.as_ref().into_iter().map(|p| (0u8, p)),
+            )),
+            Self::Branch { children, .. } => Either::Left(Either::Right(
+                children
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, child)| child.as_ref().map(|p| (i as u8, p))),
+            )),
+            _ => Either::Right(std::iter::empty()),
         }
     }
 
@@ -153,9 +163,11 @@ impl<V: Value> Node<V> {
     }
 }
 
+unsafe impl<V: Value + Encodable> MaxEncodedLen<1024> for Node<V> {}
+
 impl<V: Value + Encodable> Node<V> {
     pub fn rlp_encode(&self) -> RlpNode {
-        RlpNode::from_rlp(&encode(self))
+        RlpNode::from_rlp(&encode_fixed_size(self))
     }
 }
 

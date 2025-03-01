@@ -2068,6 +2068,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-trie",
  "criterion",
+ "either",
  "log",
  "memmap2",
  "pprof",

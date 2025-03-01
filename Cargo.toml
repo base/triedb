@@ -5,9 +5,10 @@ edition = "2021"
 
 [dependencies]
 alloy-primitives = { version = "0.8.21", features = ["arbitrary", "rand"] }
-alloy-rlp = "0.3.11"
+alloy-rlp = { version = "0.3.11", features = ["arrayvec"] }
 alloy-trie = { version = "0.7.6", features=["arbitrary", "ethereum"]}
 log = "0.4.25"
+either = "1.14.0"
 memmap2 = "0.9.5"
 proptest = "1.6.0"
 proptest-derive = "0.5.1"

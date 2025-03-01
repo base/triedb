@@ -624,9 +624,9 @@ impl<P: PageManager> StorageEngine<P> {
                 //      3b: if our child is a branch, become a single nibble prefixed extension node to our child branch
                 node.remove_child(child_index);
 
-                let children = node.enumerate_children();
+                let num_children = node.num_children();
 
-                if !node.is_branch() || children.len() > 1 {
+                if !node.is_branch() || num_children > 1 {
                     // we are either an account leaf or a branch node with 2 or more children, so
                     // just update our child pointer/hash and return upstream.
                     //
@@ -658,7 +658,8 @@ impl<P: PageManager> StorageEngine<P> {
                 // whether our child_node is leaf (accountleaf or storageleaf) or a branch doesn't matter.
                 // by prepending our child_index to the child_node's prefix, we are either creating a longer
                 // leaf node or a longer extension node which is exactly what we need.
-                let (only_child_index, only_child_node_pointer) = children[0];
+                let (only_child_index, only_child_node_pointer) =
+                    node.enumerate_children().next().unwrap();
 
                 let (mut only_child_node, child_slotted_page) =
                     if let Some(cell_index) = only_child_node_pointer.location().cell_index() {
@@ -1125,11 +1126,7 @@ impl<P: PageManager> StorageEngine<P> {
 fn count_subtrie_nodes<V: Value>(page: &SlottedPage<'_, RW>, root_index: u8) -> Result<u8, Error> {
     let mut count = 1; // Count the root node
     let node: Node<V> = page.get_value(root_index)?;
-    if !node.is_branch() {
-        return Ok(count);
-    }
-
-    // Count child nodes that are in this page
+    // Count only the child nodes that are in this page
     for (_, child_ptr) in node.enumerate_children() {
         if let Some(child_index) = child_ptr.location().cell_index() {
             count += count_subtrie_nodes::<V>(page, child_index)?;
