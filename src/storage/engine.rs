@@ -1278,6 +1278,23 @@ mod tests {
         AccountVec::new(U256::from(balance), nonce, KECCAK_EMPTY, EMPTY_ROOT_HASH)
     }
 
+    fn assert_metrics(
+        context: &TransactionContext,
+        pages_read: u32,
+        pages_allocated: u32,
+        pages_reallocated: u32,
+    ) {
+        assert_eq!(context.transaction_metrics.borrow().pages_read, pages_read);
+        assert_eq!(
+            context.transaction_metrics.borrow().pages_allocated,
+            pages_allocated
+        );
+        assert_eq!(
+            context.transaction_metrics.borrow().pages_reallocated,
+            pages_reallocated
+        );
+    }
+
     #[test]
     fn test_allocate_get_mut_clone() {
         let (storage_engine, mut context) = create_test_engine(10, 1);
@@ -1287,8 +1304,7 @@ mod tests {
         assert_eq!(page.page_id(), 2);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 1);
-        assert_eq!(context.transaction_metrics.borrow().pages_read, 0);
-        assert_eq!(context.transaction_metrics.borrow().pages_allocated, 1);
+        assert_metrics(&context, 0, 1, 0);
 
         // mutation
         page.contents_mut()[0] = 123;
@@ -1301,8 +1317,7 @@ mod tests {
         assert_eq!(page.page_id(), 2);
         assert_eq!(page.contents()[0], 123);
         assert_eq!(page.snapshot_id(), 1);
-        assert_eq!(context.transaction_metrics.borrow().pages_read, 1);
-        assert_eq!(context.transaction_metrics.borrow().pages_allocated, 0);
+        assert_metrics(&context, 1, 0, 0);
 
         // cloning a page should allocate a new page and orphan the original page
         let cloned_page = storage_engine.get_mut_clone(&context, 2).unwrap();
@@ -1310,16 +1325,14 @@ mod tests {
         assert_eq!(cloned_page.contents()[0], 123);
         assert_eq!(cloned_page.snapshot_id(), 2);
         assert_ne!(cloned_page.page_id(), page.page_id());
-        assert_eq!(context.transaction_metrics.borrow().pages_read, 2);
-        assert_eq!(context.transaction_metrics.borrow().pages_allocated, 1);
+        assert_metrics(&context, 2, 1, 0);
 
         // the next allocation should not come from the orphaned page, as the snapshot id is the same as when the page was orphaned
         let page = storage_engine.allocate_page(&context).unwrap();
         assert_eq!(page.page_id(), 4);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 2);
-        assert_eq!(context.transaction_metrics.borrow().pages_read, 2);
-        assert_eq!(context.transaction_metrics.borrow().pages_allocated, 2);
+        assert_metrics(&context, 2, 2, 0);
 
         storage_engine.commit(&context).unwrap();
         context = TransactionContext::new(context.metadata.next());
@@ -1329,8 +1342,7 @@ mod tests {
         assert_eq!(page.page_id(), 5);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 3);
-        assert_eq!(context.transaction_metrics.borrow().pages_read, 0);
-        assert_eq!(context.transaction_metrics.borrow().pages_allocated, 1);
+        assert_metrics(&context, 0, 1, 0);
 
         storage_engine.unlock(3);
 
@@ -1340,20 +1352,20 @@ mod tests {
         assert_eq!(page.page_id(), 2);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 3);
-        assert_eq!(context.transaction_metrics.borrow().pages_read, 1);
-        assert_eq!(context.transaction_metrics.borrow().pages_allocated, 1);
-        assert_eq!(context.transaction_metrics.borrow().pages_reallocated, 1);
+        assert_metrics(&context, 1, 1, 1);
     }
 
     #[test]
     fn test_shared_page_mutability() {
-        let (storage_engine, mut context) = create_test_engine(10, 1);
+        let (storage_engine, context) = create_test_engine(10, 1);
 
         let page1 = storage_engine.get_page(&context, 1).unwrap();
         assert_eq!(page1.contents()[0], 0);
+        assert_metrics(&context, 1, 0, 0);
 
         let mut page2 = storage_engine.get_mut_page(&context, 1).unwrap();
         page2.contents_mut()[0] = 123;
+        assert_metrics(&context, 2, 0, 0);
 
         storage_engine.commit(&context).unwrap();
 
