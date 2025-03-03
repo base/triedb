@@ -2722,8 +2722,8 @@ mod tests {
         storage_engine.commit(&context).unwrap();
 
         // assert we can get the child account we just added:
-        let child_1_nibbles = Nibbles::from_nibbles(child_1_full_path.clone());
-        let child_2_nibbles = Nibbles::from_nibbles(child_2_full_path.clone());
+        let child_1_nibbles = Nibbles::from_nibbles(child_1_full_path);
+        let child_2_nibbles = Nibbles::from_nibbles(child_2_full_path);
         let read_account1 = storage_engine
             .get_account::<AccountVec>(&context, AddressPath::new(child_1_nibbles.clone()))
             .unwrap();
@@ -2734,7 +2734,7 @@ mod tests {
         assert_eq!(read_account2, Some(test_account.clone()));
 
         // WHEN: child 1 is deleted
-        let child_1_path = Nibbles::from_nibbles(child_1_full_path.clone());
+        let child_1_path = Nibbles::from_nibbles(child_1_full_path);
         storage_engine
             .set_account::<AccountVec>(&mut context, AddressPath::new(child_1_path), None)
             .unwrap();
@@ -2833,8 +2833,8 @@ mod tests {
         storage_engine.commit(&context).unwrap();
 
         // assert we can get the children accounts we just added:
-        let child_1_nibbles = Nibbles::from_nibbles(child_1_full_path.clone());
-        let child_2_nibbles = Nibbles::from_nibbles(child_2_full_path.clone());
+        let child_1_nibbles = Nibbles::from_nibbles(child_1_full_path);
+        let child_2_nibbles = Nibbles::from_nibbles(child_2_full_path);
         let read_account1 = storage_engine
             .get_account::<AccountVec>(&context, AddressPath::new(child_1_nibbles.clone()))
             .unwrap();
