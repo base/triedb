@@ -167,15 +167,11 @@ impl<V: Value> Value for Node<V> {
                 let prefix_length = prefix.len();
                 2 + prefix_length + value.size() // 2 bytes for type and prefix length
             }
-            Self::AccountLeaf {
-                prefix,
-                value,
-                storage_root,
-            } => {
+            Self::AccountLeaf { prefix, value, .. } => {
                 let prefix_length = prefix.len();
                 2 + prefix_length + 37 + value.size() // 2 bytes for type and prefix length, 37 for storage root
             }
-            Self::Branch { prefix, children } => {
+            Self::Branch { prefix, .. } => {
                 let prefix_length = prefix.len();
                 2 + prefix_length + 2 + 16 * 37 // 2 bytes for type and prefix length, 2 for bitmask, 37 for each child pointer
             }
@@ -229,7 +225,7 @@ impl<V: Value> Value for Node<V> {
             Self::Branch { prefix, children } => {
                 let prefix_length = prefix.len();
                 let mut total_size = 2 + prefix_length + 2; // Type, prefix length, bitmask
-                for child in children.iter().flatten() {
+                for _ in children.iter().flatten() {
                     total_size += 37; // Each pointer is 37 bytes
                 }
 
@@ -323,11 +319,7 @@ impl<V: Value + Encodable> Encodable for Node<V> {
                 }
                 .encode(out);
             }
-            Self::AccountLeaf {
-                prefix,
-                value,
-                storage_root,
-            } => {
+            Self::AccountLeaf { prefix, value, .. } => {
                 let value_rlp = encode(value);
                 LeafNodeRef {
                     key: prefix,
@@ -381,11 +373,7 @@ impl<V: Value + Encodable> Encodable for Node<V> {
                 // this just has to be an estimate for `Vec::with_capacity`
                 prefix.len() + value.size() + 10 // 10 is just a buffer
             }
-            Self::AccountLeaf {
-                prefix,
-                value,
-                storage_root,
-            } => {
+            Self::AccountLeaf { prefix, value, .. } => {
                 // this just has to be an estimate for `Vec::with_capacity`
                 prefix.len() + value.size() + 10 // 10 is just a buffer
             }

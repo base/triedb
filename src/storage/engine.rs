@@ -123,6 +123,7 @@ impl<P: PageManager> StorageEngine<P> {
             .map_err(|e| e.into())
     }
 
+    #[cfg(test)]
     fn get_mut_page<'p>(
         &self,
         context: &TransactionContext,
@@ -1077,7 +1078,7 @@ impl<P: PageManager> StorageEngine<P> {
         inner.commit(context)
     }
 
-    pub fn rollback(&self, context: &TransactionContext) -> Result<(), Error> {
+    pub fn rollback(&self, _context: &TransactionContext) -> Result<(), Error> {
         todo!()
     }
 
@@ -1102,11 +1103,6 @@ impl<P: PageManager> StorageEngine<P> {
         if inner.is_closed() {
             return Err(Error::EngineClosed);
         }
-
-        let underlying_root_page = inner
-            .page_manager
-            .get(context.metadata.snapshot_id, context.metadata.root_page_id)?;
-        let root_page = RootPage::try_from(underlying_root_page).map_err(Error::PageError)?;
 
         // there will always be a minimum of 256 pages (root pages + reserved orphan pages).
         let max_page_count = max(context.metadata.max_page_number, 256);

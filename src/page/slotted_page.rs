@@ -12,13 +12,6 @@ use cell_pointer::CellPointer;
 
 const MAX_NUM_CELLS: u8 = 255; // With 1 byte for the number of cells, the maximum number of cells is 255.
 
-pub trait SlottedStorage<'s, V> {
-    type Error;
-
-    // Returns the value at the given index.
-    fn get_value(&self, index: u8) -> Result<V, Self::Error>;
-}
-
 // A page that contains a sequence of pointers to variable-length values,
 // where the pointers are stored in a contiguous array of 3-byte cell pointers from the
 // beginning of the page, and the values are added from the end of the page.
@@ -118,14 +111,6 @@ impl<P: PageKind> std::fmt::Debug for SlottedPage<'_, P> {
             self.num_free_bytes_with_cell_count(num_cells),
             self.num_dead_bytes(num_cells)
         )
-    }
-}
-
-impl<'p, P: PageKind, V: Value> SlottedStorage<'p, V> for SlottedPage<'p, P> {
-    type Error = PageError;
-
-    fn get_value(&self, index: u8) -> Result<V, Self::Error> {
-        SlottedPage::get_value(self, index)
     }
 }
 

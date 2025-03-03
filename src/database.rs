@@ -29,7 +29,7 @@ pub(crate) struct Inner<P: PageManager> {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct Metadata {
+pub struct Metadata {
     pub(crate) root_page_id: PageId,
     pub(crate) root_subtrie_page_id: PageId,
     pub(crate) max_page_number: PageId,
@@ -50,7 +50,7 @@ impl Metadata {
 }
 
 #[derive(Debug)]
-pub(crate) struct TransactionContext {
+pub struct TransactionContext {
     pub(crate) metadata: Metadata,
     // TODO: add others for transaction context like metrics, etc.
 }
