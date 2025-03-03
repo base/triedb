@@ -8,8 +8,6 @@ use super::{
     PageError, PageId, PageManager,
 };
 
-const MAX_ORPHANS: usize = 1011;
-
 pub struct RootPage<'p, P: PageKind> {
     page: Page<'p, P>,
 }
@@ -279,6 +277,8 @@ mod tests {
     use super::*;
     use crate::page::MmapPageManager;
     use crate::page::PAGE_DATA_SIZE;
+
+    const MAX_ORPHANS: usize = 1011;
 
     #[test]
     fn test_add_get_orphan_page_ids() {

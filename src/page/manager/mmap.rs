@@ -41,6 +41,7 @@ impl MmapPageManager {
     }
 
     // Creates a new MmapPageManager with an anonymous memory mapped file.
+    #[cfg(test)]
     pub(crate) fn new_anon(capacity: PageId, next_page_id: PageId) -> Result<Self, PageError> {
         let mmap = MmapMut::map_anon(capacity as usize * PAGE_SIZE).map_err(PageError::IO)?;
         Ok(Self {
@@ -77,7 +78,11 @@ impl MmapPageManager {
 
 impl PageManager for MmapPageManager {
     // Retrieves a page from the memory mapped file.
-    fn get<'p>(&self, snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'p, RO>, PageError> {
+    fn get<'p>(
+        &self,
+        _snapshot_id: SnapshotId,
+        page_id: PageId,
+    ) -> Result<Page<'p, RO>, PageError> {
         let page_data = self.page_data(page_id)?;
         Ok(Page::new_ro(page_id, page_data))
     }
@@ -85,7 +90,7 @@ impl PageManager for MmapPageManager {
     // Retrieves a mutable page from the memory mapped file.
     fn get_mut<'p>(
         &mut self,
-        snapshot_id: SnapshotId,
+        _snapshot_id: SnapshotId,
         page_id: PageId,
     ) -> Result<Page<'p, RW>, PageError> {
         let page_data = self.page_data(page_id)?;
@@ -125,7 +130,7 @@ impl PageManager for MmapPageManager {
     }
 
     // Commits the memory mapped file to disk.
-    fn commit(&mut self, snapshot_id: SnapshotId) -> Result<(), PageError> {
+    fn commit(&mut self, _snapshot_id: SnapshotId) -> Result<(), PageError> {
         self.mmap.flush().map_err(PageError::IO)
     }
 }

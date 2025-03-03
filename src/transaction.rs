@@ -34,7 +34,7 @@ pub struct Transaction<'tx, K: TransactionKind, P: PageManager> {
     committed: bool,
     context: TransactionContext,
     database: &'tx Database<P>,
-    lock: Option<RwLockReadGuard<'tx, StorageEngine<P>>>,
+    _lock: Option<RwLockReadGuard<'tx, StorageEngine<P>>>,
     _marker: std::marker::PhantomData<K>,
 }
 
@@ -42,13 +42,13 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
     pub(crate) fn new(
         context: TransactionContext,
         database: &'tx Database<P>,
-        lock: Option<RwLockReadGuard<'tx, StorageEngine<P>>>,
+        _lock: Option<RwLockReadGuard<'tx, StorageEngine<P>>>,
     ) -> Self {
         Self {
             committed: false,
             context,
             database,
-            lock,
+            _lock,
             _marker: std::marker::PhantomData,
         }
     }
