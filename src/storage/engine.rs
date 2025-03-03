@@ -2215,14 +2215,14 @@ mod tests {
         }
 
         // Delete all accounts
-        for (address, account) in &test_cases {
+        for (address, _) in &test_cases {
             storage_engine
                 .set_account::<AccountVec>(&mut context, AddressPath::for_address(*address), None)
                 .unwrap();
         }
 
         // Verify that the accounts don't exist anymore
-        for (address, account) in &test_cases {
+        for (address, _) in &test_cases {
             let read_account = storage_engine
                 .get_account::<AccountVec>(&context, AddressPath::for_address(*address))
                 .unwrap();
@@ -2287,14 +2287,14 @@ mod tests {
         }
 
         // Delete only a portion of the accounts
-        for (address, account) in &test_cases[0..2] {
+        for (address, _) in &test_cases[0..2] {
             storage_engine
                 .set_account::<AccountVec>(&mut context, AddressPath::for_address(*address), None)
                 .unwrap();
         }
 
         // Verify that the accounts don't exist anymore
-        for (address, account) in &test_cases[0..2] {
+        for (address, _) in &test_cases[0..2] {
             let read_account = storage_engine
                 .get_account::<AccountVec>(&context, AddressPath::for_address(*address))
                 .unwrap();
@@ -2507,10 +2507,8 @@ mod tests {
         ));
 
         // Verify all the storage slots don't exist
-        for (storage_key, storage_value) in &test_cases {
+        for (storage_key, _) in &test_cases {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
-
-            let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             let res = storage_engine.get_storage(&context, storage_path.clone());
             assert!(matches!(
@@ -2529,10 +2527,8 @@ mod tests {
             .unwrap();
 
         // Verify all the storage slots still don't exist
-        for (storage_key, storage_value) in &test_cases {
+        for (storage_key, _) in &test_cases {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
-
-            let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             let read_storage = storage_engine
                 .get_storage(&context, storage_path.clone())
@@ -2736,10 +2732,6 @@ mod tests {
             .unwrap();
 
         // THEN: the branch node should be deleted and the root node should go to child 2 leaf at index 5
-        let root_node_page = storage_engine
-            .get_page(&context, context.metadata.root_subtrie_page_id)
-            .unwrap();
-        let root_node_slotted = SlottedPage::try_from(root_node_page).unwrap();
         let root_node: Node<AccountVec> = slotted_page.get_value(0).unwrap();
         assert!(root_node.is_branch());
         let child_2_pointer = root_node.child(5).unwrap();
