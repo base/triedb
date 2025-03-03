@@ -407,7 +407,7 @@ mod tests {
 
         // WHEN: The first 1050 orphan page ids are popped and 1050 new orphan page ids come in
         let num_orphan_slots_used = 1050;
-        for i in 0..num_orphan_slots_used {
+        for _ in 0..num_orphan_slots_used {
             my_orphan_page_ids.pop_front();
         }
 
@@ -453,7 +453,7 @@ mod tests {
         // WHEN: The first 20 orphan page ids are popped off and used for new pages, and 100 new pages
         // are orphaned
         let num_orphan_slots_used = 20;
-        for i in 0..num_orphan_slots_used {
+        for _ in 0..num_orphan_slots_used {
             my_orphan_page_ids.pop_front();
         }
 
