@@ -87,9 +87,7 @@ impl<P: PageManager> StorageEngine<P> {
             return Err(Error::EngineClosed);
         }
 
-        let original_page = inner
-            .page_manager
-            .get_mut(context.metadata.snapshot_id, page_id)?;
+        let original_page = inner.get_page_mut(context, page_id)?;
         // if the page already has the correct snapshot id, return it without cloning.
         if original_page.snapshot_id() == context.metadata.snapshot_id {
             return Ok(original_page);
@@ -117,10 +115,7 @@ impl<P: PageManager> StorageEngine<P> {
             return Err(Error::EngineClosed);
         }
 
-        inner
-            .page_manager
-            .get(context.metadata.snapshot_id, page_id)
-            .map_err(|e| e.into())
+        inner.get_page(context, page_id)
     }
 
     #[cfg(test)]
@@ -135,10 +130,7 @@ impl<P: PageManager> StorageEngine<P> {
             return Err(Error::EngineClosed);
         }
 
-        inner
-            .page_manager
-            .get_mut(context.metadata.snapshot_id, page_id)
-            .map_err(|e| e.into())
+        inner.get_page_mut(context, page_id)
     }
 
     pub fn get_account<A: Account + Value>(
@@ -279,14 +271,17 @@ impl<P: PageManager> StorageEngine<P> {
             // In the case of a page split, re-attempt the operation from scratch. This ensures that a page will be
             // consistently evaluated, and not modified in the middle of an operation, which could result in
             // inconsistent cell pointers.
-            Err(Error::PageSplit) => self.set_value_in_cloned_page(
-                context,
-                path,
-                value,
-                &mut new_slotted_page,
-                page_index,
-                leaf_type,
-            ),
+            Err(Error::PageSplit) => {
+                context.transaction_metrics.inc_pages_split();
+                self.set_value_in_cloned_page(
+                    context,
+                    path,
+                    value,
+                    &mut new_slotted_page,
+                    page_index,
+                    leaf_type,
+                )
+            }
             Err(Error::PageError(PageError::PageIsFull)) => {
                 panic!("Page is full!");
             }
@@ -1144,19 +1139,17 @@ impl<P: PageManager> Inner<P> {
         &mut self,
         context: &mut TransactionContext,
     ) -> Result<Page<'p, RW>, Error> {
-        let snapshot_id = context.metadata.snapshot_id;
         let orphaned_page_id = self.orphan_manager.get_orphaned_page_id();
         let page_to_return: Page<'p, RW>;
         if let Some(orphaned_page_id) = orphaned_page_id {
-            let mut page = self.page_manager.get_mut(snapshot_id, orphaned_page_id)?;
-            page.set_snapshot_id(snapshot_id);
+            let mut page = self.get_page_mut(context, orphaned_page_id)?;
+            page.set_snapshot_id(context.metadata.snapshot_id);
             page.contents_mut().fill(0);
+            context.transaction_metrics.inc_pages_reallocated();
             page_to_return = page;
         } else {
-            page_to_return = self
-                .page_manager
-                .allocate(snapshot_id)
-                .map_err(Error::from)?;
+            page_to_return = self.page_manager.allocate(context.metadata.snapshot_id)?;
+            context.transaction_metrics.inc_pages_allocated();
         }
 
         context.metadata.max_page_number =
@@ -1198,6 +1191,32 @@ impl<P: PageManager> Inner<P> {
         self.page_manager.commit(context.metadata.snapshot_id)?;
 
         Ok(())
+    }
+
+    // a wrapper around the page manager get_mut that increments the pages read metric
+    fn get_page_mut<'p>(
+        &mut self,
+        context: &TransactionContext,
+        page_id: PageId,
+    ) -> Result<Page<'p, RW>, Error> {
+        let page = self
+            .page_manager
+            .get_mut(context.metadata.snapshot_id, page_id)?;
+        context.transaction_metrics.inc_pages_read();
+        Ok(page)
+    }
+
+    // a wrapper around the page manager get that increments the pages read metric
+    fn get_page<'p>(
+        &self,
+        context: &TransactionContext,
+        page_id: PageId,
+    ) -> Result<Page<'p, RO>, Error> {
+        let page = self
+            .page_manager
+            .get(context.metadata.snapshot_id, page_id)?;
+        context.transaction_metrics.inc_pages_read();
+        Ok(page)
     }
 }
 
@@ -1255,6 +1274,25 @@ mod tests {
         AccountVec::new(U256::from(balance), nonce, KECCAK_EMPTY, EMPTY_ROOT_HASH)
     }
 
+    fn assert_metrics(
+        context: &TransactionContext,
+        pages_read: u32,
+        pages_allocated: u32,
+        pages_reallocated: u32,
+        pages_split: u32,
+    ) {
+        assert_eq!(context.transaction_metrics.get_pages_read(), pages_read);
+        assert_eq!(
+            context.transaction_metrics.get_pages_allocated(),
+            pages_allocated
+        );
+        assert_eq!(
+            context.transaction_metrics.get_pages_reallocated(),
+            pages_reallocated
+        );
+        assert_eq!(context.transaction_metrics.get_pages_split(), pages_split);
+    }
+
     #[test]
     fn test_allocate_get_mut_clone() {
         let (storage_engine, mut context) = create_test_engine(10, 1);
@@ -1264,6 +1302,7 @@ mod tests {
         assert_eq!(page.page_id(), 2);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 1);
+        assert_metrics(&context, 0, 1, 0, 0);
 
         // mutation
         page.contents_mut()[0] = 123;
@@ -1276,6 +1315,7 @@ mod tests {
         assert_eq!(page.page_id(), 2);
         assert_eq!(page.contents()[0], 123);
         assert_eq!(page.snapshot_id(), 1);
+        assert_metrics(&context, 1, 0, 0, 0);
 
         // cloning a page should allocate a new page and orphan the original page
         let cloned_page = storage_engine.get_mut_clone(&mut context, 2).unwrap();
@@ -1283,12 +1323,14 @@ mod tests {
         assert_eq!(cloned_page.contents()[0], 123);
         assert_eq!(cloned_page.snapshot_id(), 2);
         assert_ne!(cloned_page.page_id(), page.page_id());
+        assert_metrics(&context, 2, 1, 0, 0);
 
         // the next allocation should not come from the orphaned page, as the snapshot id is the same as when the page was orphaned
         let page = storage_engine.allocate_page(&mut context).unwrap();
         assert_eq!(page.page_id(), 4);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 2);
+        assert_metrics(&context, 2, 2, 0, 0);
 
         storage_engine.commit(&context).unwrap();
         context = TransactionContext::new(context.metadata.next());
@@ -1298,6 +1340,7 @@ mod tests {
         assert_eq!(page.page_id(), 5);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 3);
+        assert_metrics(&context, 0, 1, 0, 0);
 
         storage_engine.unlock(3);
 
@@ -1307,6 +1350,7 @@ mod tests {
         assert_eq!(page.page_id(), 2);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 3);
+        assert_metrics(&context, 1, 1, 1, 0);
 
         // assert that the metadata tracks the largest page number
         assert_eq!(context.metadata.max_page_number, 5);
@@ -1318,14 +1362,17 @@ mod tests {
 
         let page1 = storage_engine.get_page(&context, 1).unwrap();
         assert_eq!(page1.contents()[0], 0);
+        assert_metrics(&context, 1, 0, 0, 0);
 
         let mut page2 = storage_engine.get_mut_page(&context, 1).unwrap();
         page2.contents_mut()[0] = 123;
+        assert_metrics(&context, 2, 0, 0, 0);
 
         storage_engine.commit(&context).unwrap();
 
         assert_eq!(page1.contents()[0], 123);
         assert_eq!(page2.contents()[0], 123);
+        assert_metrics(&context, 2, 0, 0, 0);
     }
 
     #[test]
@@ -1342,6 +1389,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(context.metadata.root_subtrie_page_id, 257);
+        assert_metrics(&context, 1, 1, 0, 0);
 
         let test_cases = vec![
             (
@@ -1400,9 +1448,11 @@ mod tests {
         storage_engine
             .set_account(&mut context, path1, Some(account1.clone()))
             .unwrap();
+        assert_metrics(&context, 1, 1, 0, 0);
         storage_engine
             .set_account(&mut context, path2, Some(account2.clone()))
             .unwrap();
+        assert_metrics(&context, 2, 1, 0, 0);
 
         assert_eq!(
             context.metadata.state_root,
@@ -1434,12 +1484,15 @@ mod tests {
         storage_engine
             .set_account(&mut context, path1, Some(account1.clone()))
             .unwrap();
+        assert_metrics(&context, 1, 1, 0, 0);
         storage_engine
             .set_account(&mut context, path2, Some(account2.clone()))
             .unwrap();
+        assert_metrics(&context, 2, 1, 0, 0);
         storage_engine
             .set_account(&mut context, path3, Some(account3.clone()))
             .unwrap();
+        assert_metrics(&context, 3, 1, 0, 0);
 
         assert_eq!(
             context.metadata.state_root,
@@ -2033,6 +2086,8 @@ mod tests {
                 "New account not found"
             );
         }
+        // Verify the pages split metric
+        assert!(context.transaction_metrics.get_pages_split() > 0);
     }
 
     #[test]
@@ -2158,6 +2213,43 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_delete_account() {
+        let (storage_engine, mut context) = create_test_engine(300, 256);
+
+        let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
+        let account = create_test_account(100, 1);
+        storage_engine
+            .set_account(
+                &mut context,
+                AddressPath::for_address(address),
+                Some(account.clone()),
+            )
+            .unwrap();
+        assert_metrics(&context, 1, 1, 0, 0);
+
+        // Check that the account exists
+        let read_account = storage_engine
+            .get_account::<AccountVec>(&context, AddressPath::for_address(address))
+            .unwrap();
+        assert_eq!(read_account, Some(account.clone()));
+
+        // Reset the context metrics
+        let mut context = TransactionContext::new(context.metadata);
+        storage_engine
+            .set_account::<AccountVec>(&mut context, AddressPath::for_address(address), None)
+            .unwrap();
+        assert_metrics(&context, 2, 0, 0, 0);
+
+        // Verify the account is deleted
+        let read_account =
+            storage_engine.get_account::<AccountVec>(&context, AddressPath::for_address(address));
+        // The error is an InvalidCellPointer error, and not None
+        // TODO: does it make sense to have an error here?
+        assert!(read_account.is_err());
+    }
+
     #[test]
     fn test_delete_accounts() {
         let (storage_engine, mut context) = create_test_engine(300, 256);

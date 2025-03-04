@@ -61,6 +61,9 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
         let account = storage_engine
             .get_account(&self.context, address_path)
             .unwrap();
+
+        self.database.update_metrics_ro(&self.context);
+
         Ok(account)
     }
 
@@ -83,6 +86,9 @@ impl<P: PageManager> Transaction<'_, RW, P> {
         storage_engine
             .set_account(&mut self.context, address_path, account)
             .unwrap();
+
+        self.database.update_metrics_rw(&self.context);
+
         Ok(())
     }
 

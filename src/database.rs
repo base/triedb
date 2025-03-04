@@ -1,3 +1,5 @@
+use crate::metrics::DatabaseMetrics;
+use crate::metrics::TransactionMetrics;
 use crate::page::MmapPageManager;
 use crate::page::OrphanPageManager;
 use crate::page::PageError;
@@ -19,6 +21,7 @@ use std::sync::RwLock;
 #[derive(Debug, Clone)]
 pub struct Database<P: PageManager> {
     pub(crate) inner: Arc<Inner<P>>,
+    metrics: DatabaseMetrics,
 }
 
 #[derive(Debug)]
@@ -52,12 +55,15 @@ impl Metadata {
 #[derive(Debug)]
 pub struct TransactionContext {
     pub(crate) metadata: Metadata,
-    // TODO: add others for transaction context like metrics, etc.
+    pub(crate) transaction_metrics: TransactionMetrics,
 }
 
 impl TransactionContext {
     pub fn new(metadata: Metadata) -> Self {
-        Self { metadata }
+        Self {
+            metadata,
+            transaction_metrics: Default::default(),
+        }
     }
 }
 
@@ -151,6 +157,7 @@ impl<P: PageManager> Database<P> {
                 storage_engine: RwLock::new(storage_engine),
                 transaction_manager: RwLock::new(TransactionManager::new()),
             }),
+            metrics: DatabaseMetrics::default(),
         }
     }
 
@@ -190,6 +197,27 @@ impl<P: PageManager> Database<P> {
     pub fn size(&self) -> u32 {
         let storage_engine = self.inner.storage_engine.read().unwrap();
         storage_engine.size()
+    }
+
+    pub fn update_metrics_ro(&self, context: &TransactionContext) {
+        self.metrics
+            .ro_transaction_pages_read
+            .record(context.transaction_metrics.take_pages_read() as f64);
+    }
+
+    pub fn update_metrics_rw(&self, context: &TransactionContext) {
+        self.metrics
+            .rw_transaction_pages_read
+            .record(context.transaction_metrics.take_pages_read() as f64);
+        self.metrics
+            .rw_transaction_pages_allocated
+            .record(context.transaction_metrics.take_pages_allocated() as f64);
+        self.metrics
+            .rw_transaction_pages_reallocated
+            .record(context.transaction_metrics.take_pages_reallocated() as f64);
+        self.metrics
+            .rw_transaction_pages_split
+            .record(context.transaction_metrics.take_pages_split() as f64);
     }
 }
 

@@ -1,6 +1,7 @@
 pub mod account;
 pub mod database;
 pub mod location;
+pub mod metrics;
 pub mod node;
 pub mod page;
 pub mod path;
