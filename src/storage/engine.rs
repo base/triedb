@@ -1490,13 +1490,71 @@ mod tests {
             .unwrap();
         assert_metrics(&context, 2, 1, 0, 0);
         storage_engine
-            .set_account(&mut context, path3, Some(account3.clone()))
+            .set_account(&mut context, path3.clone(), Some(account3.clone()))
             .unwrap();
         assert_metrics(&context, 3, 1, 0, 0);
 
         assert_eq!(
             context.metadata.state_root,
             b256!("0x6f78ee01791dd8a62b4e2e86fae3d7957df9fa7f7a717ae537f90bb0c79df296")
+        );
+
+        let account1_storage = [
+            (B256::with_last_byte(0x0c), U256::from(0x0c)),
+            (
+                b256!("0x000000000000000000000000000000000000000000000000000000000000200b"),
+                b256!("0x6c31fc15422ebad28aaf9089c306702f67540b53c7eea8b7d2941044b027100f").into(),
+            ),
+        ];
+
+        let account2_storage = vec![
+            (B256::with_last_byte(0x00), U256::from(0x01)),
+            (
+                B256::with_last_byte(0x01),
+                b256!("0x6c31fc15422ebad28aaf9089c306702f67540b53c7eea8b7d2941044b027100f").into(),
+            ),
+            (B256::with_last_byte(0x02), U256::from(0x20)),
+            (
+                B256::with_last_byte(0x03),
+                b256!("0x6c31fc15422ebad28aaf9089c306702f67540b53c7eea8b7d2941044b027100f").into(),
+            ),
+        ];
+
+        let account3_updated = AccountVec::new(
+            U256::from(0x3635c9adc5de938d5cu128),
+            1,
+            KECCAK_EMPTY,
+            EMPTY_ROOT_HASH,
+        );
+
+        account1_storage.iter().for_each(|(key, value)| {
+            storage_engine
+                .set_storage(
+                    &mut context,
+                    StoragePath::for_address_and_slot(address1, *key),
+                    Some(*value),
+                )
+                .unwrap();
+        });
+
+        account2_storage.iter().for_each(|(key, value)| {
+            storage_engine
+                .set_storage(
+                    &mut context,
+                    StoragePath::for_address_and_slot(address2, *key),
+                    Some(*value),
+                )
+                .unwrap();
+        });
+
+        storage_engine
+            .set_account(&mut context, path3, Some(account3_updated.clone()))
+            .unwrap();
+        assert_metrics(&context, 10, 1, 0, 0);
+
+        assert_eq!(
+            context.metadata.state_root,
+            b256!("0xf869dcb9ef8893f6b30bf495847fd99166aaf790ed962c468d11a826996ab2d2")
         );
     }
 
