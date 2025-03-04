@@ -271,7 +271,7 @@ impl<P: PageManager> StorageEngine<P> {
             // consistently evaluated, and not modified in the middle of an operation, which could result in
             // inconsistent cell pointers.
             Err(Error::PageSplit) => {
-                context.metrics_inc_pages_split();
+                context.transaction_metrics.metrics_inc_pages_split();
                 self.set_value_in_cloned_page(
                     context,
                     path,
@@ -1149,11 +1149,11 @@ impl<P: PageManager> Inner<P> {
             let mut page = self.page_manager_get_mut(context, orphaned_page_id)?;
             page.set_snapshot_id(context.metadata.snapshot_id);
             page.contents_mut().fill(0);
-            context.metrics_inc_pages_reallocated();
+            context.transaction_metrics.metrics_inc_pages_reallocated();
             page_to_return = page;
         } else {
             page_to_return = self.page_manager.allocate(context.metadata.snapshot_id)?;
-            context.metrics_inc_pages_allocated();
+            context.transaction_metrics.metrics_inc_pages_allocated();
         }
 
         context.metadata.max_page_number =
@@ -1206,7 +1206,7 @@ impl<P: PageManager> Inner<P> {
         let page = self
             .page_manager
             .get_mut(context.metadata.snapshot_id, page_id)?;
-        context.metrics_inc_pages_read();
+        context.transaction_metrics.metrics_inc_pages_read();
         Ok(page)
     }
 
@@ -1219,7 +1219,7 @@ impl<P: PageManager> Inner<P> {
         let page = self
             .page_manager
             .get(context.metadata.snapshot_id, page_id)?;
-        context.metrics_inc_pages_read();
+        context.transaction_metrics.metrics_inc_pages_read();
         Ok(page)
     }
 }
@@ -1285,17 +1285,20 @@ mod tests {
         pages_reallocated: u32,
         pages_split: u32,
     ) {
-        assert_eq!(context.transaction_metrics.borrow().pages_read, pages_read);
         assert_eq!(
-            context.transaction_metrics.borrow().pages_allocated,
+            context.transaction_metrics.inner.borrow().pages_read,
+            pages_read
+        );
+        assert_eq!(
+            context.transaction_metrics.inner.borrow().pages_allocated,
             pages_allocated
         );
         assert_eq!(
-            context.transaction_metrics.borrow().pages_reallocated,
+            context.transaction_metrics.inner.borrow().pages_reallocated,
             pages_reallocated
         );
         assert_eq!(
-            context.transaction_metrics.borrow().pages_split,
+            context.transaction_metrics.inner.borrow().pages_split,
             pages_split
         );
     }
@@ -2094,7 +2097,7 @@ mod tests {
             );
         }
         // Verify the pages split metric
-        assert!(context.transaction_metrics.borrow().pages_split > 0);
+        assert!(context.transaction_metrics.inner.borrow().pages_split > 0);
     }
 
     #[test]

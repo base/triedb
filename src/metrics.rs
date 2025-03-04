@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use metrics::Histogram;
 use metrics_derive::Metrics;
 
@@ -22,9 +24,60 @@ pub struct DatabaseMetrics {
 }
 
 #[derive(Debug, Default, Clone)]
-pub(crate) struct TransactionMetrics {
+pub(crate) struct TransactionMetricsInner {
     pub(crate) pages_read: u32,
     pub(crate) pages_allocated: u32,
     pub(crate) pages_reallocated: u32,
     pub(crate) pages_split: u32,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct TransactionMetrics {
+    pub(crate) inner: RefCell<TransactionMetricsInner>,
+}
+
+impl TransactionMetrics {
+    pub fn metrics_inc_pages_read(&self) {
+        self.inner.borrow_mut().pages_read += 1;
+    }
+
+    pub fn metrics_inc_pages_split(&self) {
+        self.inner.borrow_mut().pages_split += 1;
+    }
+
+    pub fn metrics_inc_pages_allocated(&self) {
+        self.inner.borrow_mut().pages_allocated += 1;
+    }
+
+    pub fn metrics_inc_pages_reallocated(&self) {
+        self.inner.borrow_mut().pages_reallocated += 1;
+    }
+
+    pub fn metrics_pages_read_take(&self) -> u32 {
+        let mut metrics = self.inner.borrow_mut();
+        let pages_read = metrics.pages_read;
+        metrics.pages_read = 0;
+        pages_read
+    }
+
+    pub fn metrics_pages_split_take(&self) -> u32 {
+        let mut metrics = self.inner.borrow_mut();
+        let pages_split = metrics.pages_split;
+        metrics.pages_split = 0;
+        pages_split
+    }
+
+    pub fn metrics_pages_allocated_take(&self) -> u32 {
+        let mut metrics = self.inner.borrow_mut();
+        let pages_allocated = metrics.pages_allocated;
+        metrics.pages_allocated = 0;
+        pages_allocated
+    }
+
+    pub fn metrics_pages_reallocated_take(&self) -> u32 {
+        let mut metrics = self.inner.borrow_mut();
+        let pages_reallocated = metrics.pages_reallocated;
+        metrics.pages_reallocated = 0;
+        pages_reallocated
+    }
 }
