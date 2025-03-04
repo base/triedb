@@ -37,44 +37,44 @@ pub(crate) struct TransactionMetrics {
 }
 
 impl TransactionMetrics {
-    pub fn metrics_inc_pages_read(&self) {
+    pub fn inc_pages_read(&self) {
         self.inner.borrow_mut().pages_read += 1;
     }
 
-    pub fn metrics_inc_pages_split(&self) {
+    pub fn inc_pages_split(&self) {
         self.inner.borrow_mut().pages_split += 1;
     }
 
-    pub fn metrics_inc_pages_allocated(&self) {
+    pub fn inc_pages_allocated(&self) {
         self.inner.borrow_mut().pages_allocated += 1;
     }
 
-    pub fn metrics_inc_pages_reallocated(&self) {
+    pub fn inc_pages_reallocated(&self) {
         self.inner.borrow_mut().pages_reallocated += 1;
     }
 
-    pub fn metrics_pages_read_take(&self) -> u32 {
+    pub fn take_pages_read(&self) -> u32 {
         let mut metrics = self.inner.borrow_mut();
         let pages_read = metrics.pages_read;
         metrics.pages_read = 0;
         pages_read
     }
 
-    pub fn metrics_pages_split_take(&self) -> u32 {
+    pub fn take_pages_split(&self) -> u32 {
         let mut metrics = self.inner.borrow_mut();
         let pages_split = metrics.pages_split;
         metrics.pages_split = 0;
         pages_split
     }
 
-    pub fn metrics_pages_allocated_take(&self) -> u32 {
+    pub fn take_pages_allocated(&self) -> u32 {
         let mut metrics = self.inner.borrow_mut();
         let pages_allocated = metrics.pages_allocated;
         metrics.pages_allocated = 0;
         pages_allocated
     }
 
-    pub fn metrics_pages_reallocated_take(&self) -> u32 {
+    pub fn take_pages_reallocated(&self) -> u32 {
         let mut metrics = self.inner.borrow_mut();
         let pages_reallocated = metrics.pages_reallocated;
         metrics.pages_reallocated = 0;

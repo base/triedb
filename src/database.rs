@@ -202,22 +202,22 @@ impl<P: PageManager> Database<P> {
     pub fn update_metrics_ro(&self, context: &TransactionContext) {
         self.metrics
             .ro_transaction_pages_read
-            .record(context.transaction_metrics.metrics_pages_read_take() as f64);
+            .record(context.transaction_metrics.take_pages_read() as f64);
     }
 
     pub fn update_metrics_rw(&self, context: &TransactionContext) {
         self.metrics
             .rw_transaction_pages_read
-            .record(context.transaction_metrics.metrics_pages_read_take() as f64);
+            .record(context.transaction_metrics.take_pages_read() as f64);
         self.metrics
             .rw_transaction_pages_allocated
-            .record(context.transaction_metrics.metrics_pages_allocated_take() as f64);
+            .record(context.transaction_metrics.take_pages_allocated() as f64);
         self.metrics
             .rw_transaction_pages_reallocated
-            .record(context.transaction_metrics.metrics_pages_reallocated_take() as f64);
+            .record(context.transaction_metrics.take_pages_reallocated() as f64);
         self.metrics
             .rw_transaction_pages_split
-            .record(context.transaction_metrics.metrics_pages_split_take() as f64);
+            .record(context.transaction_metrics.take_pages_split() as f64);
     }
 }
 
