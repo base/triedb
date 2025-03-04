@@ -24,16 +24,16 @@ pub struct DatabaseMetrics {
 }
 
 #[derive(Debug, Default, Clone)]
-pub(crate) struct TransactionMetricsInner {
-    pub(crate) pages_read: u32,
-    pub(crate) pages_allocated: u32,
-    pub(crate) pages_reallocated: u32,
-    pub(crate) pages_split: u32,
+struct TransactionMetricsInner {
+    pages_read: u32,
+    pages_allocated: u32,
+    pages_reallocated: u32,
+    pages_split: u32,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct TransactionMetrics {
-    pub(crate) inner: RefCell<TransactionMetricsInner>,
+    inner: RefCell<TransactionMetricsInner>,
 }
 
 impl TransactionMetrics {
@@ -79,5 +79,21 @@ impl TransactionMetrics {
         let pages_reallocated = metrics.pages_reallocated;
         metrics.pages_reallocated = 0;
         pages_reallocated
+    }
+
+    pub fn get_pages_read(&self) -> u32 {
+        self.inner.borrow().pages_read
+    }
+
+    pub fn get_pages_split(&self) -> u32 {
+        self.inner.borrow().pages_split
+    }
+
+    pub fn get_pages_allocated(&self) -> u32 {
+        self.inner.borrow().pages_allocated
+    }
+
+    pub fn get_pages_reallocated(&self) -> u32 {
+        self.inner.borrow().pages_reallocated
     }
 }

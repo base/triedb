@@ -87,7 +87,7 @@ impl<P: PageManager> StorageEngine<P> {
             return Err(Error::EngineClosed);
         }
 
-        let original_page = inner.page_manager_get_mut(context, page_id)?;
+        let original_page = inner.get_page_mut(context, page_id)?;
         // if the page already has the correct snapshot id, return it without cloning.
         if original_page.snapshot_id() == context.metadata.snapshot_id {
             return Ok(original_page);
@@ -115,7 +115,7 @@ impl<P: PageManager> StorageEngine<P> {
             return Err(Error::EngineClosed);
         }
 
-        inner.page_manager_get(context, page_id)
+        inner.get_page(context, page_id)
     }
 
     fn get_mut_page<'p>(
@@ -129,7 +129,7 @@ impl<P: PageManager> StorageEngine<P> {
             return Err(Error::EngineClosed);
         }
 
-        inner.page_manager_get_mut(context, page_id)
+        inner.get_page_mut(context, page_id)
     }
 
     pub fn get_account<A: Account + Value>(
@@ -1146,7 +1146,7 @@ impl<P: PageManager> Inner<P> {
         let orphaned_page_id = self.orphan_manager.get_orphaned_page_id();
         let page_to_return: Page<'p, RW>;
         if let Some(orphaned_page_id) = orphaned_page_id {
-            let mut page = self.page_manager_get_mut(context, orphaned_page_id)?;
+            let mut page = self.get_page_mut(context, orphaned_page_id)?;
             page.set_snapshot_id(context.metadata.snapshot_id);
             page.contents_mut().fill(0);
             context.transaction_metrics.inc_pages_reallocated();
@@ -1198,7 +1198,7 @@ impl<P: PageManager> Inner<P> {
     }
 
     // a wrapper around the page manager get_mut that increments the pages read metric
-    fn page_manager_get_mut<'p>(
+    fn get_page_mut<'p>(
         &mut self,
         context: &TransactionContext,
         page_id: PageId,
@@ -1211,7 +1211,7 @@ impl<P: PageManager> Inner<P> {
     }
 
     // a wrapper around the page manager get that increments the pages read metric
-    fn page_manager_get<'p>(
+    fn get_page<'p>(
         &self,
         context: &TransactionContext,
         page_id: PageId,
@@ -1285,22 +1285,16 @@ mod tests {
         pages_reallocated: u32,
         pages_split: u32,
     ) {
+        assert_eq!(context.transaction_metrics.get_pages_read(), pages_read);
         assert_eq!(
-            context.transaction_metrics.inner.borrow().pages_read,
-            pages_read
-        );
-        assert_eq!(
-            context.transaction_metrics.inner.borrow().pages_allocated,
+            context.transaction_metrics.get_pages_allocated(),
             pages_allocated
         );
         assert_eq!(
-            context.transaction_metrics.inner.borrow().pages_reallocated,
+            context.transaction_metrics.get_pages_reallocated(),
             pages_reallocated
         );
-        assert_eq!(
-            context.transaction_metrics.inner.borrow().pages_split,
-            pages_split
-        );
+        assert_eq!(context.transaction_metrics.get_pages_split(), pages_split);
     }
 
     #[test]
@@ -2097,7 +2091,7 @@ mod tests {
             );
         }
         // Verify the pages split metric
-        assert!(context.transaction_metrics.inner.borrow().pages_split > 0);
+        assert!(context.transaction_metrics.get_pages_split() > 0);
     }
 
     #[test]
