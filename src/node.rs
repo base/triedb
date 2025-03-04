@@ -8,7 +8,7 @@ use proptest::prelude::{any, prop, Strategy};
 use proptest_derive::Arbitrary;
 
 use crate::{
-    account::{Account, AccountVec, RlpAccount},
+    account::{Account, RlpAccount},
     pointer::Pointer,
     storage::value::{self, Value},
 };
@@ -157,15 +157,15 @@ impl Node {
                 code_hash,
                 storage_root,
                 ..
-            } => TrieValue::Account(AccountVec::new(
-                *balance,
-                *nonce,
-                *code_hash,
-                storage_root
+            } => TrieValue::Account(RlpAccount {
+                nonce: *nonce,
+                balance: *balance,
+                code_hash: *code_hash,
+                storage_root: storage_root
                     .as_ref()
                     .and_then(|p| p.rlp().as_hash())
                     .unwrap_or(EMPTY_ROOT_HASH),
-            )),
+            }),
             _ => panic!("cannot get value of non-leaf node"),
         }
     }
@@ -477,7 +477,7 @@ fn arb_children() -> impl Strategy<Value = [Option<Pointer>; 16]> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrieValue {
     Storage(StorageValue),
-    Account(AccountVec),
+    Account(RlpAccount),
 }
 
 impl Value for TrieValue {
@@ -508,7 +508,7 @@ impl Value for TrieValue {
             )));
         }
 
-        Ok(Self::Account(AccountVec::from_bytes(bytes)?))
+        Ok(Self::Account(RlpAccount::from_bytes(bytes)?))
     }
 }
 

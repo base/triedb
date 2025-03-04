@@ -1,16 +1,17 @@
-use alloy_primitives::{StorageValue, B256, U256};
+use alloy_primitives::{B256, U256};
 use alloy_rlp::{BufMut, Encodable, RlpEncodable};
 use proptest::{
     arbitrary::{Arbitrary, Mapped},
     prelude::{any, Strategy},
 };
+use proptest_derive::Arbitrary;
 use std::fmt::Debug;
 
 use crate::storage::value::{self, Value, ValueRef};
 
 pub trait Account {
-    fn balance(&self) -> U256;
     fn nonce(&self) -> u64;
+    fn balance(&self) -> U256;
     fn code_hash(&self) -> B256;
     fn storage_root(&self) -> B256;
 }
@@ -69,12 +70,75 @@ impl Value for AccountVec {
     }
 }
 
-#[derive(RlpEncodable, Debug)]
-pub(crate) struct RlpAccount {
-    pub(crate) nonce: u64,
-    pub(crate) balance: U256,
-    pub(crate) storage_root: B256,
-    pub(crate) code_hash: B256,
+#[derive(Debug, Clone, PartialEq, Eq, RlpEncodable, Arbitrary)]
+pub struct RlpAccount {
+    pub nonce: u64,
+    pub balance: U256,
+    pub storage_root: B256,
+    pub code_hash: B256,
+}
+
+impl RlpAccount {
+    pub fn new(nonce: u64, balance: U256, storage_root: B256, code_hash: B256) -> Self {
+        Self {
+            nonce,
+            balance,
+            storage_root,
+            code_hash,
+        }
+    }
+}
+
+impl Account for RlpAccount {
+    #[inline]
+    fn nonce(&self) -> u64 {
+        self.nonce
+    }
+
+    #[inline]
+    fn balance(&self) -> U256 {
+        self.balance
+    }
+
+    #[inline]
+    fn code_hash(&self) -> B256 {
+        self.code_hash
+    }
+
+    #[inline]
+    fn storage_root(&self) -> B256 {
+        self.storage_root
+    }
+}
+
+impl Value for RlpAccount {
+    #[inline]
+    fn size(&self) -> usize {
+        104
+    }
+
+    fn serialize_into(&self, buf: &mut [u8]) -> value::Result<usize> {
+        if buf.len() < self.size() {
+            return Err(value::Error::InvalidEncoding);
+        }
+        buf[..32].copy_from_slice(self.balance.as_le_slice());
+        buf[32..40].copy_from_slice(&self.nonce.to_le_bytes());
+        buf[40..72].copy_from_slice(self.storage_root.as_slice());
+        buf[72..104].copy_from_slice(self.code_hash.as_slice());
+        Ok(self.size())
+    }
+
+    fn from_bytes(bytes: &[u8]) -> value::Result<Self> {
+        if bytes.len() != 104 {
+            return Err(value::Error::InvalidEncoding);
+        }
+        Ok(Self {
+            nonce: u64::from_be_bytes(bytes[0..8].try_into().expect("nonce is 8 bytes")),
+            balance: U256::from_be_slice(&bytes[8..40]),
+            storage_root: B256::from_slice(&bytes[40..72]),
+            code_hash: B256::from_slice(&bytes[72..104]),
+        })
+    }
 }
 
 impl Encodable for AccountVec {
@@ -154,53 +218,6 @@ impl<'a> ValueRef<'a> for AccountSlice<'a> {
     fn to_owned(self) -> Self::Owned {
         AccountVec {
             data: self.data.to_vec(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TrieValue {
-    Storage(StorageValue),
-    Account(AccountVec),
-}
-
-impl Value for TrieValue {
-    fn size(&self) -> usize {
-        match self {
-            Self::Storage(_) => 32,
-            Self::Account(account) => account.size(),
-        }
-    }
-
-    fn serialize_into(&self, buf: &mut [u8]) -> value::Result<usize> {
-        match self {
-            Self::Storage(storage_value) => {
-                if buf.len() < 32 {
-                    return Err(value::Error::InvalidEncoding);
-                }
-                buf[..32].copy_from_slice(&storage_value.to_be_bytes::<32>());
-                Ok(32)
-            }
-            Self::Account(account) => account.serialize_into(buf),
-        }
-    }
-
-    fn from_bytes(bytes: &[u8]) -> value::Result<Self> {
-        if bytes.len() == 32 {
-            return Ok(Self::Storage(StorageValue::from_be_bytes::<32>(
-                bytes.try_into().expect("storage value should be 32 bytes"),
-            )));
-        }
-
-        Ok(Self::Account(AccountVec::from_bytes(bytes)?))
-    }
-}
-
-impl Encodable for TrieValue {
-    fn encode(&self, out: &mut dyn BufMut) {
-        match self {
-            Self::Storage(storage_value) => storage_value.encode(out),
-            Self::Account(account_vec) => account_vec.encode(out),
         }
     }
 }

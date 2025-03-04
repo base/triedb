@@ -3,7 +3,7 @@ use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::prelude::*;
 use tempdir::TempDir;
-use triedb::{account::AccountVec, path::AddressPath, Database, MmapPageManager};
+use triedb::{account::RlpAccount, path::AddressPath, Database, MmapPageManager};
 
 const SIZES: &[usize] = &[1_000_000, 3_000_000];
 const BATCH_SIZE: usize = 10_000;
@@ -24,11 +24,11 @@ fn setup_database(size: usize) -> (TempDir, Database<MmapPageManager>) {
         let mut tx = db.begin_rw().unwrap();
         for i in 1..=size {
             let address = generate_random_address(&mut rng);
-            let account = AccountVec::new(
-                U256::from(i as u64),
+            let account = RlpAccount::new(
                 i as u64,
-                KECCAK_EMPTY,
+                U256::from(i as u64),
                 EMPTY_ROOT_HASH,
+                KECCAK_EMPTY,
             );
 
             tx.set_account(address, Some(account)).unwrap();
@@ -55,7 +55,7 @@ fn bench_reads(c: &mut Criterion) {
             b.iter(|| {
                 let tx = db.begin_ro().unwrap();
                 for addr in &addresses {
-                    let a: Option<AccountVec> = tx.get_account(addr.clone()).unwrap();
+                    let a = tx.get_account(addr.clone()).unwrap();
                     assert!(a.is_some());
                 }
                 tx.commit().unwrap();
@@ -81,7 +81,7 @@ fn bench_inserts(c: &mut Criterion) {
                 let mut tx = db.begin_rw().unwrap();
                 for addr in &addresses {
                     let account =
-                        AccountVec::new(U256::from(1000u64), 1, KECCAK_EMPTY, EMPTY_ROOT_HASH);
+                        RlpAccount::new(1, U256::from(1000u64), KECCAK_EMPTY, EMPTY_ROOT_HASH);
                     tx.set_account(addr.clone(), Some(account)).unwrap();
                 }
                 tx.commit().unwrap();
@@ -106,11 +106,11 @@ fn bench_updates(c: &mut Criterion) {
             b.iter(|| {
                 let mut tx = db.begin_rw().unwrap();
                 for addr in &addresses {
-                    let new_account = AccountVec::new(
-                        U256::from(999_999_999u64),
+                    let new_account = RlpAccount::new(
                         999_999_999,
-                        KECCAK_EMPTY,
+                        U256::from(999_999_999u64),
                         EMPTY_ROOT_HASH,
+                        KECCAK_EMPTY,
                     );
                     tx.set_account(addr.clone(), Some(new_account)).unwrap();
                 }
@@ -136,7 +136,7 @@ fn bench_deletes(c: &mut Criterion) {
             b.iter(|| {
                 let mut tx = db.begin_rw().unwrap();
                 for addr in &addresses {
-                    tx.set_account(addr.clone(), None::<AccountVec>).unwrap();
+                    tx.set_account(addr.clone(), None::<RlpAccount>).unwrap();
                 }
                 tx.commit().unwrap();
             });
@@ -169,35 +169,35 @@ fn bench_mixed_operations(c: &mut Criterion) {
                         0 => {
                             // Read
                             let address = existing_addresses[i].clone();
-                            let account: Option<AccountVec> = tx.get_account(address).unwrap();
+                            let account = tx.get_account(address).unwrap();
                             assert!(account.is_some());
                         }
                         1 => {
                             // Insert
                             let address = new_addresses[i].clone();
-                            let account = AccountVec::new(
-                                U256::from(1000u64),
+                            let account = RlpAccount::new(
                                 1,
-                                KECCAK_EMPTY,
+                                U256::from(1000u64),
                                 EMPTY_ROOT_HASH,
+                                KECCAK_EMPTY,
                             );
                             tx.set_account(address.clone(), Some(account)).unwrap();
                         }
                         2 => {
                             // Update
                             let address = existing_addresses[i].clone();
-                            let new_account = AccountVec::new(
-                                U256::from(999_999_999u64),
+                            let new_account = RlpAccount::new(
                                 123,
-                                KECCAK_EMPTY,
+                                U256::from(999_999_999u64),
                                 EMPTY_ROOT_HASH,
+                                KECCAK_EMPTY,
                             );
                             tx.set_account(address.clone(), Some(new_account)).unwrap();
                         }
                         3 => {
                             // Delete
                             let address = existing_addresses[i].clone();
-                            tx.set_account(address.clone(), None::<AccountVec>).unwrap();
+                            tx.set_account(address.clone(), None::<RlpAccount>).unwrap();
                         }
                         _ => unreachable!(),
                     }
