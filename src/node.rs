@@ -267,13 +267,15 @@ impl<V: Value> Value for Node<V> {
                     .unwrap(),
             );
             let mut children = [const { None }; 16];
+            let mut block_count = 0;
             for (i, child) in children.iter_mut().enumerate() {
                 if children_bitmask & (1 << (15 - i)) == 0 {
                     continue;
                 }
-                let child_offset = 4 + packed_prefix_length + i * 37;
+                let child_offset = 4 + packed_prefix_length + block_count * 37;
                 let child_bytes = &bytes[child_offset..child_offset + 37];
                 *child = Some(Pointer::from_bytes(child_bytes)?);
+                block_count += 1;
             }
             Ok(Self::Branch { prefix, children })
         }
@@ -852,7 +854,7 @@ mod tests {
             ),
         );
         node.set_child(
-            1,
+            10,
             Pointer::new(
                 1.into(),
                 RlpNode::word_rlp(&b256!(
