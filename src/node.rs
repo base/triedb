@@ -1,27 +1,37 @@
-use alloy_primitives::B256;
-use alloy_rlp::{encode, BufMut, Encodable};
+use alloy_primitives::{hex, StorageValue, B256, U256};
+use alloy_rlp::{decode_exact, encode, encode_fixed_size, BufMut, Encodable};
 use alloy_trie::{
     nodes::{BranchNode, ExtensionNodeRef, LeafNodeRef, RlpNode},
-    Nibbles, TrieMask,
+    Nibbles, TrieMask, EMPTY_ROOT_HASH, KECCAK_EMPTY,
 };
+use arrayvec::ArrayVec;
 use proptest::prelude::{any, prop, Strategy};
 use proptest_derive::Arbitrary;
 
 use crate::{
+    account::Account,
     pointer::Pointer,
     storage::value::{self, Value},
 };
 
+// This is equivalent to RlpNode::word_rlp(&EMPTY_ROOT_HASH), and is used to encode the storage root of an account with no storage.
+const EMPTY_ROOT_RLP: [u8; 33] =
+    hex!("0xa056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");
+
 #[derive(Debug, Clone, PartialEq, Eq, Arbitrary)]
-pub enum Node<V> {
+pub enum Node {
     AccountLeaf {
         prefix: Nibbles,
-        value: V,
+        #[proptest(strategy = "arb_u64_rlp()")]
+        nonce_rlp: ArrayVec<u8, 9>,
+        #[proptest(strategy = "arb_u256_rlp()")]
+        balance_rlp: ArrayVec<u8, 33>,
+        code_hash: B256,
         storage_root: Option<Pointer>,
     },
     StorageLeaf {
         prefix: Nibbles,
-        value: V,
+        value: StorageValue,
     },
     Branch {
         prefix: Nibbles,
@@ -30,33 +40,49 @@ pub enum Node<V> {
     },
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum LeafType {
-    AccountLeaf,
-    StorageLeaf,
+fn arb_u64_rlp() -> impl Strategy<Value = ArrayVec<u8, 9>> {
+    any::<u64>().prop_map(|u| encode_fixed_size(&u)).boxed()
 }
 
-impl<V: Value> Node<V> {
-    pub fn new_leaf(prefix: Nibbles, value: V, leaf_type: LeafType) -> Self {
+fn arb_u256_rlp() -> impl Strategy<Value = ArrayVec<u8, 33>> {
+    any::<U256>().prop_map(|u| encode_fixed_size(&u)).boxed()
+}
+
+impl Node {
+    pub fn new_leaf(prefix: Nibbles, value: TrieValue) -> Self {
         assert!(
             prefix.len() <= 64,
             "account and storage leaf prefix's must be at most 64 nibbles"
         );
-        match leaf_type {
-            LeafType::AccountLeaf => Node::new_account_leaf(prefix, value, None),
-            LeafType::StorageLeaf => Node::new_storage_leaf(prefix, value),
+        match value {
+            TrieValue::Account(account) => Node::new_account_leaf(
+                prefix,
+                encode_fixed_size(&account.balance),
+                encode_fixed_size(&account.nonce),
+                account.code_hash,
+                None,
+            ),
+            TrieValue::Storage(storage) => Node::new_storage_leaf(prefix, storage),
         }
     }
 
-    pub fn new_account_leaf(prefix: Nibbles, value: V, storage_root: Option<Pointer>) -> Self {
+    pub fn new_account_leaf(
+        prefix: Nibbles,
+        balance_rlp: ArrayVec<u8, 33>,
+        nonce_rlp: ArrayVec<u8, 9>,
+        code_hash: B256,
+        storage_root: Option<Pointer>,
+    ) -> Self {
         Self::AccountLeaf {
             prefix,
-            value,
+            balance_rlp,
+            nonce_rlp,
+            code_hash,
             storage_root,
         }
     }
 
-    pub fn new_storage_leaf(prefix: Nibbles, value: V) -> Self {
+    pub fn new_storage_leaf(prefix: Nibbles, value: StorageValue) -> Self {
         Self::StorageLeaf { prefix, value }
     }
 
@@ -137,39 +163,55 @@ impl<V: Value> Node<V> {
         }
     }
 
-    pub fn value(&self) -> Option<&V> {
+    pub fn value(&self) -> TrieValue {
         match self {
-            Self::StorageLeaf { value, .. } => Some(value),
-            Self::AccountLeaf { value, .. } => Some(value),
-            _ => panic!("cannot get value of non-leaf node"),
-        }
-    }
-
-    pub fn into_value(self) -> V {
-        match self {
-            Self::AccountLeaf { value, .. } => value,
-            Self::StorageLeaf { value, .. } => value,
+            Self::StorageLeaf { value, .. } => TrieValue::Storage(*value),
+            Self::AccountLeaf {
+                balance_rlp,
+                nonce_rlp,
+                code_hash,
+                storage_root,
+                ..
+            } => TrieValue::Account(Account {
+                balance: decode_exact(balance_rlp).expect("invalid balance rlp"),
+                nonce: decode_exact(nonce_rlp).expect("invalid nonce rlp"),
+                storage_root: storage_root
+                    .as_ref()
+                    .and_then(|p| p.rlp().as_hash())
+                    .unwrap_or(EMPTY_ROOT_HASH),
+                code_hash: *code_hash,
+            }),
             _ => panic!("cannot get value of non-leaf node"),
         }
     }
 }
 
-impl<V: Value + Encodable> Node<V> {
+impl Node {
     pub fn rlp_encode(&self) -> RlpNode {
         RlpNode::from_rlp(&encode(self))
     }
 }
 
-impl<V: Value> Value for Node<V> {
+impl Value for Node {
     fn size(&self) -> usize {
         match self {
-            Self::StorageLeaf { prefix, value } => {
+            Self::StorageLeaf { prefix, .. } => {
                 let packed_prefix_length = (prefix.len() + 1) / 2;
-                2 + packed_prefix_length + value.size() // 2 bytes for type and prefix length
+                2 + packed_prefix_length + 32 // 2 bytes for type and prefix length
             }
-            Self::AccountLeaf { prefix, value, .. } => {
+            Self::AccountLeaf {
+                prefix,
+                balance_rlp,
+                nonce_rlp,
+                storage_root,
+                code_hash,
+            } => {
                 let packed_prefix_length = (prefix.len() + 1) / 2;
-                2 + packed_prefix_length + 37 + value.size() // 2 bytes for type and prefix length, 37 for storage root
+                2 + packed_prefix_length
+                    + balance_rlp.len()
+                    + nonce_rlp.len()
+                    + storage_root.is_some() as usize * 37
+                    + (*code_hash != KECCAK_EMPTY) as usize * 32 // 2 bytes for flags and prefix length
             }
             Self::Branch { prefix, .. } => {
                 let packed_prefix_length = (prefix.len() + 1) / 2;
@@ -182,8 +224,8 @@ impl<V: Value> Value for Node<V> {
         match self {
             Self::StorageLeaf { prefix, value } => {
                 let prefix_length = prefix.len();
-                let packed_prefix_length = (prefix_length + 1) / 2;
-                let total_size = 2 + packed_prefix_length + value.size();
+                let packed_prefix_length = (prefix.len() + 1) / 2;
+                let total_size = 2 + packed_prefix_length + 32;
                 if buf.len() < total_size {
                     return Err(value::Error::InvalidEncoding);
                 }
@@ -191,46 +233,59 @@ impl<V: Value> Value for Node<V> {
                 buf[0] = 0; // StorageLeaf type
                 buf[1] = prefix_length as u8;
                 prefix.pack_to(buf[2..2 + packed_prefix_length].as_mut());
-                let bytes_written = value.serialize_into(&mut buf[2 + packed_prefix_length..])?;
+                buf[2 + packed_prefix_length..].copy_from_slice(value.as_le_slice());
 
-                Ok(2 + prefix_length + bytes_written)
+                Ok(2 + packed_prefix_length + 32)
             }
             Self::AccountLeaf {
                 prefix,
-                value,
+                balance_rlp,
+                nonce_rlp,
+                code_hash,
                 storage_root,
             } => {
                 let prefix_length = prefix.len();
-                let packed_prefix_length = (prefix_length + 1) / 2;
-                let total_size = 2 + packed_prefix_length + 37 + value.size();
+                let packed_prefix_length = (prefix.len() + 1) / 2;
+                let total_size = 2
+                    + packed_prefix_length
+                    + balance_rlp.len()
+                    + nonce_rlp.len()
+                    + storage_root.is_some() as usize * 37
+                    + (*code_hash != KECCAK_EMPTY) as usize * 32;
                 if buf.len() < total_size {
                     return Err(value::Error::InvalidEncoding);
                 }
 
-                buf[0] = 1; // AccountLeaf type
-                buf[1] = prefix_length as u8;
-                prefix.pack_to(buf[2..2 + packed_prefix_length].as_mut());
+                let flags = 1
+                    | (storage_root.is_some() as u8) << 7
+                    | ((*code_hash != KECCAK_EMPTY) as u8) << 6;
 
-                let storage_offset = 2 + packed_prefix_length;
-                if let Some(storage) = storage_root {
-                    // Serialize the pointer
-                    storage.serialize_into(&mut buf[storage_offset..storage_offset + 37])?;
-                } else {
-                    // Fill with zeros if no storage root
-                    buf[storage_offset..storage_offset + 37].fill(0);
+                buf[0] = flags;
+                buf[1] = prefix_length as u8;
+                let mut offset = 2;
+                prefix.pack_to(buf[offset..offset + packed_prefix_length].as_mut());
+                offset += packed_prefix_length;
+                buf[offset..offset + nonce_rlp.len()].copy_from_slice(nonce_rlp.as_slice());
+                offset += nonce_rlp.len();
+                buf[offset..offset + balance_rlp.len()].copy_from_slice(balance_rlp.as_slice());
+                offset += balance_rlp.len();
+                if *code_hash != KECCAK_EMPTY {
+                    buf[offset..offset + 32].copy_from_slice(code_hash.as_slice());
+                    offset += 32;
                 }
 
-                let bytes_written = value.serialize_into(&mut buf[storage_offset + 37..])?;
+                if let Some(storage_root) = storage_root {
+                    // Serialize the pointer
+                    storage_root.serialize_into(&mut buf[offset..offset + 37])?;
+                    offset += 37;
+                }
 
-                Ok(storage_offset + 37 + bytes_written)
+                Ok(offset)
             }
             Self::Branch { prefix, children } => {
                 let prefix_length = prefix.len();
                 let packed_prefix_length = (prefix_length + 1) / 2;
-                let mut total_size = 2 + packed_prefix_length + 2; // Type, prefix length, bitmask
-                for _ in children.iter().flatten() {
-                    total_size += 37; // Each pointer is 37 bytes
-                }
+                let total_size = 2 + packed_prefix_length + 2 + 16 * 37; // Type, prefix length, bitmask, children
 
                 if buf.len() < total_size {
                     return Err(value::Error::InvalidEncoding);
@@ -266,35 +321,76 @@ impl<V: Value> Value for Node<V> {
     }
 
     fn from_bytes(bytes: &[u8]) -> value::Result<Self> {
-        let first_byte = bytes[0];
-        if first_byte == 0 {
+        let flags = bytes[0];
+        if flags == 0 {
             let prefix_length = bytes[1] as usize;
             let packed_prefix_length = (prefix_length + 1) / 2;
             let mut prefix = Nibbles::unpack(&bytes[2..2 + packed_prefix_length]);
             prefix.truncate(prefix_length);
-            let value = V::from_bytes(&bytes[packed_prefix_length + 2..])?;
+            let value = StorageValue::from_le_slice(&bytes[packed_prefix_length + 2..]);
             Ok(Self::StorageLeaf { prefix, value })
-        } else if first_byte == 1 {
+        } else if flags & 1 == 1 {
+            let has_storage = flags & 0b10000000 != 0;
+            let has_code = flags & 0b01000000 != 0;
             let prefix_length = bytes[1] as usize;
             let packed_prefix_length = (prefix_length + 1) / 2;
             let mut prefix = Nibbles::unpack(&bytes[2..2 + packed_prefix_length]);
             prefix.truncate(prefix_length);
-            let storage_root_bytes =
-                &bytes[2 + packed_prefix_length..2 + packed_prefix_length + 37];
-            let value = V::from_bytes(&bytes[2 + packed_prefix_length + 37..])?;
 
-            let storage_root = if storage_root_bytes == [0; 37] {
-                None
+            let mut offset = 2 + packed_prefix_length;
+
+            let nonce_header = bytes[offset];
+            let (nonce_rlp, nonce_len) = if nonce_header <= 128 {
+                let mut nonce_rlp = ArrayVec::new();
+                nonce_rlp.push(nonce_header);
+                (nonce_rlp, 1)
             } else {
-                Some(Pointer::from_bytes(storage_root_bytes)?)
+                let nonce_len = nonce_header as usize - 128;
+                let nonce_rlp =
+                    ArrayVec::from_iter(bytes[offset..offset + nonce_len + 1].iter().copied());
+                (nonce_rlp, nonce_len + 1)
             };
+            offset += nonce_len;
+
+            let balance_header = bytes[offset];
+            let (balance_rlp, balance_len) = if balance_header <= 128 {
+                let mut balance_rlp = ArrayVec::new();
+                balance_rlp.push(balance_header);
+                (balance_rlp, 1)
+            } else {
+                let balance_len = balance_header as usize - 128;
+                let balance_rlp =
+                    ArrayVec::from_iter(bytes[offset..offset + balance_len + 1].iter().copied());
+                (balance_rlp, balance_len + 1)
+            };
+            offset += balance_len;
+
+            let mut storage_root = None;
+            let mut code_hash = KECCAK_EMPTY;
+
+            if has_code {
+                if bytes.len() < offset + 32 {
+                    return Err(value::Error::InvalidEncoding);
+                }
+                code_hash = B256::from_slice(&bytes[offset..offset + 32]);
+                offset += 32;
+            }
+
+            if has_storage {
+                if bytes.len() < offset + 37 {
+                    return Err(value::Error::InvalidEncoding);
+                }
+                storage_root = Some(Pointer::from_bytes(&bytes[offset..offset + 37])?);
+            }
 
             Ok(Self::AccountLeaf {
                 prefix,
-                value,
+                balance_rlp,
+                nonce_rlp,
+                code_hash,
                 storage_root,
             })
-        } else {
+        } else if flags == 2 {
             let prefix_length = bytes[1] as usize;
             let packed_prefix_length = (prefix_length + 1) / 2;
             let mut prefix = Nibbles::unpack(&bytes[2..2 + packed_prefix_length]);
@@ -314,26 +410,47 @@ impl<V: Value> Value for Node<V> {
                 *child = Some(Pointer::from_bytes(child_bytes)?);
             }
             Ok(Self::Branch { prefix, children })
+        } else {
+            return Err(value::Error::InvalidEncoding);
         }
     }
 }
 
-impl<V: Value + Encodable> Encodable for Node<V> {
+impl Encodable for Node {
     fn encode(&self, out: &mut dyn BufMut) {
         match self {
             Self::StorageLeaf { prefix, value } => {
-                let value_rlp = encode(value);
+                let value_rlp = encode_fixed_size(value);
                 LeafNodeRef {
                     key: prefix,
                     value: &value_rlp,
                 }
                 .encode(out);
             }
-            Self::AccountLeaf { prefix, value, .. } => {
-                let value_rlp = encode(value);
+            Self::AccountLeaf {
+                prefix,
+                balance_rlp,
+                nonce_rlp,
+                code_hash,
+                storage_root,
+            } => {
+                let mut buf = [0u8; 110]; // max RLP length for an account: 2 bytes for list length, 9 for nonce, 33 for balance, 33 for storage root, 33 for code hash
+                let mut value_rlp = buf.as_mut();
+                let storage_root_rlp = storage_root
+                    .as_ref()
+                    .map(|p| p.rlp().as_slice())
+                    .unwrap_or(&EMPTY_ROOT_RLP);
+                let len = 2 + nonce_rlp.len() + balance_rlp.len() + storage_root_rlp.len() + 33;
+                value_rlp.put_u8(0xf8);
+                value_rlp.put_u8((len - 2) as u8);
+                value_rlp.put_slice(nonce_rlp);
+                value_rlp.put_slice(balance_rlp);
+                value_rlp.put_slice(storage_root_rlp);
+                value_rlp.put_u8(0xa0);
+                value_rlp.put_slice(code_hash.as_slice());
                 LeafNodeRef {
                     key: prefix,
-                    value: &value_rlp,
+                    value: &buf[..len],
                 }
                 .encode(out);
             }
@@ -379,13 +496,13 @@ impl<V: Value + Encodable> Encodable for Node<V> {
 
     fn length(&self) -> usize {
         match self {
-            Self::StorageLeaf { prefix, value } => {
+            Self::StorageLeaf { prefix, .. } => {
                 // this just has to be an estimate for `Vec::with_capacity`
-                prefix.len() + value.size() + 10 // 10 is just a buffer
+                prefix.len() + 32 + 10 // 10 is just a buffer
             }
-            Self::AccountLeaf { prefix, value, .. } => {
+            Self::AccountLeaf { prefix, .. } => {
                 // this just has to be an estimate for `Vec::with_capacity`
-                prefix.len() + value.size() + 10 // 10 is just a buffer
+                prefix.len() + 32 + 8 + 32 + 37 + 10 // 10 is just a buffer
             }
             Self::Branch { prefix, children } => {
                 if prefix.is_empty() {
@@ -428,53 +545,116 @@ fn arb_children() -> impl Strategy<Value = [Option<Pointer>; 16]> {
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrieValue {
+    Storage(StorageValue),
+    Account(Account),
+}
+
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{b256, hex, B256, U256};
-    use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
+    use alloy_trie::KECCAK_EMPTY;
     use proptest::prelude::*;
-
-    use crate::account::AccountVec;
 
     use super::*;
 
     #[test]
     fn test_storage_leaf_node_serialize() {
-        let node = Node::new_storage_leaf(Nibbles::from_nibbles([0xa, 0xb]), vec![4, 5, 6]);
+        let node = Node::new_storage_leaf(
+            Nibbles::from_nibbles([0xa, 0xb]),
+            StorageValue::from_le_slice(&[4, 5, 6]),
+        );
         let bytes = node.serialize().unwrap();
-        assert_eq!(bytes, hex!("0x0002ab040506"));
+        assert_eq!(
+            bytes,
+            hex!("0x0002ab0405060000000000000000000000000000000000000000000000000000000000")
+        );
 
-        let node = Node::new_storage_leaf(Nibbles::from_nibbles([0xa, 0xb, 0xc]), vec![4, 5, 6, 7]);
+        let node = Node::new_storage_leaf(
+            Nibbles::from_nibbles([0xa, 0xb, 0xc]),
+            StorageValue::from_le_slice(&[4, 5, 6, 7]),
+        );
         let bytes = node.serialize().unwrap();
-        assert_eq!(bytes, hex!("0x0003abc004050607"));
+        assert_eq!(
+            bytes,
+            hex!("0x0003abc00405060700000000000000000000000000000000000000000000000000000000")
+        );
 
-        let node = Node::new_storage_leaf(Nibbles::new(), vec![0xf, 0xf, 0xf, 0xf]);
+        let node = Node::new_storage_leaf(
+            Nibbles::new(),
+            StorageValue::from_le_slice(&[0xf, 0xf, 0xf, 0xf]),
+        );
         let bytes = node.serialize().unwrap();
-        assert_eq!(bytes, hex!("0x00000f0f0f0f"));
+        assert_eq!(
+            bytes,
+            hex!("0x00000f0f0f0f00000000000000000000000000000000000000000000000000000000")
+        );
     }
 
     #[test]
     fn test_account_leaf_node_serialize() {
-        let node = Node::new_account_leaf(Nibbles::from_nibbles([0xa, 0xb]), vec![4, 5, 6], None);
-        let bytes = node.serialize().unwrap();
-        assert_eq!(bytes, hex!("0x0102ab00000000000000000000000000000000000000000000000000000000000000000000000000040506"));
-
-        let node = Node::new_account_leaf(
-            Nibbles::from_nibbles([0xa, 0xb, 0xc]),
-            vec![4, 5, 6, 7],
-            None,
+        let node = Node::new_leaf(
+            Nibbles::from_nibbles([0xa, 0xb]),
+            TrieValue::Account(Account::new(
+                0,
+                U256::from_be_slice(&[4, 5, 6]),
+                EMPTY_ROOT_HASH,
+                KECCAK_EMPTY,
+            )),
         );
         let bytes = node.serialize().unwrap();
-        assert_eq!(bytes, hex!("0x0103abc00000000000000000000000000000000000000000000000000000000000000000000000000004050607"));
+        assert_eq!(bytes, hex!("0x0102ab8083040506"));
 
-        let node = Node::new_account_leaf(Nibbles::new(), vec![0xf, 0xf, 0xf, 0xf], None);
+        let node = Node::new_leaf(
+            Nibbles::from_nibbles([0xa, 0xb, 0xc]),
+            TrieValue::Account(Account::new(
+                0,
+                U256::from_be_slice(&[4, 5, 6, 7]),
+                EMPTY_ROOT_HASH,
+                KECCAK_EMPTY,
+            )),
+        );
         let bytes = node.serialize().unwrap();
-        assert_eq!(bytes, hex!("0x0100000000000000000000000000000000000000000000000000000000000000000000000000000f0f0f0f"));
+        assert_eq!(bytes, hex!("0x0103abc0808404050607"));
+
+        let node = Node::new_leaf(
+            Nibbles::new(),
+            TrieValue::Account(Account::new(
+                0,
+                U256::from_be_slice(&[0xf, 0xf, 0xf, 0xf]),
+                EMPTY_ROOT_HASH,
+                b256!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+            )),
+        );
+        let bytes = node.serialize().unwrap();
+        assert_eq!(bytes, hex!("0x410080840f0f0f0fdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"));
+
+        let mut node = Node::new_leaf(
+            Nibbles::new(),
+            TrieValue::Account(Account::new(
+                0,
+                U256::from_be_slice(&[0xf, 0xf, 0xf, 0xf]),
+                EMPTY_ROOT_HASH,
+                b256!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+            )),
+        );
+        node.set_child(
+            0,
+            Pointer::new(
+                42.into(),
+                RlpNode::word_rlp(&b256!(
+                    "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+                )),
+            ),
+        );
+        let bytes = node.serialize().unwrap();
+        assert_eq!(bytes, hex!("0xc10080840f0f0f0fdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef0000002aa01234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"));
     }
 
     #[test]
     fn test_branch_node_serialize() {
-        let mut node: Node<Vec<u8>> = Node::new_branch(Nibbles::new());
+        let mut node: Node = Node::new_branch(Nibbles::new());
         let hash1 = b256!("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
         let hash2 = b256!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
         node.set_child(0, Pointer::new(42.into(), RlpNode::word_rlp(&hash1)));
@@ -496,8 +676,7 @@ mod tests {
         expected.extend(vec![0; 37 * 4]);
         assert_eq!(bytes, expected);
 
-        let mut node: Node<Vec<u8>> =
-            Node::new_branch(Nibbles::from_nibbles([0xa, 0xb, 0xc, 0xd, 0xe]));
+        let mut node: Node = Node::new_branch(Nibbles::from_nibbles([0xa, 0xb, 0xc, 0xd, 0xe]));
         let hash1 = b256!("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
         let hash2 = b256!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
         node.set_child(2, Pointer::new(2.into(), RlpNode::word_rlp(&hash1)));
@@ -519,7 +698,7 @@ mod tests {
         expected.extend([0; 37 * 12]);
         assert_eq!(bytes, expected);
 
-        let mut node: Node<Vec<u8>> = Node::new_branch(Nibbles::from_nibbles([0x0, 0x0]));
+        let mut node: Node = Node::new_branch(Nibbles::from_nibbles([0x0, 0x0]));
         let v1 = encode(1u8);
         let v2 = encode("hello world");
         node.set_child(1, Pointer::new(99999.into(), RlpNode::from_rlp(&v1)));
@@ -547,40 +726,45 @@ mod tests {
 
     #[test]
     fn test_leaf_node_encode() {
-        let account = AccountVec::new(U256::from(1), 0, B256::ZERO, B256::ZERO);
-        let node = Node::new_account_leaf(Nibbles::new(), account, None);
+        let node = Node::new_leaf(
+            Nibbles::new(),
+            TrieValue::Account(Account::new(0, U256::from(1), B256::ZERO, B256::ZERO)),
+        );
         let mut bytes = vec![];
         node.encode(&mut bytes);
-        assert_eq!(bytes, hex!("0xf84920b846f8448001a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000"));
+        assert_eq!(bytes, hex!("0xf84920b846f8448001a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a00000000000000000000000000000000000000000000000000000000000000000"));
 
-        let account = AccountVec::new(U256::from(100), 1, B256::ZERO, B256::ZERO);
-        let node = Node::new_account_leaf(Nibbles::from_nibbles([0xa, 0xb]), account, None);
+        let node = Node::new_leaf(
+            Nibbles::from_nibbles([0xa, 0xb]),
+            TrieValue::Account(Account::new(1, U256::from(100), B256::ZERO, B256::ZERO)),
+        );
         let mut bytes = vec![];
         node.encode(&mut bytes);
-        assert_eq!(bytes, hex!("0xf84b8220abb846f8440164a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000"));
+        assert_eq!(bytes, hex!("0xf84b8220abb846f8440164a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a00000000000000000000000000000000000000000000000000000000000000000"));
 
-        let account = AccountVec::new(U256::from(123456789), 999, B256::ZERO, B256::ZERO);
-        let node = Node::new_account_leaf(
+        let node = Node::new_leaf(
             Nibbles::from_nibbles([0xa, 0xb, 0xc, 0xd, 0xe]),
-            account,
-            None,
+            TrieValue::Account(Account::new(
+                999,
+                U256::from(123456789),
+                B256::ZERO,
+                B256::ZERO,
+            )),
         );
         let mut bytes = vec![];
         node.encode(&mut bytes);
-        assert_eq!(bytes, hex!("0xf852833abcdeb84cf84a8203e784075bcd15a00000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000"));
+        assert_eq!(bytes, hex!("0xf852833abcdeb84cf84a8203e784075bcd15a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a00000000000000000000000000000000000000000000000000000000000000000"));
 
-        let account = AccountVec::new(
-            U256::from(10_000_000_000_000_000_000u64),
-            0,
-            KECCAK_EMPTY,
-            EMPTY_ROOT_HASH,
-        );
-        let node = Node::new_account_leaf(
+        let node = Node::new_leaf(
             Nibbles::unpack(hex!(
                 "0x761d5c42184a02cc64585ed2ff339fc39a907e82731d70313c83d2212b2da36b"
             )),
-            account,
-            None,
+            TrieValue::Account(Account::new(
+                0,
+                U256::from(10_000_000_000_000_000_000u64),
+                EMPTY_ROOT_HASH,
+                KECCAK_EMPTY,
+            )),
         );
         let mut bytes = vec![];
         node.encode(&mut bytes);
@@ -595,7 +779,7 @@ mod tests {
 
     #[test]
     fn test_branch_node_encode() {
-        let mut node: Node<AccountVec> = Node::new_branch(Nibbles::new());
+        let mut node = Node::new_branch(Nibbles::new());
         node.set_child(
             0,
             Pointer::new(
@@ -618,7 +802,7 @@ mod tests {
         node.encode(&mut bytes);
         assert_eq!(bytes, hex!("0xf851a01234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef8080808080808080808080808080a0deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef80"));
 
-        let mut node: Node<AccountVec> = Node::new_branch(Nibbles::new());
+        let mut node = Node::new_branch(Nibbles::new());
         node.set_child(
             3,
             Pointer::new(
@@ -650,7 +834,7 @@ mod tests {
         node.encode(&mut bytes);
         assert_eq!(bytes, hex!("0xf871808080a01234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef808080a0deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef8080808080a0f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f808080"));
 
-        let mut node: Node<AccountVec> = Node::new_branch(Nibbles::from_nibbles([0x1, 0x2]));
+        let mut node = Node::new_branch(Nibbles::from_nibbles([0x1, 0x2]));
         node.set_child(
             0,
             Pointer::new(
@@ -676,8 +860,7 @@ mod tests {
             hex!("0xe4820012a07bd949f8cd65627b2b00e38e837d3d6136a9fd1599e3677a4b5a730e2176f67d")
         );
 
-        let mut node: Node<AccountVec> =
-            Node::new_branch(Nibbles::from_nibbles([0x7, 0x7, 0x7, 0x7, 0x7, 0x7, 0x7]));
+        let mut node = Node::new_branch(Nibbles::from_nibbles([0x7, 0x7, 0x7, 0x7, 0x7, 0x7, 0x7]));
         node.set_child(
             3,
             Pointer::new(
@@ -714,7 +897,7 @@ mod tests {
             )
         );
 
-        let mut node: Node<AccountVec> = Node::new_branch(Nibbles::new());
+        let mut node = Node::new_branch(Nibbles::new());
         node.set_child(
             5,
             Pointer::new(
@@ -750,14 +933,14 @@ mod tests {
 
     proptest! {
         #[test]
-        fn fuzz_node_to_from_bytes(node: Node<AccountVec>) {
+        fn fuzz_node_to_from_bytes(node: Node) {
             let bytes = node.serialize().unwrap();
             let decoded = Node::from_bytes(&bytes).unwrap();
             assert_eq!(node, decoded);
         }
 
         #[test]
-        fn fuzz_node_rlp_encode(node: Node<AccountVec>) {
+        fn fuzz_node_rlp_encode(node: Node) {
             let mut bytes = vec![];
             node.encode(&mut bytes);
         }
