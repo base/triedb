@@ -1,9 +1,13 @@
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, StorageKey, StorageValue, U256};
 use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::prelude::*;
 use tempdir::TempDir;
-use triedb::{account::Account, path::AddressPath, Database, MmapPageManager};
+use triedb::{
+    account::Account,
+    path::{AddressPath, StoragePath},
+    Database, MmapPageManager,
+};
 
 const SIZES: &[usize] = &[1_000_000, 3_000_000];
 const BATCH_SIZE: usize = 10_000;
@@ -40,6 +44,44 @@ fn setup_database(size: usize) -> (TempDir, Database<MmapPageManager>) {
     (dir, db)
 }
 
+fn setup_database_with_storage(size: usize) -> (TempDir, Database<MmapPageManager>) {
+    let dir = TempDir::new("triedb_bench_storage").unwrap();
+    let db_path = dir.path().join("db");
+    let db = Database::create(db_path.to_str().unwrap()).unwrap();
+
+    // Populate database with initial accounts
+    let mut rng = StdRng::seed_from_u64(42);
+    {
+        let mut tx = db.begin_rw().unwrap();
+        for i in 1..=size {
+            let address = generate_random_address(&mut rng);
+            let account = Account::new(
+                i as u64,
+                U256::from(i as u64),
+                EMPTY_ROOT_HASH,
+                KECCAK_EMPTY,
+            );
+
+            tx.set_account(address.clone(), Some(account)).unwrap();
+
+            // add random storage to each account
+            for i in 1..=size {
+                let storage_key = StorageKey::from(U256::from(i));
+                let storage_path =
+                    StoragePath::for_address_path_and_slot(address.clone(), storage_key);
+                let storage_value = StorageValue::from_be_slice(storage_path.get_slot().as_slice());
+
+                tx.set_storage_slot(storage_path, Some(storage_value))
+                    .unwrap();
+            }
+        }
+
+        tx.commit().unwrap();
+    }
+
+    (dir, db)
+}
+
 fn bench_reads(c: &mut Criterion) {
     let mut group = c.benchmark_group("read_operations");
 
@@ -64,6 +106,8 @@ fn bench_reads(c: &mut Criterion) {
     }
     group.finish();
 }
+
+//fn bench_storage_reads_single_account
 
 fn bench_inserts(c: &mut Criterion) {
     let mut group = c.benchmark_group("insert_operations");

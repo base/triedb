@@ -45,6 +45,15 @@ impl StoragePath {
         }
     }
 
+    pub fn for_address_path_and_slot(address_path: AddressPath, slot: StorageKey) -> Self {
+        let slot_hash = keccak256(slot);
+        let slot_nibbles = Nibbles::unpack(slot_hash);
+        Self {
+            address: address_path,
+            slot: slot_nibbles,
+        }
+    }
+
     pub fn full_path(&self) -> Nibbles {
         self.address.path.join(&self.slot)
     }
