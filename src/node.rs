@@ -1,5 +1,5 @@
 use alloy_primitives::{hex, StorageValue, B256, U256};
-use alloy_rlp::{decode_exact, encode, encode_fixed_size, BufMut, Encodable};
+use alloy_rlp::{decode_exact, encode, encode_fixed_size, BufMut, Encodable, MaxEncodedLen};
 use alloy_trie::{
     nodes::{BranchNode, ExtensionNodeRef, LeafNodeRef, RlpNode},
     Nibbles, TrieMask, EMPTY_ROOT_HASH, KECCAK_EMPTY,
@@ -31,7 +31,8 @@ pub enum Node {
     },
     StorageLeaf {
         prefix: Nibbles,
-        value: StorageValue,
+        #[proptest(strategy = "arb_u256_rlp()")]
+        value_rlp: ArrayVec<u8, 33>,
     },
     Branch {
         prefix: Nibbles,
@@ -62,7 +63,9 @@ impl Node {
                 account.code_hash,
                 None,
             ),
-            TrieValue::Storage(storage) => Node::new_storage_leaf(prefix, storage),
+            TrieValue::Storage(storage) => {
+                Node::new_storage_leaf(prefix, encode_fixed_size(&storage))
+            }
         }
     }
 
@@ -82,8 +85,8 @@ impl Node {
         }
     }
 
-    pub fn new_storage_leaf(prefix: Nibbles, value: StorageValue) -> Self {
-        Self::StorageLeaf { prefix, value }
+    pub fn new_storage_leaf(prefix: Nibbles, value_rlp: ArrayVec<u8, 33>) -> Self {
+        Self::StorageLeaf { prefix, value_rlp }
     }
 
     pub fn new_branch(prefix: Nibbles) -> Self {
@@ -165,7 +168,9 @@ impl Node {
 
     pub fn value(&self) -> TrieValue {
         match self {
-            Self::StorageLeaf { value, .. } => TrieValue::Storage(*value),
+            Self::StorageLeaf { value_rlp, .. } => {
+                TrieValue::Storage(decode_exact(value_rlp).expect("invalid storage rlp"))
+            }
             Self::AccountLeaf {
                 balance_rlp,
                 nonce_rlp,
@@ -188,16 +193,24 @@ impl Node {
 
 impl Node {
     pub fn rlp_encode(&self) -> RlpNode {
-        RlpNode::from_rlp(&encode(self))
+        RlpNode::from_rlp(&encode_fixed_size(self))
     }
 }
+
+// This is the maximum possible RLP-encoded length of a node.
+// This value is derived from the maximum possible length of a branch node, which is the largest case.
+// A branch node is encoded as a list of 17 elements, including 16 children and an empty list.
+// Each child is encoded with up to 33 bytes, and the empty list adds 1 byte.
+// Another 3 bytes are required to encode the list itself.
+// The total length is 3 + 16*33 + 1 = 532.
+unsafe impl MaxEncodedLen<{ 3 + 16 * 33 + 1 }> for Node {}
 
 impl Value for Node {
     fn size(&self) -> usize {
         match self {
-            Self::StorageLeaf { prefix, .. } => {
+            Self::StorageLeaf { prefix, value_rlp } => {
                 let packed_prefix_length = (prefix.len() + 1) / 2;
-                2 + packed_prefix_length + 32 // 2 bytes for type and prefix length
+                2 + packed_prefix_length + value_rlp.len() // 2 bytes for type and prefix length
             }
             Self::AccountLeaf {
                 prefix,
@@ -222,10 +235,10 @@ impl Value for Node {
 
     fn serialize_into(&self, buf: &mut [u8]) -> value::Result<usize> {
         match self {
-            Self::StorageLeaf { prefix, value } => {
+            Self::StorageLeaf { prefix, value_rlp } => {
                 let prefix_length = prefix.len();
                 let packed_prefix_length = (prefix.len() + 1) / 2;
-                let total_size = 2 + packed_prefix_length + 32;
+                let total_size = 2 + packed_prefix_length + value_rlp.len();
                 if buf.len() < total_size {
                     return Err(value::Error::InvalidEncoding);
                 }
@@ -233,9 +246,9 @@ impl Value for Node {
                 buf[0] = 0; // StorageLeaf type
                 buf[1] = prefix_length as u8;
                 prefix.pack_to(buf[2..2 + packed_prefix_length].as_mut());
-                buf[2 + packed_prefix_length..].copy_from_slice(value.as_le_slice());
+                buf[2 + packed_prefix_length..].copy_from_slice(value_rlp.as_slice());
 
-                Ok(2 + packed_prefix_length + 32)
+                Ok(total_size)
             }
             Self::AccountLeaf {
                 prefix,
@@ -327,8 +340,20 @@ impl Value for Node {
             let packed_prefix_length = (prefix_length + 1) / 2;
             let mut prefix = Nibbles::unpack(&bytes[2..2 + packed_prefix_length]);
             prefix.truncate(prefix_length);
-            let value = StorageValue::from_le_slice(&bytes[packed_prefix_length + 2..]);
-            Ok(Self::StorageLeaf { prefix, value })
+
+            let offset = 2 + packed_prefix_length;
+
+            let value_header = bytes[offset];
+            let value_rlp = if value_header <= 128 {
+                let mut value_rlp = ArrayVec::new();
+                value_rlp.push(value_header);
+                value_rlp
+            } else {
+                let value_len = value_header as usize - 128;
+                ArrayVec::from_iter(bytes[offset..offset + value_len + 1].iter().copied())
+            };
+
+            Ok(Self::StorageLeaf { prefix, value_rlp })
         } else if flags & 1 == 1 {
             let has_storage = flags & 0b10000000 != 0;
             let has_code = flags & 0b01000000 != 0;
@@ -419,11 +444,10 @@ impl Value for Node {
 impl Encodable for Node {
     fn encode(&self, out: &mut dyn BufMut) {
         match self {
-            Self::StorageLeaf { prefix, value } => {
-                let value_rlp = encode_fixed_size(value);
+            Self::StorageLeaf { prefix, value_rlp } => {
                 LeafNodeRef {
                     key: prefix,
-                    value: &value_rlp,
+                    value: value_rlp,
                 }
                 .encode(out);
             }
@@ -561,35 +585,39 @@ mod tests {
 
     #[test]
     fn test_storage_leaf_node_serialize() {
-        let node = Node::new_storage_leaf(
+        let node = Node::new_leaf(
             Nibbles::from_nibbles([0xa, 0xb]),
-            StorageValue::from_le_slice(&[4, 5, 6]),
+            TrieValue::Storage(StorageValue::from_be_slice(&[4, 5, 6])),
         );
         let bytes = node.serialize().unwrap();
-        assert_eq!(
-            bytes,
-            hex!("0x0002ab0405060000000000000000000000000000000000000000000000000000000000")
-        );
+        assert_eq!(bytes, hex!("0x0002ab83040506"));
 
-        let node = Node::new_storage_leaf(
+        let node = Node::new_leaf(
             Nibbles::from_nibbles([0xa, 0xb, 0xc]),
-            StorageValue::from_le_slice(&[4, 5, 6, 7]),
+            TrieValue::Storage(StorageValue::from_be_slice(&[4, 5, 6, 7])),
         );
         let bytes = node.serialize().unwrap();
-        assert_eq!(
-            bytes,
-            hex!("0x0003abc00405060700000000000000000000000000000000000000000000000000000000")
-        );
+        assert_eq!(bytes, hex!("0x0003abc08404050607"));
 
-        let node = Node::new_storage_leaf(
+        let node = Node::new_leaf(
             Nibbles::new(),
-            StorageValue::from_le_slice(&[0xf, 0xf, 0xf, 0xf]),
+            TrieValue::Storage(StorageValue::from_be_slice(&[255, 255, 255, 255])),
         );
         let bytes = node.serialize().unwrap();
-        assert_eq!(
-            bytes,
-            hex!("0x00000f0f0f0f00000000000000000000000000000000000000000000000000000000")
+        assert_eq!(bytes, hex!("0x000084ffffffff"));
+
+        let node = Node::new_leaf(Nibbles::new(), TrieValue::Storage(StorageValue::from(0)));
+        let bytes = node.serialize().unwrap();
+        assert_eq!(bytes, hex!("0x000080"));
+
+        let node = Node::new_leaf(
+            Nibbles::from_nibbles(hex!(
+                "0x000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f"
+            )),
+            TrieValue::Storage(StorageValue::from(U256::MAX)),
         );
+        let bytes = node.serialize().unwrap();
+        assert_eq!(bytes, hex!("0x00200123456789abcdef0123456789abcdefa0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"));
     }
 
     #[test]
