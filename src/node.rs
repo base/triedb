@@ -1,3 +1,5 @@
+use std::cmp::max;
+
 use alloy_primitives::B256;
 use alloy_rlp::{encode, BufMut, Encodable};
 use alloy_trie::{
@@ -171,10 +173,7 @@ impl<V: Value> Value for Node<V> {
                 let packed_prefix_length = (prefix.len() + 1) / 2;
                 2 + packed_prefix_length + 37 + value.size() // 2 bytes for type and prefix length, 37 for storage root
             }
-            Self::Branch { prefix, .. } => {
-                let packed_prefix_length = (prefix.len() + 1) / 2;
-                2 + packed_prefix_length + 2 + 16 * 37 // 2 bytes for type and prefix length, 2 for bitmask, 37 for each child pointer
-            }
+            Self::Branch { prefix, children } => Self::size_branch(prefix, children),
         }
     }
 
@@ -224,44 +223,7 @@ impl<V: Value> Value for Node<V> {
 
                 Ok(storage_offset + 37 + bytes_written)
             }
-            Self::Branch { prefix, children } => {
-                let prefix_length = prefix.len();
-                let packed_prefix_length = (prefix_length + 1) / 2;
-                let mut total_size = 2 + packed_prefix_length + 2; // Type, prefix length, bitmask
-                for _ in children.iter().flatten() {
-                    total_size += 37; // Each pointer is 37 bytes
-                }
-
-                if buf.len() < total_size {
-                    return Err(value::Error::InvalidEncoding);
-                }
-
-                buf[0] = 2; // Branch type
-                buf[1] = prefix_length as u8;
-                prefix.pack_to(buf[2..2 + packed_prefix_length].as_mut());
-
-                // Calculate and store the children bitmask
-                let children_bitmask = children
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, child)| (child.is_some() as u16) << (15 - idx))
-                    .sum::<u16>();
-                buf[2 + packed_prefix_length..2 + packed_prefix_length + 2]
-                    .copy_from_slice(&children_bitmask.to_be_bytes());
-
-                // Store each child pointer
-                let mut offset = 2 + packed_prefix_length + 2;
-                for child in children.iter() {
-                    if let Some(child) = child {
-                        child.serialize_into(&mut buf[offset..offset + 37])?;
-                    } else {
-                        buf[offset..offset + 37].fill(0);
-                    }
-                    offset += 37;
-                }
-
-                Ok(offset)
-            }
+            Self::Branch { prefix, children } => Self::serialize_branch_into(prefix, children, buf),
         }
     }
 
@@ -315,6 +277,67 @@ impl<V: Value> Value for Node<V> {
             }
             Ok(Self::Branch { prefix, children })
         }
+    }
+}
+
+impl<V: Value> Node<V> {
+    fn size_branch(prefix: &Nibbles, children: &[Option<Pointer>; 16]) -> usize {
+        let total_children = children.into_iter().filter(|child| child.is_some()).count();
+        let children_slot_size = max(total_children.next_power_of_two(), 2);
+
+        let prefix_length = prefix.len();
+        let packed_prefix_length = (prefix_length + 1) / 2;
+        return 2 + packed_prefix_length + 2 + children_slot_size * 37; // 2 bytes for type and prefix length, 2 for bitmask, 37 for each child pointer
+    }
+
+    fn serialize_branch_into(
+        prefix: &Nibbles,
+        children: &[Option<Pointer>; 16],
+        buf: &mut [u8],
+    ) -> value::Result<usize> {
+        // children is saved in a list of 2, 4, 8, 16 slots depending on the number of children
+        let total_children = children.into_iter().filter(|child| child.is_some()).count();
+        let children_slot_size = max(total_children.next_power_of_two(), 2);
+
+        let prefix_length = prefix.len();
+        let packed_prefix_length = (prefix_length + 1) / 2;
+        let mut total_size = 2 + packed_prefix_length + 2; // Type, prefix length, bitmask
+        total_size += children_slot_size * 37; // Each pointer is 37 bytes
+
+        if buf.len() < total_size {
+            return Err(value::Error::InvalidEncoding);
+        }
+
+        buf[0] = 2; // Branch type
+        buf[1] = prefix_length as u8;
+        prefix.pack_to(buf[2..2 + packed_prefix_length].as_mut());
+
+        // Calculate and store the children bitmask
+        let children_bitmask = children
+            .iter()
+            .enumerate()
+            .map(|(idx, child)| (child.is_some() as u16) << (15 - idx))
+            .sum::<u16>();
+        buf[2 + packed_prefix_length..2 + packed_prefix_length + 2]
+            .copy_from_slice(&children_bitmask.to_be_bytes());
+
+        // Store each child pointer
+        let mut offset = 2 + packed_prefix_length + 2;
+        for child in children.iter() {
+            if let Some(child) = child {
+                child.serialize_into(&mut buf[offset..offset + 37])?;
+                offset += 37;
+            }
+            // else {
+            //     buf[offset..offset + 37].fill(0);
+            // }
+            // offset += 37;
+        }
+        let padding_size = (children_slot_size - total_children) * 37;
+        buf[offset..offset + padding_size].fill(0);
+        offset += padding_size;
+
+        Ok(offset)
     }
 }
 
@@ -439,6 +462,75 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_size_branch() {
+        // 2 children, reserve 2 children slots
+        let mut node: Node<Vec<u8>> = Node::new_branch(Nibbles::new());
+        node.set_child(0, Pointer::new(42.into(), RlpNode::from_rlp(&encode(10u8))));
+        node.set_child(
+            11,
+            Pointer::new(11.into(), RlpNode::from_rlp(&encode("foo"))),
+        );
+        let size = node.size();
+        assert_eq!(size, 2 + 2 + 37 * 2); // 2 bytes for type and prefix length, 2 for bitmask, 37 for each 2 children pointers
+
+        // 3 children, reserve 4 children slots
+        let mut node: Node<Vec<u8>> = Node::new_branch(Nibbles::new());
+        for i in 0..3 {
+            node.set_child(
+                i,
+                Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i))),
+            );
+        }
+
+        let size = node.size();
+        assert_eq!(size, 2 + 2 + 37 * 4); // 2 bytes for type and prefix length, 2 for bitmask, 37 for each 4 children pointers
+
+        // 4 children, reserve 4 children slots
+        let mut node: Node<Vec<u8>> = Node::new_branch(Nibbles::new());
+        for i in 0..4 {
+            node.set_child(
+                i,
+                Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i))),
+            );
+        }
+        let size = node.size();
+        assert_eq!(size, 2 + 2 + 37 * 4); // 2 bytes for type and prefix length, 2 for bitmask, 37 for each 4 children pointers
+
+        // 5 children, reserve 8 children slots
+        let mut node: Node<Vec<u8>> = Node::new_branch(Nibbles::new());
+        for i in 0..5 {
+            node.set_child(
+                i,
+                Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i))),
+            );
+        }
+        let size = node.size();
+        assert_eq!(size, 2 + 2 + 37 * 8); // 2 bytes for type and prefix length, 2 for bitmask, 37 for each 8 children pointers
+
+        // 8 children, reserve 8 children slots
+        let mut node: Node<Vec<u8>> = Node::new_branch(Nibbles::new());
+        for i in 0..8 {
+            node.set_child(
+                i,
+                Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i))),
+            );
+        }
+        let size = node.size();
+        assert_eq!(size, 2 + 2 + 37 * 8); // 2 bytes for type and prefix length, 2 for bitmask, 37 for each 8 children pointers
+
+        // 9 children, reserve 16 children slots
+        let mut node: Node<Vec<u8>> = Node::new_branch(Nibbles::new());
+        for i in 0..9 {
+            node.set_child(
+                i,
+                Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i))),
+            );
+        }
+        let size = node.size();
+        assert_eq!(size, 2 + 2 + 37 * 16); // 2 bytes for type and prefix length, 2 for bitmask, 37 for each 16 children pointers
+    }
+
+    #[test]
     fn test_storage_leaf_node_serialize() {
         let node = Node::new_storage_leaf(Nibbles::from_nibbles([0xa, 0xb]), vec![4, 5, 6]);
         let bytes = node.serialize().unwrap();
@@ -478,8 +570,9 @@ mod tests {
         let hash1 = b256!("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
         let hash2 = b256!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
         node.set_child(0, Pointer::new(42.into(), RlpNode::word_rlp(&hash1)));
-        node.set_child(11, Pointer::new(11.into(), RlpNode::word_rlp(&hash2)));
+        node.set_child(11, Pointer::new(43.into(), RlpNode::word_rlp(&hash2)));
         let bytes = node.serialize().unwrap();
+        assert_eq!(bytes.len(), 2 + 2 + 37 * 2);
         // branch, no prefix
         let mut expected = Vec::from([2, 0]);
         // children bitmask (10000000 00010000)
@@ -487,36 +580,37 @@ mod tests {
         // child 0
         expected.extend([0, 0, 0, 42, 160]);
         expected.extend(hash1.as_slice());
-        // children 1-10
-        expected.extend(vec![0; 37 * 10]);
         // child 11
-        expected.extend([0, 0, 0, 11, 160]);
+        expected.extend([0, 0, 0, 43, 160]);
         expected.extend(hash2.as_slice());
         // children 12-15
-        expected.extend(vec![0; 37 * 4]);
         assert_eq!(bytes, expected);
 
         let mut node: Node<Vec<u8>> =
             Node::new_branch(Nibbles::from_nibbles([0xa, 0xb, 0xc, 0xd, 0xe]));
         let hash1 = b256!("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
         let hash2 = b256!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
-        node.set_child(2, Pointer::new(2.into(), RlpNode::word_rlp(&hash1)));
-        node.set_child(3, Pointer::new(3.into(), RlpNode::word_rlp(&hash2)));
+        let hash3 = b256!("0x1111111111111111111111111111111111111111111111111111111111111111");
+        node.set_child(2, Pointer::new(100.into(), RlpNode::word_rlp(&hash1)));
+        node.set_child(3, Pointer::new(200.into(), RlpNode::word_rlp(&hash2)));
+        node.set_child(15, Pointer::new(210.into(), RlpNode::word_rlp(&hash3)));
         let bytes = node.serialize().unwrap();
+        assert_eq!(bytes.len(), 2 + 3 + 2 + 37 * 4);
         // branch, length, prefix
         let mut expected = Vec::from([2, 5, 171, 205, 224]);
-        // children bitmask (00110000 00000000)
-        expected.extend([48, 0]);
-        // children 0-1
-        expected.extend([0; 37 * 2]);
+        // children bitmask (00110000 00000001)
+        expected.extend([48, 1]);
         // child 2
-        expected.extend([0, 0, 0, 2, 160]);
+        expected.extend([0, 0, 0, 100, 160]);
         expected.extend(hash1.as_slice());
         // child 3
-        expected.extend([0, 0, 0, 3, 160]);
+        expected.extend([0, 0, 0, 200, 160]);
         expected.extend(hash2.as_slice());
-        // children 4-15
-        expected.extend([0; 37 * 12]);
+        // child 15
+        expected.extend([0, 0, 0, 210, 160]);
+        expected.extend(hash3.as_slice());
+        // remaining empty slot
+        expected.extend([0; 37 * 1]);
         assert_eq!(bytes, expected);
 
         let mut node: Node<Vec<u8>> = Node::new_branch(Nibbles::from_nibbles([0x0, 0x0]));
@@ -530,8 +624,6 @@ mod tests {
         let mut expected = Vec::from([2, 2, 0]);
         // children bitmask (01100000 00000000)
         expected.extend([96, 0]);
-        // child 0
-        expected.extend([0; 37]);
         // child 1
         expected.extend([0, 1, 134, 159]);
         expected.extend(v1);
@@ -540,8 +632,6 @@ mod tests {
         expected.extend([0, 132, 95, 237]);
         expected.extend(v2);
         expected.extend([0; 21]);
-        // children 3-15
-        expected.extend([0; 37 * 13]);
         assert_eq!(bytes, expected);
     }
 
@@ -770,16 +860,7 @@ mod tests {
                 )),
             ),
         );
-        node.set_child(
-            2,
-            Pointer::new(
-                2.into(),
-                RlpNode::word_rlp(&b256!(
-                    "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-                )),
-            ),
-        );
-        assert_eq!(node.size(), 2 + 4 + 2 + 36 * 16);
+        assert_eq!(node.size(), 2 + 2 + 2 + 37 * 2);
 
         let x = node.serialize().unwrap();
         let y = Node::from_bytes(&x).unwrap();
