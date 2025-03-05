@@ -748,6 +748,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_branch_node_encode_decode() {
+        let nibbles = Nibbles::from_nibbles([0x1, 0x2, 0x3, 0x4]);
+        let mut node: Node<AccountVec> = Node::new_branch(nibbles);
+        node.set_child(
+            0,
+            Pointer::new(
+                0.into(),
+                RlpNode::word_rlp(&b256!(
+                    "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+                )),
+            ),
+        );
+        node.set_child(
+            1,
+            Pointer::new(
+                1.into(),
+                RlpNode::word_rlp(&b256!(
+                    "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+                )),
+            ),
+        );
+        node.set_child(
+            2,
+            Pointer::new(
+                2.into(),
+                RlpNode::word_rlp(&b256!(
+                    "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+                )),
+            ),
+        );
+        assert_eq!(node.size(), 2 + 4 + 2 + 36 * 16);
+
+        let x = node.serialize().unwrap();
+        let y = Node::from_bytes(&x).unwrap();
+        assert_eq!(node, y);
+    }
+
     proptest! {
         #[test]
         fn fuzz_node_to_from_bytes(node: Node<AccountVec>) {
