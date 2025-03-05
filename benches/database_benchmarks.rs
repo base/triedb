@@ -3,7 +3,7 @@ use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::prelude::*;
 use tempdir::TempDir;
-use triedb::{account::RlpAccount, path::AddressPath, Database, MmapPageManager};
+use triedb::{account::Account, path::AddressPath, Database, MmapPageManager};
 
 const SIZES: &[usize] = &[1_000_000, 3_000_000];
 const BATCH_SIZE: usize = 10_000;
@@ -24,7 +24,7 @@ fn setup_database(size: usize) -> (TempDir, Database<MmapPageManager>) {
         let mut tx = db.begin_rw().unwrap();
         for i in 1..=size {
             let address = generate_random_address(&mut rng);
-            let account = RlpAccount::new(
+            let account = Account::new(
                 i as u64,
                 U256::from(i as u64),
                 EMPTY_ROOT_HASH,
@@ -81,7 +81,7 @@ fn bench_inserts(c: &mut Criterion) {
                 let mut tx = db.begin_rw().unwrap();
                 for addr in &addresses {
                     let account =
-                        RlpAccount::new(1, U256::from(1000u64), KECCAK_EMPTY, EMPTY_ROOT_HASH);
+                        Account::new(1, U256::from(1000u64), EMPTY_ROOT_HASH, KECCAK_EMPTY);
                     tx.set_account(addr.clone(), Some(account)).unwrap();
                 }
                 tx.commit().unwrap();
@@ -106,7 +106,7 @@ fn bench_updates(c: &mut Criterion) {
             b.iter(|| {
                 let mut tx = db.begin_rw().unwrap();
                 for addr in &addresses {
-                    let new_account = RlpAccount::new(
+                    let new_account = Account::new(
                         999_999_999,
                         U256::from(999_999_999u64),
                         EMPTY_ROOT_HASH,
@@ -136,7 +136,7 @@ fn bench_deletes(c: &mut Criterion) {
             b.iter(|| {
                 let mut tx = db.begin_rw().unwrap();
                 for addr in &addresses {
-                    tx.set_account(addr.clone(), None::<RlpAccount>).unwrap();
+                    tx.set_account(addr.clone(), None).unwrap();
                 }
                 tx.commit().unwrap();
             });
@@ -175,18 +175,14 @@ fn bench_mixed_operations(c: &mut Criterion) {
                         1 => {
                             // Insert
                             let address = new_addresses[i].clone();
-                            let account = RlpAccount::new(
-                                1,
-                                U256::from(1000u64),
-                                EMPTY_ROOT_HASH,
-                                KECCAK_EMPTY,
-                            );
+                            let account =
+                                Account::new(1, U256::from(1000u64), EMPTY_ROOT_HASH, KECCAK_EMPTY);
                             tx.set_account(address.clone(), Some(account)).unwrap();
                         }
                         2 => {
                             // Update
                             let address = existing_addresses[i].clone();
-                            let new_account = RlpAccount::new(
+                            let new_account = Account::new(
                                 123,
                                 U256::from(999_999_999u64),
                                 EMPTY_ROOT_HASH,
@@ -197,7 +193,7 @@ fn bench_mixed_operations(c: &mut Criterion) {
                         3 => {
                             // Delete
                             let address = existing_addresses[i].clone();
-                            tx.set_account(address.clone(), None::<RlpAccount>).unwrap();
+                            tx.set_account(address.clone(), None).unwrap();
                         }
                         _ => unreachable!(),
                     }

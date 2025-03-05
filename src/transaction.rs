@@ -3,7 +3,7 @@ mod manager;
 use std::{fmt::Debug, sync::RwLockReadGuard};
 
 use crate::{
-    account::RlpAccount,
+    account::Account,
     database::{Database, TransactionContext},
     page::PageManager,
     path::{AddressPath, StoragePath},
@@ -52,7 +52,7 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
         }
     }
 
-    pub fn get_account(&'tx self, address_path: AddressPath) -> Result<Option<RlpAccount>, ()> {
+    pub fn get_account(&'tx self, address_path: AddressPath) -> Result<Option<Account>, ()> {
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
         let account = storage_engine
             .get_account(&self.context, address_path)
@@ -76,7 +76,7 @@ impl<P: PageManager> Transaction<'_, RW, P> {
     pub fn set_account(
         &mut self,
         address_path: AddressPath,
-        account: Option<RlpAccount>,
+        account: Option<Account>,
     ) -> Result<(), ()> {
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
         storage_engine

@@ -1,5 +1,5 @@
 use crate::{
-    account::RlpAccount,
+    account::Account,
     database::TransactionContext,
     location::Location,
     node::{Node, TrieValue},
@@ -134,7 +134,7 @@ impl<P: PageManager> StorageEngine<P> {
         &self,
         context: &TransactionContext,
         address_path: AddressPath,
-    ) -> Result<Option<RlpAccount>, Error> {
+    ) -> Result<Option<Account>, Error> {
         let page = self.get_page(context, context.metadata.root_subtrie_page_id)?;
         let slotted_page = SlottedPage::try_from(page)?;
 
@@ -202,7 +202,7 @@ impl<P: PageManager> StorageEngine<P> {
         &self,
         context: &mut TransactionContext,
         address_path: AddressPath,
-        account: Option<RlpAccount>,
+        account: Option<Account>,
     ) -> Result<(), Error> {
         if account.is_none() {
             if let Some(pointer) = self.delete_value_in_page(
@@ -1144,12 +1144,12 @@ mod tests {
         (storage_engine, TransactionContext::new(metadata))
     }
 
-    fn random_test_account(rng: &mut StdRng) -> RlpAccount {
+    fn random_test_account(rng: &mut StdRng) -> Account {
         create_test_account(rng.next_u64(), rng.next_u64())
     }
 
-    fn create_test_account(balance: u64, nonce: u64) -> RlpAccount {
-        RlpAccount::new(nonce, U256::from(balance), EMPTY_ROOT_HASH, KECCAK_EMPTY)
+    fn create_test_account(balance: u64, nonce: u64) -> Account {
+        Account::new(nonce, U256::from(balance), EMPTY_ROOT_HASH, KECCAK_EMPTY)
     }
 
     fn assert_metrics(
@@ -1341,15 +1341,15 @@ mod tests {
         let (storage_engine, mut context) = create_test_engine(300, 256);
 
         let address1 = address!("0x000f3df6d732807ef1319fb7b8bb8522d0beac02");
-        let account1 = RlpAccount::new(1, U256::from(0), EMPTY_ROOT_HASH, keccak256(hex!("0x3373fffffffffffffffffffffffffffffffffffffffe14604d57602036146024575f5ffd5b5f35801560495762001fff810690815414603c575f5ffd5b62001fff01545f5260205ff35b5f5ffd5b62001fff42064281555f359062001fff015500")));
+        let account1 = Account::new(1, U256::from(0), EMPTY_ROOT_HASH, keccak256(hex!("0x3373fffffffffffffffffffffffffffffffffffffffe14604d57602036146024575f5ffd5b5f35801560495762001fff810690815414603c575f5ffd5b62001fff01545f5260205ff35b5f5ffd5b62001fff42064281555f359062001fff015500")));
         let path1 = AddressPath::for_address(address1);
 
         let address2 = address!("0x0000000000000000000000000000000000001000");
-        let account2 = RlpAccount::new(1, U256::from(0x010000000000u64), EMPTY_ROOT_HASH, keccak256(hex!("0x366000602037602060003660206000720f3df6d732807ef1319fb7b8bb8522d0beac02620186a0f16000556000516001553d6002553d600060003e600051600355")));
+        let account2 = Account::new(1, U256::from(0x010000000000u64), EMPTY_ROOT_HASH, keccak256(hex!("0x366000602037602060003660206000720f3df6d732807ef1319fb7b8bb8522d0beac02620186a0f16000556000516001553d6002553d600060003e600051600355")));
         let path2 = AddressPath::for_address(address2);
 
         let address3 = address!("0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b");
-        let account3 = RlpAccount::new(
+        let account3 = Account::new(
             0,
             U256::from(0x3635c9adc5dea00000u128),
             EMPTY_ROOT_HASH,
@@ -1717,8 +1717,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let storage_root = account.storage_root();
-        assert_eq!(storage_root, expected_root);
+        assert_eq!(account.storage_root, expected_root);
     }
 
     #[test]
@@ -1762,8 +1761,7 @@ mod tests {
             // check the storage root of the account
             let account = storage_engine.get_account(&context, path).unwrap().unwrap();
 
-            let storage_root = account.storage_root();
-            assert_eq!(storage_root, expected_root);
+            assert_eq!(account.storage_root, expected_root);
         }
     }
 
@@ -2334,8 +2332,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let storage_root = account.storage_root();
-        assert_eq!(storage_root, expected_root);
+        assert_eq!(account.storage_root, expected_root);
 
         // Delete storage one at a time
         for (storage_key, _) in &test_cases {
@@ -2359,8 +2356,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
 
-            let storage_root = account.storage_root();
-            assert_eq!(storage_root, expected_root);
+            assert_eq!(account.storage_root, expected_root);
         }
     }
 
@@ -2822,7 +2818,7 @@ mod tests {
         #[test]
         fn fuzz_insert_get_accounts(
             accounts in prop::collection::vec(
-                (any::<Address>(), any::<RlpAccount>()),
+                (any::<Address>(), any::<Account>()),
                 1..20
             )
         ) {
@@ -2838,7 +2834,7 @@ mod tests {
                 let read_account = storage_engine
                     .get_account(&context, AddressPath::for_address(address))
                     .unwrap();
-                assert_eq!(read_account, Some(RlpAccount::new(account.nonce(), account.balance(), EMPTY_ROOT_HASH, account.code_hash())));
+                assert_eq!(read_account, Some(Account::new(account.nonce, account.balance, EMPTY_ROOT_HASH, account.code_hash)));
             }
         }
     }

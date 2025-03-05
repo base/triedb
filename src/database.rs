@@ -240,7 +240,7 @@ mod tests {
     use std::fs::File;
     use tempdir::TempDir;
 
-    use crate::{account::RlpAccount, path::AddressPath};
+    use crate::{account::Account, path::AddressPath};
 
     use super::*;
 
@@ -252,14 +252,14 @@ mod tests {
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
 
-        let account1 = RlpAccount::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
+        let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
         let mut tx = db.begin_rw().unwrap();
         tx.set_account(AddressPath::for_address(address), Some(account1.clone()))
             .unwrap();
 
         tx.commit().unwrap();
 
-        let account2 = RlpAccount::new(456, U256::from(123), EMPTY_ROOT_HASH, KECCAK_EMPTY);
+        let account2 = Account::new(456, U256::from(123), EMPTY_ROOT_HASH, KECCAK_EMPTY);
         let mut tx = db.begin_rw().unwrap();
         tx.set_account(AddressPath::for_address(address), Some(account2.clone()))
             .unwrap();
