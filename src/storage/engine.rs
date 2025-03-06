@@ -206,39 +206,41 @@ impl<P: PageManager> StorageEngine<P> {
     pub fn set_accounts(
         &self,
         context: &mut TransactionContext,
-        account_changes: Vec<(AddressPath, Option<Account>)>,
+        account_changes: impl IntoIterator<Item = (AddressPath, Option<Account>)>,
     ) -> Result<(), Error> {
         self.set_values(
             context,
             account_changes
                 .into_iter()
                 .map(|(path, value)| (path.into(), value.map(TrieValue::Account)))
-                .collect(),
+                .collect::<Vec<(Nibbles, Option<TrieValue>)>>()
+                .as_mut(),
         )
     }
 
     pub fn set_storage(
         &self,
         context: &mut TransactionContext,
-        storage_changes: Vec<(StoragePath, Option<StorageValue>)>,
+        storage_changes: impl IntoIterator<Item = (StoragePath, Option<StorageValue>)>,
     ) -> Result<(), Error> {
         self.set_values(
             context,
             storage_changes
                 .into_iter()
                 .map(|(path, value)| (path.full_path(), value.map(TrieValue::Storage)))
-                .collect(),
+                .collect::<Vec<(Nibbles, Option<TrieValue>)>>()
+                .as_mut(),
         )
     }
 
     pub fn set_values(
         &self,
         context: &mut TransactionContext,
-        mut changes: Vec<(Nibbles, Option<TrieValue>)>,
+        changes: &mut [(Nibbles, Option<TrieValue>)],
     ) -> Result<(), Error> {
         changes.sort_by(|a, b| a.0.cmp(&b.0));
         let pointer =
-            self.set_values_in_page(context, &changes, 0, context.metadata.root_subtrie_page_id)?;
+            self.set_values_in_page(context, changes, 0, context.metadata.root_subtrie_page_id)?;
         match pointer {
             Some(pointer) => {
                 context.metadata.root_subtrie_page_id = pointer.location().page_id().unwrap();
@@ -1529,7 +1531,9 @@ mod tests {
             Some(TrieValue::Account(account3_updated)),
         ));
 
-        storage_engine.set_values(&mut context, changes).unwrap();
+        storage_engine
+            .set_values(&mut context, changes.as_mut())
+            .unwrap();
         assert_metrics(&context, 2, 1, 0, 0);
 
         assert_eq!(
@@ -1799,14 +1803,11 @@ mod tests {
         storage_engine
             .set_storage(
                 &mut context,
-                test_cases
-                    .iter()
-                    .map(|(key, value)| {
-                        let storage_path = StoragePath::for_address_and_slot(address, *key);
-                        let storage_value = StorageValue::from_be_slice(value.as_slice());
-                        (storage_path, Some(storage_value))
-                    })
-                    .collect(),
+                test_cases.iter().map(|(key, value)| {
+                    let storage_path = StoragePath::for_address_and_slot(address, *key);
+                    let storage_value = StorageValue::from_be_slice(value.as_slice());
+                    (storage_path, Some(storage_value))
+                }),
             )
             .unwrap();
         context.metadata = context.metadata.next();
@@ -2099,8 +2100,7 @@ mod tests {
                 &mut context,
                 additional_accounts
                     .iter()
-                    .map(|(path, account)| (path.clone(), Some(account.clone())))
-                    .collect(),
+                    .map(|(path, account)| (path.clone(), Some(account.clone()))),
             )
             .unwrap();
 
@@ -2160,8 +2160,7 @@ mod tests {
                 accounts
                     .clone()
                     .into_iter()
-                    .map(|(path, account)| (path, Some(account)))
-                    .collect(),
+                    .map(|(path, account)| (path, Some(account))),
             )
             .unwrap();
 

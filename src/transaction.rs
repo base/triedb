@@ -100,10 +100,13 @@ impl<P: PageManager> Transaction<'_, RW, P> {
 
     pub fn commit(mut self) -> Result<(), ()> {
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
-        let changes: Vec<(Nibbles, Option<TrieValue>)> = self.pending_changes.drain().collect();
+        let mut changes = self
+            .pending_changes
+            .drain()
+            .collect::<Vec<(Nibbles, Option<TrieValue>)>>();
         if !changes.is_empty() {
             storage_engine
-                .set_values(&mut self.context, changes)
+                .set_values(&mut self.context, changes.as_mut())
                 .unwrap();
         }
 
