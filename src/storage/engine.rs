@@ -321,7 +321,7 @@ impl<P: PageManager> StorageEngine<P> {
             let rlp_node = new_node.rlp_encode();
 
             // println!("inserting new root node: {:?}", new_node);
-            let index = slotted_page.insert_value(new_node)?;
+            let index = slotted_page.insert_value(&new_node)?;
             assert_eq!(index, 0, "root node must be at index 0");
 
             if changes.is_empty() {
@@ -380,12 +380,12 @@ impl<P: PageManager> StorageEngine<P> {
             let node_branch_index = node.prefix()[common_prefix_length];
             node.set_prefix(node.prefix().slice(common_prefix_length + 1..));
             let rlp_node = node.rlp_encode();
-            let location = Location::for_cell(slotted_page.insert_value(node)?);
+            let location = Location::for_cell(slotted_page.insert_value(&node)?);
             new_parent_branch.set_child(node_branch_index, Pointer::new(location, rlp_node));
 
             // no need to compute this yet, as we still need to insert the matching changes into other child slots.
             // let rlp_branch_node = new_parent_branch.rlp_encode();
-            slotted_page.set_value(page_index, new_parent_branch)?;
+            slotted_page.set_value(page_index, &new_parent_branch)?;
 
             // insert the changes into the new branch via recursion
             // println!("inserting changes into new branch: {:?}", changes);
@@ -432,7 +432,7 @@ impl<P: PageManager> StorageEngine<P> {
             }
             let new_node = Node::new_leaf(path, value.unwrap());
             let rlp_node = new_node.rlp_encode();
-            slotted_page.set_value(page_index, new_node)?;
+            slotted_page.set_value(page_index, &new_node)?;
 
             let (left, right) = changes.split_at(shortest_common_prefix_idx);
             let right = &right[1..];
@@ -502,7 +502,7 @@ impl<P: PageManager> StorageEngine<P> {
                     }
 
                     let rlp_node = node.rlp_encode();
-                    slotted_page.set_value(page_index, node)?;
+                    slotted_page.set_value(page_index, &node)?;
 
                     return Ok(Some(Pointer::new(
                         self.node_location(slotted_page.page_id(), page_index),
@@ -524,7 +524,7 @@ impl<P: PageManager> StorageEngine<P> {
                     }
 
                     let rlp_node = node.rlp_encode();
-                    slotted_page.set_value(page_index, node)?;
+                    slotted_page.set_value(page_index, &node)?;
 
                     return Ok(Some(Pointer::new(
                         self.node_location(slotted_page.page_id(), page_index),
@@ -549,11 +549,11 @@ impl<P: PageManager> StorageEngine<P> {
                     return Err(Error::PageSplit);
                 }
                 let rlp_node = new_node.rlp_encode();
-                let location = Location::for_cell(slotted_page.insert_value(new_node)?);
+                let location = Location::for_cell(slotted_page.insert_value(&new_node)?);
                 node.set_child(0, Pointer::new(location, rlp_node));
 
                 let rlp_node_with_child = node.rlp_encode();
-                slotted_page.set_value(page_index, node)?;
+                slotted_page.set_value(page_index, &node)?;
 
                 if changes.is_empty() {
                     return Ok(Some(Pointer::new(
@@ -591,7 +591,6 @@ impl<P: PageManager> StorageEngine<P> {
 
             // we need to fetch the node again, as it may have been modified by the recursive calls.
             // println!("fetching node at index: {}", page_index);
-            let mut node: Node = slotted_page.get_value(page_index)?;
             let child_pointer = node.child(child_index);
 
             // println!(
@@ -622,7 +621,7 @@ impl<P: PageManager> StorageEngine<P> {
                             // );
                             node.remove_child(child_index);
                         }
-                        slotted_page.set_value(page_index, node)?;
+                        slotted_page.set_value(page_index, &node)?;
 
                         // Ok(Pointer::new(
                         //     self.node_location(slotted_page.page_id(), page_index),
@@ -645,7 +644,7 @@ impl<P: PageManager> StorageEngine<P> {
                         } else {
                             node.remove_child(child_index);
                         }
-                        slotted_page.set_value(page_index, node)?;
+                        slotted_page.set_value(page_index, &node)?;
                     }
                 }
                 None => {
@@ -665,11 +664,11 @@ impl<P: PageManager> StorageEngine<P> {
                     // println!("inserting new leaf node at index {}: {:?}", child_index, path);
                     let new_node = Node::new_leaf(path, value);
                     let rlp_node = new_node.rlp_encode();
-                    let location = Location::for_cell(slotted_page.insert_value(new_node)?);
+                    let location = Location::for_cell(slotted_page.insert_value(&new_node)?);
                     node.set_child(child_index, Pointer::new(location, rlp_node));
 
                     // let rlp_node_with_child = node.rlp_encode();
-                    slotted_page.set_value(page_index, node)?;
+                    slotted_page.set_value(page_index, &node)?;
 
                     // if there's any more matching changes, we need to recurse, now that this child node is non-empty.
                     if !matching_changes.is_empty() {
@@ -686,7 +685,7 @@ impl<P: PageManager> StorageEngine<P> {
         }
 
         // we need to fetch the node again, as it may have been modified by the recursive calls.
-        let node: Node = slotted_page.get_value(page_index)?;
+        // let node: Node = slotted_page.get_value(page_index)?;
         // println!("updated node: {:?}", node);
         let children = node.enumerate_children();
         if children.is_empty() {
@@ -737,7 +736,7 @@ impl<P: PageManager> StorageEngine<P> {
 
                 // println!("merging on same page {}, new node: {:?}", slotted_page.page_id(), only_child_node);
 
-                let only_child_node_index = slotted_page.insert_value(only_child_node)?;
+                let only_child_node_index = slotted_page.insert_value(&only_child_node)?;
                 // println!("inserted new node at index {} and rlp {:?}", only_child_node_index, rlp_node);
                 if page_index == 0 {
                     // adding this just for sanity checks. if we are the root of the page,
@@ -777,7 +776,7 @@ impl<P: PageManager> StorageEngine<P> {
             // delete ourself from disk
             slotted_page.delete_value(page_index)?;
 
-            child_slotted_page.set_value(0, only_child_node)?;
+            child_slotted_page.set_value(0, &only_child_node)?;
 
             if page_index == 0 {
                 // We are a root node on this page and just deleted ourself
@@ -865,7 +864,7 @@ impl<P: PageManager> StorageEngine<P> {
                         largest_child_pointer.rlp().clone(),
                     ),
                 );
-                page.set_value(0, root_node)?;
+                page.set_value(0, &root_node)?;
             }
         }
 
@@ -885,7 +884,7 @@ impl<P: PageManager> StorageEngine<P> {
         let has_children = node.has_children();
 
         // first insert the node into the new page to secure its location.
-        let new_index = target_page.insert_value(node)?;
+        let new_index = target_page.insert_value(&node)?;
 
         // if the node has no children, we're done.
         if !has_children {
@@ -924,7 +923,7 @@ impl<P: PageManager> StorageEngine<P> {
         }
 
         // update the parent node with the new child pointers.
-        target_page.set_value(new_index, updated_node)?;
+        target_page.set_value(new_index, &updated_node)?;
 
         Ok(self.node_location(target_page.page_id(), new_index))
     }
@@ -2831,24 +2830,24 @@ mod tests {
         );
 
         // child 1 is the root of page2
-        slotted_page2.insert_value(child_1).unwrap();
+        slotted_page2.insert_value(&child_1).unwrap();
         let child_1_location = Location::from(slotted_page2.page_id());
 
         // child 2 is the root of page3
-        slotted_page3.insert_value(child_2).unwrap();
+        slotted_page3.insert_value(&child_2).unwrap();
         let child_2_location = Location::from(slotted_page3.page_id());
 
         let mut new_branch_node: Node = Node::new_branch(Nibbles::new());
         new_branch_node.set_child(0, Pointer::new(child_1_location, RlpNode::default()));
         new_branch_node.set_child(15, Pointer::new(child_2_location, RlpNode::default()));
-        let new_branch_node_index = slotted_page1.insert_value(new_branch_node).unwrap();
+        let new_branch_node_index = slotted_page1.insert_value(&new_branch_node).unwrap();
         let new_branch_node_location = Location::from(new_branch_node_index as u32);
 
         root_node.set_child(
             5,
             Pointer::new(new_branch_node_location, RlpNode::default()),
         );
-        slotted_page1.set_value(0, root_node).unwrap();
+        slotted_page1.set_value(0, &root_node).unwrap();
 
         storage_engine.commit(&context).unwrap();
 
@@ -2938,11 +2937,11 @@ mod tests {
         );
 
         // child 1 is the root of page2
-        slotted_page2.insert_value(child_1).unwrap();
+        slotted_page2.insert_value(&child_1).unwrap();
         let child_1_location = Location::from(slotted_page2.page_id());
 
         // child 2 is the root of page3
-        slotted_page3.insert_value(child_2).unwrap();
+        slotted_page3.insert_value(&child_2).unwrap();
         let child_2_location = Location::from(slotted_page3.page_id());
 
         // next we create and update our root node
@@ -2953,7 +2952,7 @@ mod tests {
             .get_mut_page(&context, context.metadata.root_subtrie_page_id)
             .unwrap();
         let mut slotted_page = SlottedPage::try_from(root_node_page).unwrap();
-        let root_index = slotted_page.insert_value(root_node).unwrap();
+        let root_index = slotted_page.insert_value(&root_node).unwrap();
         assert_eq!(root_index, 0);
 
         // not necessary but let's commit our changes.
