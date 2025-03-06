@@ -1396,11 +1396,11 @@ mod tests {
             ),
         ];
 
-        let account3_updated = AccountVec::new(
-            U256::from(0x3635c9adc5de938d5cu128),
+        let account3_updated = Account::new(
             1,
-            KECCAK_EMPTY,
+            U256::from(0x3635c9adc5de938d5cu128),
             EMPTY_ROOT_HASH,
+            KECCAK_EMPTY,
         );
 
         account1_storage.iter().for_each(|(key, value)| {
