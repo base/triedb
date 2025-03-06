@@ -50,6 +50,12 @@ fn setup_database_with_storage(size: usize) -> (TempDir, Database<MmapPageManage
     let db = Database::create(db_path.to_str().unwrap()).unwrap();
 
     // Populate database with initial accounts
+    populate_database_with_accounts_and_storage(size, &db);
+    (dir, db)
+}
+
+fn populate_database_with_accounts_and_storage(size: usize, db: &Database<MmapPageManager>) {
+    // Populate database with initial accounts
     let mut rng = StdRng::seed_from_u64(42);
     {
         let mut tx = db.begin_rw().unwrap();
@@ -80,8 +86,27 @@ fn setup_database_with_storage(size: usize) -> (TempDir, Database<MmapPageManage
 
         tx.commit().unwrap();
     }
+}
 
-    (dir, db)
+fn populate_single_account_storage(
+    size: usize,
+    address: AddressPath,
+    db: &Database<MmapPageManager>,
+) {
+    // Populate database with initial accounts
+    let mut rng = StdRng::seed_from_u64(42);
+    let mut tx = db.begin_rw().unwrap();
+    // add random storage to each account
+    for i in 0..=BATCH_SIZE {
+        let storage_key = StorageKey::from(U256::from(i));
+        let storage_path = StoragePath::for_address_path_and_slot(address.clone(), storage_key);
+        let storage_value = StorageValue::from_be_slice(storage_path.get_slot().pack().as_slice());
+
+        tx.set_storage_slot(storage_path, Some(storage_value))
+            .unwrap();
+    }
+
+    tx.commit().unwrap();
 }
 
 fn bench_reads(c: &mut Criterion) {
@@ -419,6 +444,11 @@ fn bench_deletes(c: &mut Criterion) {
 
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
         group.bench_with_input(BenchmarkId::new("batch_deletes", size), &size, |b, _| {
+            // because we are deleting data, after each iteration we need to repopulate
+            // the deleted data, otherwise we are deleting nothing after the first
+            // iteration
+            populate_database_with_accounts_and_storage(size, &db);
+
             b.iter(|| {
                 let mut tx = db.begin_rw().unwrap();
                 for addr in &addresses {
@@ -431,6 +461,10 @@ fn bench_deletes(c: &mut Criterion) {
     group.finish();
 }
 
+// this test can take a long time (30+ seconds) to finish because since
+// we are deleting data, after each iteration we need to repopulate
+// the deleted data, otherwise we are deleting nothing after the first
+// iteration
 fn bench_storage_single_account_deletes(c: &mut Criterion) {
     let mut group = c.benchmark_group("delete_single_account_storage_operations");
 
@@ -452,17 +486,21 @@ fn bench_storage_single_account_deletes(c: &mut Criterion) {
             BenchmarkId::new("batch_single_account_storage_deletes", size),
             &size,
             |b, _| {
-                b.iter(|| {
-                    let mut tx = db.begin_rw().unwrap();
-                    for storage_path in &storage_paths {
-                        println!("deleting path: {:?}", storage_path.full_path().clone());
-                        // let a = tx.get_storage_slot(storage_path.clone()).unwrap();
-                        // assert!(a.is_some());
-                        // println!("path exists");
-                        tx.set_storage_slot(storage_path.clone(), None).unwrap();
-                    }
-                    tx.commit().unwrap();
-                });
+                // because we are deleting data, after each iteration we need to repopulate
+                // the deleted data, otherwise we are deleting nothing after the first
+                // iteration
+                b.iter_with_setup(
+                    || {
+                        populate_single_account_storage(size, single_address.clone(), &db);
+                    },
+                    |_| {
+                        let mut tx = db.begin_rw().unwrap();
+                        for storage_path in &storage_paths {
+                            tx.set_storage_slot(storage_path.clone(), None).unwrap();
+                        }
+                        tx.commit().unwrap();
+                    },
+                );
             },
         );
     }
