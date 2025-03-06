@@ -151,7 +151,7 @@ impl<'p> RootPage<'p, RW> {
         // 4. Rotate right by 2: [6, 7, 3, 4, 5]
         // 5. When we write to disk only the first 2 slots change
         let mut deq: VecDeque<PageId> = VecDeque::from_iter(orphan_page_ids.into_iter().copied());
-        deq.rotate_right(num_orphan_slots_used);
+        deq.rotate_right(num_orphan_slots_used % deq.len());
         RootPage::add_orphaned_page_ids_helper(
             self.snapshot_id(),
             &mut self.page,
