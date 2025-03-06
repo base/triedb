@@ -126,6 +126,9 @@ impl SlottedPage<'_, RW> {
         if value_length > length as usize {
             // the value is larger than the current cell, so we need to allocate a new cell
             let cell_pointer = self.allocate_cell_pointer(index, value_length as u16)?;
+            // TODO: if error is PageIsFull, we should split the page
+            // This is the place when a branch node go from 8 -> 9 children increase size from 300 -> 596
+
             (offset, length) = (cell_pointer.offset(), cell_pointer.length());
         } else if value_length < length as usize {
             // the value is smaller than the current cell, so we can shrink the cell in place

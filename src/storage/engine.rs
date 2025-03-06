@@ -440,7 +440,8 @@ impl<P: PageManager> StorageEngine<P> {
                 // the child node does not exist, so we need to create a new leaf node with the remaining path.
                 // ensure that the page has enough space (300 bytes) to insert a new leaf node.
                 // TODO: use a more accurate threshold
-                if slotted_page.num_free_bytes() < 300 {
+                // Add buffer of 300 bytes when children number go from 8 -> 9 (+296)
+                if slotted_page.num_free_bytes() < 300 + 300 {
                     self.split_page::<V>(context, slotted_page)?;
                     return Err(Error::PageSplit);
                 }
@@ -460,6 +461,8 @@ impl<P: PageManager> StorageEngine<P> {
 
                 let rlp_node_with_child = node.rlp_encode();
                 slotted_page.set_value(page_index, node)?;
+                // TODO: if error is PageIsFull, we should split the page
+
                 Ok(Pointer::new(
                     self.node_location(slotted_page.page_id(), page_index),
                     rlp_node_with_child,
