@@ -604,6 +604,7 @@ impl<P: PageManager> StorageEngine<P> {
                     };
 
                 let mut new_nibbles = Nibbles::new();
+                new_nibbles = new_nibbles.join(node.prefix());
                 new_nibbles.push(only_child_index);
                 new_nibbles = new_nibbles.join(only_child_node.prefix());
                 only_child_node.set_prefix(new_nibbles);
