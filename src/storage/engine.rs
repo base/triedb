@@ -205,18 +205,18 @@ impl<P: PageManager> StorageEngine<P> {
         account: Option<Account>,
     ) -> Result<(), Error> {
         if account.is_none() {
-            if let Some(pointer) = self.delete_value_in_page(
+            let pointer = self.delete_value_in_page(
                 context,
                 address_path.clone().into(),
                 context.metadata.root_subtrie_page_id,
                 0,
-            )? {
-                context.metadata.root_subtrie_page_id = pointer.location().page_id().unwrap();
-                if pointer.rlp().is_empty() {
-                    context.metadata.state_root = EMPTY_ROOT_HASH;
-                } else {
-                    context.metadata.state_root = pointer.rlp().as_hash().unwrap();
-                }
+            )?;
+
+            context.metadata.root_subtrie_page_id = pointer.location().page_id().unwrap();
+            if pointer.rlp().is_empty() {
+                context.metadata.state_root = EMPTY_ROOT_HASH;
+            } else {
+                context.metadata.state_root = pointer.rlp().as_hash().unwrap();
             }
 
             return Ok(());
@@ -424,7 +424,7 @@ impl<P: PageManager> StorageEngine<P> {
         path: Nibbles,
         page_id: PageId,
         page_index: u8,
-    ) -> Result<Option<Pointer>, Error> {
+    ) -> Result<Pointer, Error> {
         let page = self.get_mut_clone(context, page_id)?;
         let mut new_slotted_page = SlottedPage::try_from(page)?;
         let result = self.delete_value_in_cloned_page(
@@ -436,13 +436,12 @@ impl<P: PageManager> StorageEngine<P> {
         match result {
             // This case means the root node was deleted so return a pointer to the cloned page
             // with an empty RlpNode
-            Ok(None) => Ok(Some(Pointer::new(
+            Ok(None) => Ok(Pointer::new(
                 Location::from(new_slotted_page.page_id()),
                 RlpNode::default(),
-            ))),
-            Ok(pointer) => Ok(pointer),
+            )),
+            Ok(Some(pointer)) => Ok(pointer),
             // No deletion occurred because the value didn't exist
-            Err(Error::InvalidPath) => Ok(None),
             Err(Error::PageError(PageError::PageIsFull)) => {
                 panic!("Page is full!");
             }
@@ -460,14 +459,19 @@ impl<P: PageManager> StorageEngine<P> {
         let mut node: Node = match slotted_page.get_value(page_index) {
             Ok(node) => node,
             // No node exists on this page, so there is nothing to delete
-            Err(_) => return Err(Error::InvalidPath),
+            Err(_) => panic!("no node found on page at page_index but we traversed here"),
         };
 
         let node_prefix = node.prefix();
         let common_prefix_length = path.common_prefix_length(node_prefix);
         if common_prefix_length < node_prefix.len() {
             // the value we are looking to delete doesn't exist.
-            return Err(Error::InvalidPath);
+            // return an unchanged pointer to ourself.
+            let rlp_node = node.rlp_encode();
+            return Ok(Some(Pointer::new(
+                self.node_location(slotted_page.page_id(), page_index),
+                rlp_node,
+            )));
         }
 
         let remaining_path = path.slice(common_prefix_length..);
@@ -526,7 +530,12 @@ impl<P: PageManager> StorageEngine<P> {
             }
             None => {
                 // the value we want to delete doesn't exist
-                return Err(Error::InvalidPath);
+                // return a pointer to our unchanged self.
+                let rlp_node = node.rlp_encode();
+                return Ok(Some(Pointer::new(
+                    self.node_location(slotted_page.page_id(), page_index),
+                    rlp_node,
+                )));
             }
         };
 
@@ -912,18 +921,18 @@ impl<P: PageManager> StorageEngine<P> {
         value: Option<StorageValue>,
     ) -> Result<(), Error> {
         if value.is_none() {
-            if let Some(pointer) = self.delete_value_in_page(
+            let pointer = self.delete_value_in_page(
                 context,
                 storage_path.full_path(),
                 context.metadata.root_subtrie_page_id,
                 0,
-            )? {
-                context.metadata.root_subtrie_page_id = pointer.location().page_id().unwrap();
-                if pointer.rlp().is_empty() {
-                    context.metadata.state_root = EMPTY_ROOT_HASH;
-                } else {
-                    context.metadata.state_root = pointer.rlp().as_hash().unwrap();
-                }
+            )?;
+
+            context.metadata.root_subtrie_page_id = pointer.location().page_id().unwrap();
+            if pointer.rlp().is_empty() {
+                context.metadata.state_root = EMPTY_ROOT_HASH;
+            } else {
+                context.metadata.state_root = pointer.rlp().as_hash().unwrap();
             }
         } else {
             let trie_value = TrieValue::Storage(value.unwrap());
@@ -1102,7 +1111,6 @@ impl<P: PageManager> Inner<P> {
 #[derive(Debug)]
 pub enum Error {
     PageError(PageError),
-    InvalidPath,
     InvalidSnapshotId,
     EngineClosed,
     PageSplit,
