@@ -218,9 +218,8 @@ impl Value for Node {
             Self::Branch { prefix, children } => {
                 let (_, children_slot_size) = Self::children_slot_size(children);
 
-                let prefix_length = prefix.len();
-                let packed_prefix_length = (prefix_length + 1) / 2;
-                return 2 + packed_prefix_length + 2 + children_slot_size * 37; // 2 bytes for type and prefix length, 2 for bitmask, 37 for each child pointer
+                let packed_prefix_length = (prefix.len() + 1) / 2;
+                2 + packed_prefix_length + 2 + children_slot_size * 37 // 2 bytes for type and prefix length, 2 for bitmask, 37 for each child pointer
             }
         }
     }
