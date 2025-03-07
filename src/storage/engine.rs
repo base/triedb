@@ -414,7 +414,6 @@ impl<P: PageManager> StorageEngine<P> {
                 node.set_child(child_index, Pointer::new(location, rlp_node));
                 let rlp_node_with_child = node.rlp_encode();
                 slotted_page.set_value(page_index, node)?;
-                // TODO: if error is PageIsFull, we should split the page
 
                 Ok(Pointer::new(
                     self.node_location(slotted_page.page_id(), page_index),
