@@ -125,6 +125,8 @@ impl SlottedPage<'_, RW> {
 
         if value_length > length as usize {
             // the value is larger than the current cell, so we need to allocate a new cell
+            // delete the current cell so that the calculation of the total occupied space is correct
+            self.delete_value(index)?;
             let cell_pointer = self.allocate_cell_pointer(index, value_length as u16)?;
             (offset, length) = (cell_pointer.offset(), cell_pointer.length());
         } else if value_length < length as usize {
@@ -981,7 +983,7 @@ mod tests {
                 .unwrap();
         }
 
-        slotted_page.defragment(5, 595).unwrap();
+        slotted_page.defragment(4, 595).unwrap();
 
         let expected_cell_pointers = [
             (595, 595),
