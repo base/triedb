@@ -247,7 +247,6 @@ impl<P: PageManager> StorageEngine<P> {
     ) -> Result<Pointer, Error> {
         let page = self.get_mut_clone(context, page_id)?;
         let mut new_slotted_page = SlottedPage::try_from(page)?;
-        // self.print_helper(&mut new_slotted_page);
         let result = self.set_value_in_cloned_page(
             context,
             path.clone(),
