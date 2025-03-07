@@ -27,7 +27,7 @@ impl TransactionManager {
             return Err(());
         }
         self.has_writer = true;
-        self.add_tx_handle(snapshot_id)
+        self.add_tx_handle(snapshot_id - 1)
     }
 
     pub fn begin_ro(&mut self, snapshot_id: SnapshotId) -> Result<SnapshotId, ()> {
@@ -46,11 +46,14 @@ impl TransactionManager {
         snapshot_id: SnapshotId,
         is_writer: bool,
     ) -> Result<(), ()> {
-        let index = self.open_txs.binary_search(&snapshot_id).unwrap();
-        self.open_txs.remove(index);
+        let index: usize;
         if is_writer {
+            index = self.open_txs.binary_search(&(snapshot_id - 1)).unwrap();
             self.has_writer = false;
+        } else {
+            index = self.open_txs.binary_search(&snapshot_id).unwrap();
         }
+        self.open_txs.remove(index);
         Ok(())
     }
 }
@@ -65,10 +68,10 @@ mod tests {
         let ro_snapshot_id = manager.begin_ro(1).unwrap();
         let rw_snapshot_id = manager.begin_rw(1).unwrap();
         assert_eq!(ro_snapshot_id, 1);
-        assert_eq!(rw_snapshot_id, 1);
+        assert_eq!(rw_snapshot_id, 0);
 
         let ro_snapshot_id = manager.begin_ro(2).unwrap();
-        assert_eq!(ro_snapshot_id, 1);
+        assert_eq!(ro_snapshot_id, 0);
     }
 
     #[test]
@@ -82,9 +85,9 @@ mod tests {
     #[test]
     fn test_remove_transaction() {
         let mut manager = TransactionManager::new();
-        assert_eq!(manager.begin_rw(1).unwrap(), 1);
-        assert_eq!(manager.begin_ro(2).unwrap(), 1);
-        assert_eq!(manager.begin_ro(3).unwrap(), 1);
+        assert_eq!(manager.begin_rw(1).unwrap(), 0);
+        assert_eq!(manager.begin_ro(2).unwrap(), 0);
+        assert_eq!(manager.begin_ro(3).unwrap(), 0);
 
         assert!(manager.remove_transaction(1, true).is_ok());
         assert_eq!(manager.begin_ro(4).unwrap(), 2);

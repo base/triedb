@@ -166,7 +166,9 @@ impl<P: PageManager> Database<P> {
         let storage_engine = self.inner.storage_engine.read().unwrap();
         let metadata = self.inner.metadata.read().unwrap().next();
         let min_snapshot_id = transaction_manager.begin_rw(metadata.snapshot_id)?;
-        storage_engine.unlock(min_snapshot_id - 1);
+        if min_snapshot_id > 0 {
+            storage_engine.unlock(min_snapshot_id - 1);
+        }
         let context = TransactionContext::new(metadata);
         Ok(Transaction::new(context, self, None))
     }
