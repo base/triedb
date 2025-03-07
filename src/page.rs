@@ -10,3 +10,4 @@ pub use orphan::OrphanPageManager;
 pub use page::{Page, PageKind, PAGE_DATA_SIZE, PAGE_SIZE, RO, RW};
 pub use root::RootPage;
 pub use slotted_page::SlottedPage;
+pub use slotted_page::CELL_POINTER_SIZE;

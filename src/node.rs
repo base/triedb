@@ -295,8 +295,7 @@ impl Value for Node {
 
                 let prefix_length = prefix.len();
                 let packed_prefix_length = (prefix_length + 1) / 2;
-                let mut total_size = 2 + packed_prefix_length + 2; // Type, prefix length, bitmask
-                total_size += children_slot_size * 37; // Each pointer is 37 bytes
+                let total_size = 2 + packed_prefix_length + 2 + children_slot_size * 37; // Type, prefix length, bitmask + children pointers
 
                 if buf.len() < total_size {
                     return Err(value::Error::InvalidEncoding);

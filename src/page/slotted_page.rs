@@ -11,6 +11,7 @@ pub mod cell_pointer;
 use cell_pointer::CellPointer;
 
 const MAX_NUM_CELLS: u8 = 255; // With 1 byte for the number of cells, the maximum number of cells is 255.
+pub const CELL_POINTER_SIZE: usize = 3;
 
 // A page that contains a sequence of pointers to variable-length values,
 // where the pointers are stored in a contiguous array of 3-byte cell pointers from the
@@ -124,14 +125,11 @@ impl SlottedPage<'_, RW> {
         let mut length = cell_pointer.length();
 
         if value_length > length as usize {
-            // the value is larger than the current cell, so we need to allocate a new cell
-            // TODO: delete the current cell so that the calculation of the total occupied space is correct
+            // The value is larger than the current cell, so we need to allocate a new cell.
+            // Delete the current cell so that the calculation of the total occupied space is correct.
             self.delete_value(index)?;
 
             let cell_pointer = self.allocate_cell_pointer(index, value_length as u16)?;
-            // TODO: if error is PageIsFull, we should split the page
-            // This is the place when a branch node go from 8 -> 9 children increase size from 300 -> 596
-
             (offset, length) = (cell_pointer.offset(), cell_pointer.length());
         } else if value_length < length as usize {
             // the value is smaller than the current cell, so we can shrink the cell in place
@@ -221,9 +219,6 @@ impl SlottedPage<'_, RW> {
 
         let total_occupied_space = self
             .cell_pointers_iter()
-            // .enumerate()
-            // .filter(|(i, cp)| *i != index as usize && !cp.is_deleted())
-            // .map(|(_, cp)| cp.length())
             .filter(|cp| !cp.is_deleted())
             .map(|cp| cp.length())
             .sum::<u16>();
@@ -990,7 +985,7 @@ mod tests {
                 .unwrap();
         }
 
-        slotted_page.defragment(4, 595).unwrap();
+        slotted_page.defragment(5, 595).unwrap();
 
         let expected_cell_pointers = [
             (595, 595),

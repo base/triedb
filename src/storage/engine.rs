@@ -5,7 +5,7 @@ use crate::{
     node::{Node, TrieValue},
     page::{
         OrphanPageManager, Page, PageError, PageId, PageManager, RootPage, SlottedPage,
-        PAGE_DATA_SIZE, RO, RW,
+        CELL_POINTER_SIZE, PAGE_DATA_SIZE, RO, RW,
     },
     path::{AddressPath, StoragePath},
     pointer::Pointer,
@@ -404,8 +404,14 @@ impl<P: PageManager> StorageEngine<P> {
                 let node_size_incr = node.size_incr_with_new_child();
                 let new_node = Node::new_leaf(remaining_path, value);
 
-                // if the page doesn't have enough space to insert the new leaf node and the node (branch) size increase when adding the new child, split the page.
-                if slotted_page.num_free_bytes() < node_size_incr + new_node.size() {
+                // if the page doesn't have enough space to
+                // 1. insert the new leaf node
+                // 2. and the node (branch) size increase
+                // 3. and add new cell pointer for the new leaf node (3 bytes)
+                // when adding the new child, split the page.
+                if slotted_page.num_free_bytes()
+                    < node_size_incr + new_node.size() + CELL_POINTER_SIZE
+                {
                     self.split_page(context, slotted_page)?;
                     return Err(Error::PageSplit);
                 }
