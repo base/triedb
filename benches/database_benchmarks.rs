@@ -433,10 +433,6 @@ fn bench_deletes(c: &mut Criterion) {
     group.finish();
 }
 
-// this test can take a long time (30+ seconds) to finish because since
-// we are deleting data, after each iteration we need to repopulate
-// the deleted data, otherwise we are deleting nothing after the first
-// iteration
 fn bench_storage_single_account_deletes(c: &mut Criterion) {
     let mut group = c.benchmark_group("delete_single_account_storage_operations");
 
@@ -473,10 +469,6 @@ fn bench_storage_single_account_deletes(c: &mut Criterion) {
     group.finish();
 }
 
-// this test can take a long time (30+ seconds) to finish because since
-// we are deleting data, after each iteration we need to repopulate
-// the deleted data, otherwise we are deleting nothing after the first
-// iteration
 fn bench_storage_mutliple_accounts_deletes(c: &mut Criterion) {
     let mut group = c.benchmark_group("delete_multiple_accounts_storage_operations");
 

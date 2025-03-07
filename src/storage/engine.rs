@@ -704,23 +704,6 @@ impl<P: PageManager> StorageEngine<P> {
         }
     }
 
-    fn print_helper(&self, page: &mut SlottedPage<'_, RW>) {
-        if page.page_id() == 121883 || page.page_id() == 49867 {
-            println!("printing nodes in page {:?}", page.page_id());
-            for cell_index in 0..20 {
-                match page.get_value::<Node>(cell_index) {
-                    Ok(node) => {
-                        println!(
-                            "here is node at cell_index: {:?}, node: {:?}",
-                            cell_index, node
-                        )
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
     // Split the page into two, moving the largest immediate subtrie of the root node to a new child page.
     fn split_page(
         &self,
@@ -1020,14 +1003,6 @@ impl<P: PageManager> StorageEngine<P> {
 
         Ok(())
     }
-}
-
-fn is_sub(arr1: Nibbles) -> bool {
-    let tmp_nibbles = Nibbles::from_vec(
-            hex!("0x0c070f0507070c0b040f0a050b05020c080c06060b07060805010703050e0e080801010f0f08070202000d03050c06070307050b060f0d0500070e0d0c080809").to_vec()
-        );
-
-    return tmp_nibbles == arr1;
 }
 
 // Helper function to count nodes in a subtrie on the given page

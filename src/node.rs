@@ -50,9 +50,6 @@ fn arb_u256_rlp() -> impl Strategy<Value = ArrayVec<u8, 33>> {
 
 impl Node {
     pub fn new_leaf(prefix: Nibbles, value: TrieValue) -> Self {
-        if prefix.len() > 64 {
-            println!("what the: {:?}", prefix);
-        }
         assert!(
             prefix.len() <= 64,
             "account and storage leaf prefix's must be at most 64 nibbles"
