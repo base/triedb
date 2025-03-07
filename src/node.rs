@@ -54,7 +54,6 @@ impl Node {
             prefix.len() <= 64,
             "account and storage leaf prefix's must be at most 64 nibbles"
         );
-
         match value {
             TrieValue::Account(account) => Node::new_account_leaf(
                 prefix,
