@@ -22,6 +22,9 @@ criterion = "0.5"
 tempdir = "0.3.7"
 rand = "0.8.5"
 
+[features]
+benchmarking = []
+
 [[bench]]
 name = "database_benchmarks"
 harness = false

@@ -61,4 +61,8 @@ impl StoragePath {
     pub fn get_slot(&self) -> Nibbles {
         self.slot.clone()
     }
+
+    pub fn get_address_path(&self) -> &AddressPath {
+        &self.address
+    }
 }

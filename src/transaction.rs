@@ -121,6 +121,15 @@ impl<P: PageManager> Transaction<'_, RW, P> {
         self.committed = false;
         Ok(())
     }
+
+    #[cfg(feature = "benchmarking")]
+    pub fn no_op_commit(mut self) -> Result<(), ()> {
+        let mut transaction_manager = self.database.inner.transaction_manager.write().unwrap();
+        transaction_manager.remove_transaction(self.context.metadata.snapshot_id, true)?;
+
+        self.committed = false;
+        Ok(())
+    }
 }
 
 impl<P: PageManager> Transaction<'_, RO, P> {
