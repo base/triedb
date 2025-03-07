@@ -375,7 +375,6 @@ impl<P: PageManager> StorageEngine<P> {
                 path,
                 value,
                 shortest_common_prefix_idx,
-                common_prefix_length,
             );
         }
 
@@ -504,7 +503,6 @@ impl<P: PageManager> StorageEngine<P> {
         path: Nibbles,
         value: Option<&TrieValue>,
         shortest_common_prefix_idx: usize,
-        common_prefix_length: usize,
     ) -> Result<Option<Pointer>, Error> {
         if value.is_none() {
             // Delete the node
@@ -540,27 +538,23 @@ impl<P: PageManager> StorageEngine<P> {
         slotted_page.set_value(page_index, &new_node)?;
 
         // Handle remaining changes
-        let (left, right) = changes.split_at(shortest_common_prefix_idx);
-        let right = &right[1..];
+        assert_eq!(shortest_common_prefix_idx, 0, "the leftmost change must have the matching prefix, as all other matching changes must be storage descendants of this account");
+        let (_, remaining_changes) = changes.split_first().unwrap();
 
-        if left.is_empty() && right.is_empty() {
+        if remaining_changes.is_empty() {
             Ok(Some(Pointer::new(
                 self.node_location(slotted_page.page_id(), page_index),
                 rlp_node,
             )))
-        } else if left.is_empty() {
+        } else {
             // Recurse with changes to the right
-            return self.set_values_in_cloned_page(
+            self.set_values_in_cloned_page(
                 context,
-                right,
+                remaining_changes,
                 path_offset,
                 slotted_page,
                 page_index,
-            );
-        } else if right.is_empty() {
-            panic!("right changes are empty! changes must not have been sorted properly");
-        } else {
-            panic!("the shortest common prefix must be either the leftmost or rightmost change");
+            )
         }
     }
 
