@@ -19,6 +19,8 @@ use std::sync::RwLock;
 
 use alloy_primitives::StorageValue;
 
+use super::value::Value;
+
 #[derive(Debug)]
 pub struct StorageEngine<P: PageManager> {
     inner: Arc<RwLock<Inner<P>>>,
@@ -399,12 +401,14 @@ impl<P: PageManager> StorageEngine<P> {
             None => {
                 // the child node does not exist, so we need to create a new leaf node with the remaining path.
                 // ensure that the page has enough space (200 bytes) to insert a new leaf node.
-                // TODO: use a more accurate threshold
-                if slotted_page.num_free_bytes() < 200 {
+                let node_size_incr = node.size_incr_with_new_child();
+                let new_node = Node::new_leaf(remaining_path, value);
+
+                // if the page doesn't have enough space to insert the new leaf node and the node (branch) size increase when adding the new child, split the page.
+                if slotted_page.num_free_bytes() < node_size_incr + new_node.size() {
                     self.split_page(context, slotted_page)?;
                     return Err(Error::PageSplit);
                 }
-                let new_node = Node::new_leaf(remaining_path, value);
                 let rlp_node = new_node.rlp_encode();
                 let location = Location::for_cell(slotted_page.insert_value(new_node)?);
                 node.set_child(child_index, Pointer::new(location, rlp_node));
