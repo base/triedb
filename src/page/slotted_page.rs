@@ -125,6 +125,9 @@ impl SlottedPage<'_, RW> {
 
         if value_length > length as usize {
             // the value is larger than the current cell, so we need to allocate a new cell
+            // TODO: delete the current cell so that the calculation of the total occupied space is correct
+            self.delete_value(index)?;
+
             let cell_pointer = self.allocate_cell_pointer(index, value_length as u16)?;
             // TODO: if error is PageIsFull, we should split the page
             // This is the place when a branch node go from 8 -> 9 children increase size from 300 -> 596
@@ -218,9 +221,11 @@ impl SlottedPage<'_, RW> {
 
         let total_occupied_space = self
             .cell_pointers_iter()
-            .enumerate()
-            .filter(|(i, cp)| *i != index as usize && !cp.is_deleted())
-            .map(|(_, cp)| cp.length())
+            // .enumerate()
+            // .filter(|(i, cp)| *i != index as usize && !cp.is_deleted())
+            // .map(|(_, cp)| cp.length())
+            .filter(|cp| !cp.is_deleted())
+            .map(|cp| cp.length())
             .sum::<u16>();
 
         let new_num_cells = max(num_cells, index + 1);
@@ -233,7 +238,7 @@ impl SlottedPage<'_, RW> {
         let mut cell_pointers = self
             .cell_pointers_iter()
             .enumerate()
-            .filter(|(i, cp)| *i != index as usize && !cp.is_deleted())
+            .filter(|(_, cp)| !cp.is_deleted())
             .map(|(i, cp)| (i, cp.offset(), cp.length()))
             .collect::<Vec<_>>();
 
