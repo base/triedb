@@ -173,7 +173,14 @@ impl<V: Value> Value for Node<V> {
                 let packed_prefix_length = (prefix.len() + 1) / 2;
                 2 + packed_prefix_length + 37 + value.size() // 2 bytes for type and prefix length, 37 for storage root
             }
-            Self::Branch { prefix, children } => Self::size_branch(prefix, children),
+            Self::Branch { prefix, children } => {
+                let total_children = children.into_iter().filter(|child| child.is_some()).count();
+                let children_slot_size = max(total_children.next_power_of_two(), 2);
+
+                let prefix_length = prefix.len();
+                let packed_prefix_length = (prefix_length + 1) / 2;
+                return 2 + packed_prefix_length + 2 + children_slot_size * 37; // 2 bytes for type and prefix length, 2 for bitmask, 37 for each child pointer
+            }
         }
     }
 
@@ -223,7 +230,51 @@ impl<V: Value> Value for Node<V> {
 
                 Ok(storage_offset + 37 + bytes_written)
             }
-            Self::Branch { prefix, children } => Self::serialize_branch_into(prefix, children, buf),
+            Self::Branch { prefix, children } => {
+                // children is saved in a list of 2, 4, 8, 16 slots depending on the number of children
+                let total_children = children.into_iter().filter(|child| child.is_some()).count();
+                let children_slot_size = max(total_children.next_power_of_two(), 2);
+
+                let prefix_length = prefix.len();
+                let packed_prefix_length = (prefix_length + 1) / 2;
+                let mut total_size = 2 + packed_prefix_length + 2; // Type, prefix length, bitmask
+                total_size += children_slot_size * 37; // Each pointer is 37 bytes
+
+                if buf.len() < total_size {
+                    return Err(value::Error::InvalidEncoding);
+                }
+
+                buf[0] = 2; // Branch type
+                buf[1] = prefix_length as u8;
+                prefix.pack_to(buf[2..2 + packed_prefix_length].as_mut());
+
+                // Calculate and store the children bitmask
+                let children_bitmask = children
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, child)| (child.is_some() as u16) << (15 - idx))
+                    .sum::<u16>();
+                buf[2 + packed_prefix_length..2 + packed_prefix_length + 2]
+                    .copy_from_slice(&children_bitmask.to_be_bytes());
+
+                // Store each child pointer
+                let mut offset = 2 + packed_prefix_length + 2;
+                for child in children.iter() {
+                    if let Some(child) = child {
+                        child.serialize_into(&mut buf[offset..offset + 37])?;
+                        offset += 37;
+                    }
+                    // else {
+                    //     buf[offset..offset + 37].fill(0);
+                    // }
+                    // offset += 37;
+                }
+                let padding_size = (children_slot_size - total_children) * 37;
+                buf[offset..offset + padding_size].fill(0);
+                offset += padding_size;
+
+                Ok(offset)
+            }
         }
     }
 
