@@ -218,8 +218,9 @@ impl SlottedPage<'_, RW> {
 
         let total_occupied_space = self
             .cell_pointers_iter()
-            .filter(|cp| !cp.is_deleted())
-            .map(|cp| cp.length())
+            .enumerate()
+            .filter(|(i, cp)| *i != index as usize && !cp.is_deleted())
+            .map(|(_, cp)| cp.length())
             .sum::<u16>();
 
         let new_num_cells = max(num_cells, index + 1);
@@ -232,7 +233,7 @@ impl SlottedPage<'_, RW> {
         let mut cell_pointers = self
             .cell_pointers_iter()
             .enumerate()
-            .filter(|(_, cp)| !cp.is_deleted())
+            .filter(|(i, cp)| *i != index as usize && !cp.is_deleted())
             .map(|(i, cp)| (i, cp.offset(), cp.length()))
             .collect::<Vec<_>>();
 
