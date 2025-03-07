@@ -151,7 +151,7 @@ impl<'p> RootPage<'p, RW> {
         // 4. Rotate right by 2: [6, 7, 3, 4, 5]
         // 5. When we write to disk only the first 2 slots change
         let mut deq: VecDeque<PageId> = VecDeque::from_iter(orphan_page_ids.into_iter().copied());
-        deq.rotate_right(num_orphan_slots_used);
+        deq.rotate_right(num_orphan_slots_used % deq.len());
         RootPage::add_orphaned_page_ids_helper(
             self.snapshot_id(),
             &mut self.page,
@@ -650,5 +650,33 @@ mod tests {
         // THEN: No orphan ids should be returned
         let orphan_page_ids = root_page.get_orphaned_page_ids(&page_manager).unwrap();
         assert_eq!(orphan_page_ids.len(), 0)
+    }
+
+    #[test]
+    fn test_vecdeque_rotate_orphan_page_ids() {
+        // GIVEN: a root page with orphan ids
+        let mut page_manager = MmapPageManager::new_anon(20, 0).unwrap();
+        let page = page_manager.allocate(42).unwrap();
+        let mut root_page = RootPage::new(page, B256::default(), 0);
+        let my_orphan_page_ids: &[PageId] = &[2, 3, 4, 5, 6, 7, 8, 9, 10];
+        root_page
+            .add_orphaned_page_ids(my_orphan_page_ids, 0, &mut page_manager)
+            .unwrap();
+
+        // WHEN: more than half of the list is "given out"
+        let num_orphan_slots_used = 6;
+        let orphan_page_ids_left = &[8, 9, 10];
+        root_page
+            .add_orphaned_page_ids(
+                orphan_page_ids_left,
+                num_orphan_slots_used,
+                &mut page_manager,
+            )
+            .unwrap();
+
+        // THEN: vecdeque rotate_right should not panic given that the num_orphan_slots_used is
+        // greater than the new list to add.
+        let orphan_page_ids = root_page.get_orphaned_page_ids(&page_manager).unwrap();
+        assert_eq!(orphan_page_ids_left.to_vec(), orphan_page_ids);
     }
 }

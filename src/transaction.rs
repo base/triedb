@@ -7,10 +7,9 @@ use crate::{
     database::{Database, TransactionContext},
     page::PageManager,
     path::{AddressPath, StoragePath},
-    storage::{engine::StorageEngine, value::Value},
+    storage::engine::StorageEngine,
 };
 use alloy_primitives::StorageValue;
-use alloy_rlp::Encodable;
 pub use manager::TransactionManager;
 use sealed::sealed;
 
@@ -53,10 +52,7 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
         }
     }
 
-    pub fn get_account<A: Account + Value>(
-        &'tx self,
-        address_path: AddressPath,
-    ) -> Result<Option<A>, ()> {
+    pub fn get_account(&'tx self, address_path: AddressPath) -> Result<Option<Account>, ()> {
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
         let account = storage_engine
             .get_account(&self.context, address_path)
@@ -77,10 +73,10 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
 }
 
 impl<P: PageManager> Transaction<'_, RW, P> {
-    pub fn set_account<A: Account + Value + Encodable + Clone>(
+    pub fn set_account(
         &mut self,
         address_path: AddressPath,
-        account: Option<A>,
+        account: Option<Account>,
     ) -> Result<(), ()> {
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
         storage_engine

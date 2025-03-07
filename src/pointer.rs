@@ -59,11 +59,12 @@ impl Value for Pointer {
         let first_rlp_byte = arr[4];
         // Because the RLP string must be 1-33 bytes, we can safely use the first byte to determine the length.
         // If the first byte is less than 0x80, then this byte is the actual encoded value.
-        // Otherwise, the length is first_rlp_byte - 0x80.
+        // Otherwise, the length is first_rlp_byte - 0x80, and the remaining bytes are the encoded U256 value.
         let rlp = if first_rlp_byte < 0x80 {
             RlpNode::from_raw(&[first_rlp_byte]).unwrap()
         } else if first_rlp_byte <= 0xa0 {
             let rlp_len = first_rlp_byte - 0x80;
+
             RlpNode::from_raw(&arr[4..5 + rlp_len as usize]).unwrap()
         } else {
             return Err(value::Error::InvalidEncoding);
