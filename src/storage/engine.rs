@@ -299,7 +299,6 @@ impl<P: PageManager> StorageEngine<P> {
 
         let mut node = res.unwrap();
         let common_prefix_length = path.common_prefix_length(node.prefix());
-
         // find the common prefix between the path and the node prefix.
         let common_prefix = path.slice(0..common_prefix_length);
         if common_prefix_length < node.prefix().len() {
@@ -388,11 +387,9 @@ impl<P: PageManager> StorageEngine<P> {
                     let child_page_id = child_location.page_id().unwrap();
                     let child_pointer =
                         self.set_value_in_page(context, remaining_path, value, child_page_id, 0)?;
-
                     node.set_child(child_index, child_pointer.clone());
                     let rlp_node = node.rlp_encode();
                     slotted_page.set_value(page_index, node)?;
-
                     Ok(Pointer::new(
                         self.node_location(slotted_page.page_id(), page_index),
                         rlp_node,
@@ -413,7 +410,6 @@ impl<P: PageManager> StorageEngine<P> {
                 node.set_child(child_index, Pointer::new(location, rlp_node));
                 let rlp_node_with_child = node.rlp_encode();
                 slotted_page.set_value(page_index, node)?;
-
                 Ok(Pointer::new(
                     self.node_location(slotted_page.page_id(), page_index),
                     rlp_node_with_child,
