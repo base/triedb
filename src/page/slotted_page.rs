@@ -985,7 +985,7 @@ mod tests {
                 .unwrap();
         }
 
-        slotted_page.defragment(5, 595).unwrap();
+        slotted_page.defragment(4, 595).unwrap();
 
         let expected_cell_pointers = [
             (595, 595),

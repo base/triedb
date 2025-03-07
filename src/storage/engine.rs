@@ -445,7 +445,14 @@ impl<P: PageManager> StorageEngine<P> {
                     self.split_page::<V>(context, slotted_page)?;
                     return Err(Error::PageSplit);
                 }
+                let new_node1 = Node::new_leaf(remaining_path.clone(), value.clone(), leaf_type);
+
                 let new_node = Node::new_leaf(remaining_path, value, leaf_type);
+
+                eprintln!("=== new_node size: {}", new_node1.size());
+                eprintln!("slotted_page size: {}", slotted_page.num_free_bytes());
+                eprintln!("node size: {}", node.size());
+
                 let rlp_node = new_node.rlp_encode();
                 let location = Location::for_cell(slotted_page.insert_value(new_node)?);
                 node.set_child(child_index, Pointer::new(location, rlp_node.clone()));
@@ -458,6 +465,10 @@ impl<P: PageManager> StorageEngine<P> {
                         page_index,
                     );
                 }
+
+                eprintln!("slotted_page size: {}", slotted_page.num_free_bytes());
+                eprintln!("node size: {}", node.size());
+                eprintln!("page_index: {}", page_index);
 
                 let rlp_node_with_child = node.rlp_encode();
                 slotted_page.set_value(page_index, node)?;
