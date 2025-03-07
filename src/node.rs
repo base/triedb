@@ -216,8 +216,7 @@ impl Value for Node {
                     + (*code_hash != KECCAK_EMPTY) as usize * 32 // 2 bytes for flags and prefix length
             }
             Self::Branch { prefix, children } => {
-                let total_children = children.into_iter().filter(|child| child.is_some()).count();
-                let children_slot_size = max(total_children.next_power_of_two(), 2);
+                let (_, children_slot_size) = Self::children_slot_size(children);
 
                 let prefix_length = prefix.len();
                 let packed_prefix_length = (prefix_length + 1) / 2;
@@ -289,9 +288,7 @@ impl Value for Node {
                 Ok(offset)
             }
             Self::Branch { prefix, children } => {
-                // children is saved in a list of 2, 4, 8, 16 slots depending on the number of children
-                let total_children = children.into_iter().filter(|child| child.is_some()).count();
-                let children_slot_size = max(total_children.next_power_of_two(), 2);
+                let (total_children, children_slot_size) = Self::children_slot_size(children);
 
                 let prefix_length = prefix.len();
                 let packed_prefix_length = (prefix_length + 1) / 2;
@@ -433,14 +430,21 @@ impl Node {
     pub fn size_incr_with_new_child(&self) -> usize {
         match self {
             Self::Branch { children, .. } => {
-                let total_children = children.into_iter().filter(|child| child.is_some()).count();
-                let slot_size = max(total_children.next_power_of_two(), 2);
+                let (total_children, slot_size) = Self::children_slot_size(children);
                 let next_total_children = min(total_children + 1, 16);
                 let next_slot_size = max(next_total_children.next_power_of_two(), 2);
                 (next_slot_size - slot_size) * 37
             }
             _ => 0,
         }
+    }
+
+    fn children_slot_size(children: &[Option<Pointer>]) -> (usize, usize) {
+        // children is saved in a list of 2, 4, 8, 16 slots depending on the number of children
+        const MIN_SLOT_SIZE: usize = 2;
+        let total_children = children.into_iter().filter(|child| child.is_some()).count();
+        let slot_size = max(total_children.next_power_of_two(), MIN_SLOT_SIZE);
+        (total_children, slot_size)
     }
 }
 
