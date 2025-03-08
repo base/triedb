@@ -64,8 +64,8 @@ impl<P: PageKind> SlottedPage<'_, P> {
         if index >= self.num_cells() {
             return Err(PageError::InvalidCellPointer);
         }
-        let start_index = 1 + 3 * (index as usize);
-        let end_index = start_index + 3;
+        let start_index = 1 + CELL_POINTER_SIZE * (index as usize);
+        let end_index = start_index + CELL_POINTER_SIZE;
         let data = &self.page.contents()[start_index..end_index];
         Ok(data.try_into()?)
     }
@@ -76,8 +76,8 @@ impl<P: PageKind> SlottedPage<'_, P> {
     }
 
     fn cell_pointers_iter(&self) -> impl Iterator<Item = CellPointer> {
-        self.page.contents()[1..=3 * self.num_cells() as usize]
-            .chunks(3)
+        self.page.contents()[1..=CELL_POINTER_SIZE * self.num_cells() as usize]
+            .chunks(CELL_POINTER_SIZE)
             .map(|chunk| chunk.try_into().unwrap())
     }
 
@@ -88,7 +88,10 @@ impl<P: PageKind> SlottedPage<'_, P> {
             .map(|cp| cp.length())
             .sum::<u16>();
 
-        self.page.contents().len() - total_occupied_space as usize - 3 * num_cells as usize - 1
+        self.page.contents().len()
+            - total_occupied_space as usize
+            - CELL_POINTER_SIZE * num_cells as usize
+            - 1
     }
 
     fn num_dead_bytes(&self, num_cells: u8) -> usize {
@@ -98,7 +101,7 @@ impl<P: PageKind> SlottedPage<'_, P> {
             .cell_pointers_iter()
             .map(|cp| cp.length() as usize)
             .sum();
-        total_bytes - free_bytes - used_bytes - 1 - 3 * num_cells as usize
+        total_bytes - free_bytes - used_bytes - 1 - CELL_POINTER_SIZE * num_cells as usize
     }
 }
 
@@ -224,7 +227,10 @@ impl SlottedPage<'_, RW> {
             .sum::<u16>();
 
         let new_num_cells = max(num_cells, index + 1);
-        if (total_occupied_space + additional_slot_length + new_num_cells as u16 * 3 + 1) as usize
+        if (total_occupied_space
+            + additional_slot_length
+            + new_num_cells as u16 * CELL_POINTER_SIZE as u16
+            + 1) as usize
             > PAGE_DATA_SIZE
         {
             return Ok(false);
@@ -282,7 +288,7 @@ impl SlottedPage<'_, RW> {
     ) -> Result<Option<u16>, PageError> {
         let num_cells = self.num_cells();
         let new_num_cells = max(num_cells, index + 1);
-        let header_size = new_num_cells as usize * 3 + 1;
+        let header_size = new_num_cells as usize * CELL_POINTER_SIZE + 1;
         let mut used_space = Vec::new();
         for i in 0..num_cells {
             let cp = self.get_cell_pointer(i)?;
@@ -332,7 +338,7 @@ impl SlottedPage<'_, RW> {
         }
 
         let offset = max_offset + length;
-        let header_size = new_num_cells as usize * 3 + 1;
+        let header_size = new_num_cells as usize * CELL_POINTER_SIZE + 1;
         let available_space = self.page.contents().len() - header_size;
 
         if offset as usize > available_space {
@@ -349,8 +355,8 @@ impl SlottedPage<'_, RW> {
         offset: u16,
         length: u16,
     ) -> Result<CellPointer, PageError> {
-        let start_index = 1 + 3 * (index as usize);
-        let end_index = start_index + 3;
+        let start_index = 1 + CELL_POINTER_SIZE * (index as usize);
+        let end_index = start_index + CELL_POINTER_SIZE;
         let data = &mut self.page.contents_mut()[start_index..end_index];
         let cell_pointer = CellPointer::new(offset, length, data.try_into().unwrap());
         Ok(cell_pointer)
