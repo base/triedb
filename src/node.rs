@@ -616,7 +616,7 @@ mod tests {
 
         // 4 children, reserve 4 children slots
         let mut node = Node::new_branch(Nibbles::new());
-        for i in 0..4 {
+        for i in 10..14 {
             node.set_child(
                 i,
                 Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i))),
@@ -627,7 +627,7 @@ mod tests {
 
         // 5 children, reserve 8 children slots
         let mut node = Node::new_branch(Nibbles::new());
-        for i in 0..5 {
+        for i in 11..16 {
             node.set_child(
                 i,
                 Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i))),
@@ -638,7 +638,7 @@ mod tests {
 
         // 8 children, reserve 8 children slots
         let mut node = Node::new_branch(Nibbles::new());
-        for i in 0..8 {
+        for i in 5..13 {
             node.set_child(
                 i,
                 Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i))),
@@ -649,7 +649,7 @@ mod tests {
 
         // 9 children, reserve 16 children slots
         let mut node = Node::new_branch(Nibbles::new());
-        for i in 0..9 {
+        for i in 3..12 {
             node.set_child(
                 i,
                 Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i))),
