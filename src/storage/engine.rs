@@ -12,10 +12,11 @@ use crate::{
     snapshot::SnapshotId,
 };
 use alloy_trie::{nodes::RlpNode, Nibbles, EMPTY_ROOT_HASH};
-use std::cmp::max;
-use std::fmt::Debug;
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::{
+    cmp::max,
+    fmt::Debug,
+    sync::{Arc, RwLock},
+};
 
 use alloy_primitives::StorageValue;
 
@@ -2019,8 +2020,7 @@ mod tests {
 
     #[test]
     fn test_split_page_random_accounts() {
-        use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
+        use rand::{rngs::StdRng, Rng, SeedableRng};
 
         // Create a storage engine
         let (storage_engine, mut context) = create_test_engine(2000, 256);

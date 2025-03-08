@@ -1,22 +1,15 @@
-use crate::metrics::DatabaseMetrics;
-use crate::metrics::TransactionMetrics;
-use crate::page::MmapPageManager;
-use crate::page::OrphanPageManager;
-use crate::page::PageError;
-use crate::page::PageId;
-use crate::page::PageKind;
-use crate::page::PageManager;
-use crate::page::RootPage;
-use crate::snapshot::SnapshotId;
-use crate::storage::engine;
-use crate::storage::engine::StorageEngine;
-use crate::transaction::Transaction;
-use crate::transaction::TransactionManager;
-use crate::transaction::{RO, RW};
+use crate::{
+    metrics::{DatabaseMetrics, TransactionMetrics},
+    page::{
+        MmapPageManager, OrphanPageManager, PageError, PageId, PageKind, PageManager, RootPage,
+    },
+    snapshot::SnapshotId,
+    storage::{engine, engine::StorageEngine},
+    transaction::{Transaction, TransactionManager, RO, RW},
+};
 use alloy_primitives::B256;
 use alloy_trie::EMPTY_ROOT_HASH;
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone)]
 pub struct Database<P: PageManager> {
