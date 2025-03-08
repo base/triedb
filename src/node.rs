@@ -441,7 +441,7 @@ impl Node {
     fn children_slot_size(children: &[Option<Pointer>]) -> (usize, usize) {
         // children is saved in a list of 2, 4, 8, 16 slots depending on the number of children
         const MIN_SLOT_SIZE: usize = 2;
-        let total_children = children.into_iter().filter(|child| child.is_some()).count();
+        let total_children = children.iter().filter(|child| child.is_some()).count();
         let slot_size = max(total_children.next_power_of_two(), MIN_SLOT_SIZE);
         (total_children, slot_size)
     }
@@ -797,7 +797,7 @@ mod tests {
         expected.extend([0, 0, 0, 210, 160]);
         expected.extend(hash3.as_slice());
         // remaining empty slot
-        expected.extend([0; 37 * 1]);
+        expected.extend([0; 37]);
         assert_eq!(bytes, expected);
 
         let mut node: Node = Node::new_branch(Nibbles::from_nibbles([0x0, 0x0]));
