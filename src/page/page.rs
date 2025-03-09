@@ -1,7 +1,6 @@
 use sealed::sealed;
 
-use crate::page::PageId;
-use crate::snapshot::SnapshotId;
+use crate::{page::PageId, snapshot::SnapshotId};
 
 pub const PAGE_SIZE: usize = 4096;
 pub const HEADER_SIZE: usize = 8;

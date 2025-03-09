@@ -5,19 +5,22 @@ use crate::{
     node::{Node, TrieValue},
     page::{
         OrphanPageManager, Page, PageError, PageId, PageManager, RootPage, SlottedPage,
-        PAGE_DATA_SIZE, RO, RW,
+        CELL_POINTER_SIZE, PAGE_DATA_SIZE, RO, RW,
     },
     path::{AddressPath, StoragePath},
     pointer::Pointer,
     snapshot::SnapshotId,
 };
 use alloy_trie::{nodes::RlpNode, Nibbles, EMPTY_ROOT_HASH};
-use std::cmp::max;
-use std::fmt::Debug;
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::{
+    cmp::max,
+    fmt::Debug,
+    sync::{Arc, RwLock},
+};
 
 use alloy_primitives::StorageValue;
+
+use super::value::Value;
 
 #[derive(Debug)]
 pub struct StorageEngine<P: PageManager> {
@@ -399,17 +402,26 @@ impl<P: PageManager> StorageEngine<P> {
             None => {
                 // the child node does not exist, so we need to create a new leaf node with the remaining path.
                 // ensure that the page has enough space (200 bytes) to insert a new leaf node.
-                // TODO: use a more accurate threshold
-                if slotted_page.num_free_bytes() < 200 {
+                let node_size_incr = node.size_incr_with_new_child();
+                let new_node = Node::new_leaf(remaining_path, value);
+
+                // if the page doesn't have enough space to
+                // 1. insert the new leaf node
+                // 2. and the node (branch) size increase
+                // 3. and add new cell pointer for the new leaf node (3 bytes)
+                // when adding the new child, split the page.
+                if slotted_page.num_free_bytes()
+                    < node_size_incr + new_node.size() + CELL_POINTER_SIZE
+                {
                     self.split_page(context, slotted_page)?;
                     return Err(Error::PageSplit);
                 }
-                let new_node = Node::new_leaf(remaining_path, value);
                 let rlp_node = new_node.rlp_encode();
                 let location = Location::for_cell(slotted_page.insert_value(new_node)?);
                 node.set_child(child_index, Pointer::new(location, rlp_node));
                 let rlp_node_with_child = node.rlp_encode();
                 slotted_page.set_value(page_index, node)?;
+
                 Ok(Pointer::new(
                     self.node_location(slotted_page.page_id(), page_index),
                     rlp_node_with_child,
@@ -2008,8 +2020,7 @@ mod tests {
 
     #[test]
     fn test_split_page_random_accounts() {
-        use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
+        use rand::{rngs::StdRng, Rng, SeedableRng};
 
         // Create a storage engine
         let (storage_engine, mut context) = create_test_engine(2000, 256);

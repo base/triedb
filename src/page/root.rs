@@ -1,7 +1,6 @@
 use crate::{page::Page, snapshot::SnapshotId};
 use alloy_primitives::B256;
-use std::collections::VecDeque;
-use std::iter::Peekable;
+use std::{collections::VecDeque, iter::Peekable};
 
 use super::{
     page::{PageKind, RO, RW},
@@ -275,8 +274,7 @@ impl<'p, P: PageKind> TryFrom<Page<'p, P>> for RootPage<'p, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::page::MmapPageManager;
-    use crate::page::PAGE_DATA_SIZE;
+    use crate::page::{MmapPageManager, PAGE_DATA_SIZE};
 
     const MAX_ORPHANS: usize = 1011;
 

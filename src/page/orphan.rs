@@ -1,5 +1,4 @@
-use crate::page::PageId;
-use crate::snapshot::SnapshotId;
+use crate::{page::PageId, snapshot::SnapshotId};
 use std::collections::BTreeMap;
 
 // Manages a collection of orphaned page ids, grouped by the snapshot id which created them.
