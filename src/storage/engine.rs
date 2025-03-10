@@ -636,7 +636,7 @@ impl<P: PageManager> StorageEngine<P> {
         // Get the first change and create a new leaf node
         let ((path, value), changes) = changes.split_first().unwrap();
         let node_size_incr = node.size_incr_with_new_child();
-        let remaining_path = path.slice(common_prefix_length..);
+        let remaining_path = path.slice(path_offset as usize + common_prefix_length..);
         let new_node = Node::new_leaf(remaining_path, value.as_ref().unwrap());
 
         // if the page doesn't have enough space to
@@ -756,20 +756,31 @@ impl<P: PageManager> StorageEngine<P> {
                     }
                 }
                 None => {
-                    // Child doesn't exist, create a new leaf node
-                    // FIXME: is it safe to split the page here if we've already modified the page?
-                    if slotted_page.num_free_bytes() < 200 {
-                        self.split_page(context, slotted_page)?;
-                        return Err(Error::PageSplit);
-                    }
-
+                    // the child node does not exist, so we need to create a new leaf node with the remaining path.
                     let ((path, value), matching_changes) = matching_changes.split_first().unwrap();
-                    let path = path.slice(path_offset as usize + common_prefix_length + 1..);
+                    let remaining_path: Nibbles =
+                        path.slice(path_offset as usize + common_prefix_length + 1..);
                     let value = value.as_ref().ok_or_else(|| {
                         Error::Other("attempting to delete value which does not exist".to_string())
                     })?;
 
-                    let new_node = Node::new_leaf(path, value);
+                    // ensure that the page has enough space to insert a new leaf node.
+                    let node_size_incr = node.size_incr_with_new_child();
+                    let new_node = Node::new_leaf(remaining_path, value);
+
+                    // if the page doesn't have enough space to
+                    // 1. insert the new leaf node
+                    // 2. and the node (branch) size increase
+                    // 3. and add new cell pointer for the new leaf node (3 bytes)
+                    // when adding the new child, split the page.
+                    // FIXME: is it safe to split the page here if we've already modified the page?
+                    if slotted_page.num_free_bytes()
+                        < node_size_incr + new_node.size() + CELL_POINTER_SIZE
+                    {
+                        self.split_page(context, slotted_page)?;
+                        return Err(Error::PageSplit);
+                    }
+
                     let rlp_node = new_node.rlp_encode();
                     let location = Location::for_cell(slotted_page.insert_value(&new_node)?);
                     node.set_child(child_index, Pointer::new(location, rlp_node));
