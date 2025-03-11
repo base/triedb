@@ -5,8 +5,8 @@ A database for the Ethereum state trie.
 ## Overview
 
 TBD is an embedded database which supports reading and writing Accounts as well as Storage values in atomic transactions (typically corresponding to a single block). The primary objective of this storage format is to minimize sequential disk access latency during block processing, in 2 stages:
-Reading Account and Storage values while executing EVM transactions
-Writing Trie updates, including computation of the State Root, upon completion of the block
+- Reading Account and Storage values while executing EVM transactions,
+- Writing Trie updates, including computation of the State Root, upon completion of the block.
 
 This new database design is intended to replace the traditional generic Key/Value stores typically used in EL clients, including LSM-tree databases such as LevelDB (used by geth) and B-tree databases such as MDBX (used by Reth), specifically for persisting the EVM State Trie. While these other Key/Value databases are highly tuned and extremely performant for reading and writing arbitrary unstructured data, this is a suboptimal mechanism for persisting a highly structured data structure such as the Ethereum State Trie. While traversing the trie from Root to Leaf in order to read a single value is predicted to scale logarithmically with the size of the trie (`O(log N)`), this is also the cost associated with accessing each item stored in a Key/Value database. In effect, the database must be fully searched for each independent trie node, and this work must be repeated until a Leaf node is found, resulting in a true scaling factor of `O(log N * log N)`. In practical terms with the scale of chains such as Ethereum or Base, we may expect traversal of the State Trie to require on the order of ~50 disk operations in order to read or write a single value (Account or Storage Slot), although reads and writes to higher portions of the trie may be trivially deduplicated when processing a batch of Trie accesses, as is typically the case for EVM block execution.
 
@@ -53,6 +53,22 @@ All data in this database is broken down into 4KB Pages, the minimal unit of dis
 Although the state root of the MPT is formally defined based on the RLP encoding of Nodes, this is an inefficient use of state. Instead we will utilize custom encoding formats specific to Branches, Accounts, and Storage slots which can be more efficiently compressed on disk, while only using RLP for hash computation.
 
 In addition to using Pages to store data (Trie Nodes), we will also need to keep track of orphaned Pages. This is tracked using a standard on-disk list format which also leverages Copy-on-Write, which has the side effect that updating the orphaned Pages set will always create new orphaned Pages.
+
+
+### Page Layout
+
+Database is broken down in to pages, each page has 4 KB size.
+* Snapshot ID (8 bytes)
+  * This is the Version when page is created.
+* Page content (4088 bytes)
+  * This is ether root page or subtrie page.
+
+```mermaid
+block-beta
+  columns 1
+  snapshotId["Snapshot ID (8 bytes)"]
+  pageContent["Page Content (4088 bytes)"]
+```
 
 ### Root Page
 
