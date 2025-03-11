@@ -66,7 +66,9 @@ Database is broken down in to pages, each page has 4 KB size.
 ```mermaid
 block-beta
   columns 1
-  snapshotId["Snapshot ID (8 bytes)"]
+  block:outer
+    snapshotId["Snapshot ID (8 bytes)"]
+  end
   pageContent["Page Content (4088 bytes)"]
 ```
 
@@ -77,7 +79,9 @@ Pages 0 and 1 are reserved for the current and previous Root Pages, which contai
 ```mermaid
 block-beta
   columns 1
-  Version["Version (8 bytes)"]
+  block:outer
+    Version["Version (8 bytes)"]
+  end
   StateRoot["State Root (32 bytes)"]
   RootPageNum["Root Subtrie Page Number (4 bytes)"]
   MaxPageNum["Max Page Number (4 bytes)"]
@@ -112,6 +116,9 @@ Pages 256 and greater are used to store the Trie Nodes, with each Page containin
 ```mermaid
 block-beta
   columns 1
+  block:outer
+    snapshotId["Snapshot ID (8 bytes)"]
+  end
   NumCells["Number of Cells (1 byte)"]
   block
     P0["Pointer 0 (3 bytes)"] P1["Pointer 1 (3 bytes)"] P2["Pointer 2 (3 bytes)"] P3["Pointer 3 (3 bytes)"]
