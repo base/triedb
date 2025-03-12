@@ -58,8 +58,9 @@ In addition to using Pages to store data (Trie Nodes), we will also need to keep
 ### Page Layout
 
 Database is broken down in to pages, each page has 4 KB size.
-* Snapshot ID (8 bytes)
-  * This is the Version when page is created.
+* Header
+  * Snapshot ID (8 bytes)
+    * This is the Version when page is created.
 * Page content (4088 bytes)
   * This is ether root page or subtrie page.
 
@@ -80,7 +81,7 @@ Pages 0 and 1 are reserved for the current and previous Root Pages, which contai
 block-beta
   columns 1
   block:outer
-    Version["Version (8 bytes)"]
+    SnapshotID["Snapshot ID (8 bytes)"]
   end
   StateRoot["State Root (32 bytes)"]
   RootPageNum["Root Subtrie Page Number (4 bytes)"]
@@ -93,8 +94,9 @@ block-beta
   ONext["Orphan List Page (4 bytes)"]
 ```
 
-* Version (8 bytes)
-  * This is an auto-incrementing value, beginning at 1. The larger Version of the two Root Pages denotes the latest version.
+* Header
+  * Snapshot ID (8 bytes)
+    * This is an auto-incrementing value, beginning at 1. The larger snapshot id (version) of the two Root Pages denotes the latest version.
 * State Root (32 bytes)
   * This is the hash of the root sub-trie, which is the first Node Cell contained within the Page
 * Root Subtrie Page Number (4 bytes)
