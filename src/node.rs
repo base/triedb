@@ -345,10 +345,8 @@ impl Value for Node {
 
                 // Store each child pointer
                 let mut offset = 2 + packed_prefix_length + 2;
-                for child in children.iter() {
-                    if let Some(child) = child {
-                        offset += child.serialize_into(&mut buf[offset..offset + 37])?;
-                    }
+                for child in children.iter().flatten() {
+                    offset += child.serialize_into(&mut buf[offset..offset + 37])?;
                 }
                 let padding_size = (children_slot_size - total_children) * 37;
                 buf[offset..offset + padding_size].fill(0);
