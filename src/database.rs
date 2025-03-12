@@ -1,22 +1,15 @@
-use crate::metrics::DatabaseMetrics;
-use crate::metrics::TransactionMetrics;
-use crate::page::MmapPageManager;
-use crate::page::OrphanPageManager;
-use crate::page::PageError;
-use crate::page::PageId;
-use crate::page::PageKind;
-use crate::page::PageManager;
-use crate::page::RootPage;
-use crate::snapshot::SnapshotId;
-use crate::storage::engine;
-use crate::storage::engine::StorageEngine;
-use crate::transaction::Transaction;
-use crate::transaction::TransactionManager;
-use crate::transaction::{RO, RW};
+use crate::{
+    metrics::{DatabaseMetrics, TransactionMetrics},
+    page::{
+        MmapPageManager, OrphanPageManager, PageError, PageId, PageKind, PageManager, RootPage,
+    },
+    snapshot::SnapshotId,
+    storage::{engine, engine::StorageEngine},
+    transaction::{Transaction, TransactionManager, RO, RW},
+};
 use alloy_primitives::B256;
 use alloy_trie::EMPTY_ROOT_HASH;
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone)]
 pub struct Database<P: PageManager> {
@@ -86,15 +79,11 @@ impl Database<MmapPageManager> {
 
         let orphan_manager = OrphanPageManager::new();
 
-        let _root0 = page_manager.allocate(0).map_err(Error::PageError)?;
-        let _root1 = page_manager.allocate(0).map_err(Error::PageError)?;
-        let _subtrie = page_manager.allocate(0).map_err(Error::PageError)?;
-
         let metadata = Metadata {
             snapshot_id: 0,
             root_page_id: 0,
-            max_page_number: 256,
-            root_subtrie_page_id: 256,
+            max_page_number: 255,
+            root_subtrie_page_id: 0,
             state_root: EMPTY_ROOT_HASH,
         };
 
@@ -166,7 +155,9 @@ impl<P: PageManager> Database<P> {
         let storage_engine = self.inner.storage_engine.read().unwrap();
         let metadata = self.inner.metadata.read().unwrap().next();
         let min_snapshot_id = transaction_manager.begin_rw(metadata.snapshot_id)?;
-        storage_engine.unlock(min_snapshot_id - 1);
+        if min_snapshot_id > 0 {
+            storage_engine.unlock(min_snapshot_id - 1);
+        }
         let context = TransactionContext::new(metadata);
         Ok(Transaction::new(context, self, None))
     }
@@ -304,7 +295,7 @@ mod tests {
         // max_page_size + buffer
         let open_size = db.size();
 
-        let max_page_size = 256; // fresh db has root pages + reserved orphan pages
+        let max_page_size = 255; // fresh db has root pages + reserved orphan pages
         assert_eq!(open_size, max_page_size + 20);
 
         // cleanup
@@ -363,5 +354,56 @@ mod tests {
 
         // cleanup
         tmp_dir.close().unwrap();
+    }
+
+    #[test]
+    fn test_data_persistence() {
+        let tmp_dir = TempDir::new("test_db").unwrap();
+        let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
+        let mut db = Database::create(file_path.as_str()).unwrap();
+
+        let address1 = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
+        let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
+
+        let mut tx = db.begin_rw().unwrap();
+        tx.set_account(AddressPath::for_address(address1), Some(account1.clone()))
+            .unwrap();
+
+        tx.commit().unwrap();
+        db.close().unwrap();
+
+        let mut db = Database::open(file_path.as_str()).unwrap();
+        let tx = db.begin_ro().unwrap();
+        let account = tx
+            .get_account(AddressPath::for_address(address1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(account, account1);
+
+        tx.commit().unwrap();
+
+        let address2 = address!("0x1234567890abcdef1234567890abcdef12345678");
+        let account2 = Account::new(2, U256::from(200), EMPTY_ROOT_HASH, KECCAK_EMPTY);
+        let mut tx = db.begin_rw().unwrap();
+        tx.set_account(AddressPath::for_address(address2), Some(account2.clone()))
+            .unwrap();
+
+        tx.commit().unwrap();
+        db.close().unwrap();
+
+        let db = Database::open(file_path.as_str()).unwrap();
+        let tx = db.begin_ro().unwrap();
+
+        let account = tx
+            .get_account(AddressPath::for_address(address1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(account, account1);
+
+        let account = tx
+            .get_account(AddressPath::for_address(address2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(account, account2);
     }
 }

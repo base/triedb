@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 alloy-primitives = { version = "0.8.21", features = ["arbitrary", "rand"] }
 alloy-rlp = "0.3.11"
-alloy-trie = { version = "0.7.6", features=["arbitrary", "ethereum"]}
+alloy-trie = { version = "0.7.6", features = ["arbitrary", "ethereum"] }
 arrayvec = "0.7.6"
 log = "0.4.25"
 memmap2 = "0.9.5"
@@ -22,12 +22,13 @@ criterion = "0.5"
 tempdir = "0.3.7"
 rand = "0.8.5"
 
-[features]
-benchmarking = []
+[lib]
+bench = false
 
 [[bench]]
 name = "database_benchmarks"
 harness = false
 
 [profile.bench]
-debug = true
+debug = false
+opt-level = 3

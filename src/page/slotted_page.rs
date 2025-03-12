@@ -11,6 +11,7 @@ pub mod cell_pointer;
 use cell_pointer::CellPointer;
 
 const MAX_NUM_CELLS: u8 = 255; // With 1 byte for the number of cells, the maximum number of cells is 255.
+pub const CELL_POINTER_SIZE: usize = 3;
 
 // A page that contains a sequence of pointers to variable-length values,
 // where the pointers are stored in a contiguous array of 3-byte cell pointers from the
@@ -51,7 +52,7 @@ impl<P: PageKind> SlottedPage<'_, P> {
         let start_index = (PAGE_DATA_SIZE as u16 - offset) as usize;
         let data = &self.page.contents()[start_index..start_index + length as usize];
 
-        V::from_bytes(data).map_err(|_| PageError::InvalidValue)
+        Ok(V::from_bytes(data).unwrap())
     }
 
     pub fn num_free_bytes(&self) -> usize {
@@ -63,8 +64,8 @@ impl<P: PageKind> SlottedPage<'_, P> {
         if index >= self.num_cells() {
             return Err(PageError::InvalidCellPointer);
         }
-        let start_index = 1 + 3 * (index as usize);
-        let end_index = start_index + 3;
+        let start_index = 1 + CELL_POINTER_SIZE * (index as usize);
+        let end_index = start_index + CELL_POINTER_SIZE;
         let data = &self.page.contents()[start_index..end_index];
         Ok(data.try_into()?)
     }
@@ -75,8 +76,8 @@ impl<P: PageKind> SlottedPage<'_, P> {
     }
 
     fn cell_pointers_iter(&self) -> impl Iterator<Item = CellPointer> {
-        self.page.contents()[1..=3 * self.num_cells() as usize]
-            .chunks(3)
+        self.page.contents()[1..=CELL_POINTER_SIZE * self.num_cells() as usize]
+            .chunks(CELL_POINTER_SIZE)
             .map(|chunk| chunk.try_into().unwrap())
     }
 
@@ -87,7 +88,10 @@ impl<P: PageKind> SlottedPage<'_, P> {
             .map(|cp| cp.length())
             .sum::<u16>();
 
-        self.page.contents().len() - total_occupied_space as usize - 3 * num_cells as usize - 1
+        self.page.contents().len()
+            - total_occupied_space as usize
+            - CELL_POINTER_SIZE * num_cells as usize
+            - 1
     }
 
     fn num_dead_bytes(&self, num_cells: u8) -> usize {
@@ -97,7 +101,7 @@ impl<P: PageKind> SlottedPage<'_, P> {
             .cell_pointers_iter()
             .map(|cp| cp.length() as usize)
             .sum();
-        total_bytes - free_bytes - used_bytes - 1 - 3 * num_cells as usize
+        total_bytes - free_bytes - used_bytes - 1 - CELL_POINTER_SIZE * num_cells as usize
     }
 }
 
@@ -116,7 +120,7 @@ impl<P: PageKind> std::fmt::Debug for SlottedPage<'_, P> {
 
 impl SlottedPage<'_, RW> {
     // Sets the value at the given index.
-    pub fn set_value<V: Value>(&mut self, index: u8, value: V) -> Result<(), PageError> {
+    pub fn set_value<V: Value>(&mut self, index: u8, value: &V) -> Result<(), PageError> {
         let cell_pointer = self.get_cell_pointer(index)?;
         let value_length = value.size();
 
@@ -124,7 +128,10 @@ impl SlottedPage<'_, RW> {
         let mut length = cell_pointer.length();
 
         if value_length > length as usize {
-            // the value is larger than the current cell, so we need to allocate a new cell
+            // The value is larger than the current cell, so we need to allocate a new cell.
+            // Delete the current cell so that the calculation of the total occupied space is correct.
+            self.delete_value(index)?;
+
             let cell_pointer = self.allocate_cell_pointer(index, value_length as u16)?;
             (offset, length) = (cell_pointer.offset(), cell_pointer.length());
         } else if value_length < length as usize {
@@ -143,7 +150,7 @@ impl SlottedPage<'_, RW> {
     }
 
     // Inserts a value into the page and returns the index of the new value.
-    pub fn insert_value<V: Value>(&mut self, value: V) -> Result<u8, PageError> {
+    pub fn insert_value<V: Value>(&mut self, value: &V) -> Result<u8, PageError> {
         let cell_index = self.next_free_cell_index()?;
         let value_length = value.size();
         let cell_pointer = self.allocate_cell_pointer(cell_index, value_length as u16)?;
@@ -220,7 +227,10 @@ impl SlottedPage<'_, RW> {
             .sum::<u16>();
 
         let new_num_cells = max(num_cells, index + 1);
-        if (total_occupied_space + additional_slot_length + new_num_cells as u16 * 3 + 1) as usize
+        if (total_occupied_space
+            + additional_slot_length
+            + new_num_cells as u16 * CELL_POINTER_SIZE as u16
+            + 1) as usize
             > PAGE_DATA_SIZE
         {
             return Ok(false);
@@ -278,7 +288,7 @@ impl SlottedPage<'_, RW> {
     ) -> Result<Option<u16>, PageError> {
         let num_cells = self.num_cells();
         let new_num_cells = max(num_cells, index + 1);
-        let header_size = new_num_cells as usize * 3 + 1;
+        let header_size = new_num_cells as usize * CELL_POINTER_SIZE + 1;
         let mut used_space = Vec::new();
         for i in 0..num_cells {
             let cp = self.get_cell_pointer(i)?;
@@ -328,7 +338,7 @@ impl SlottedPage<'_, RW> {
         }
 
         let offset = max_offset + length;
-        let header_size = new_num_cells as usize * 3 + 1;
+        let header_size = new_num_cells as usize * CELL_POINTER_SIZE + 1;
         let available_space = self.page.contents().len() - header_size;
 
         if offset as usize > available_space {
@@ -345,8 +355,8 @@ impl SlottedPage<'_, RW> {
         offset: u16,
         length: u16,
     ) -> Result<CellPointer, PageError> {
-        let start_index = 1 + 3 * (index as usize);
-        let end_index = start_index + 3;
+        let start_index = 1 + CELL_POINTER_SIZE * (index as usize);
+        let end_index = start_index + CELL_POINTER_SIZE;
         let data = &mut self.page.contents_mut()[start_index..end_index];
         let cell_pointer = CellPointer::new(offset, length, data.try_into().unwrap());
         Ok(cell_pointer)
@@ -393,14 +403,14 @@ mod tests {
         let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
 
         let v1 = String::from("hello");
-        let i1 = subtrie_page.insert_value(v1.clone()).unwrap();
+        let i1 = subtrie_page.insert_value(&v1).unwrap();
         assert_eq!(i1, 0);
 
         let v: String = subtrie_page.get_value(i1).unwrap();
         assert_eq!(v, v1);
 
         let v2 = String::from("world");
-        let i2 = subtrie_page.insert_value(v2.clone()).unwrap();
+        let i2 = subtrie_page.insert_value(&v2).unwrap();
         assert_eq!(i2, 1);
 
         let v: String = subtrie_page.get_value(i2).unwrap();
@@ -421,14 +431,14 @@ mod tests {
         let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
 
         let v1 = String::from("hello");
-        let i1 = subtrie_page.insert_value(v1.clone()).unwrap();
+        let i1 = subtrie_page.insert_value(&v1).unwrap();
         assert_eq!(i1, 0);
 
         let v: String = subtrie_page.get_value(i1).unwrap();
         assert_eq!(v, v1);
 
         let v2 = String::from("world");
-        subtrie_page.set_value(i1, v2.clone()).unwrap();
+        subtrie_page.set_value(i1, &v2).unwrap();
 
         let v: String = subtrie_page.get_value(i1).unwrap();
         assert_eq!(v, v2);
@@ -441,7 +451,7 @@ mod tests {
         let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
 
         let v1 = String::from("hello");
-        let i1 = subtrie_page.insert_value(v1.clone()).unwrap();
+        let i1 = subtrie_page.insert_value(&v1).unwrap();
         assert_eq!(i1, 0);
 
         let cell_pointer = subtrie_page.get_cell_pointer(i1).unwrap();
@@ -452,7 +462,7 @@ mod tests {
         assert_eq!(v, v1);
 
         let v2 = String::from("world");
-        subtrie_page.set_value(i1, v2.clone()).unwrap();
+        subtrie_page.set_value(i1, &v2).unwrap();
 
         let cell_pointer = subtrie_page.get_cell_pointer(i1).unwrap();
         assert_eq!(cell_pointer.length(), 5);
@@ -471,7 +481,7 @@ mod tests {
         let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
 
         let v1 = String::from("hello");
-        let i1 = subtrie_page.insert_value(v1.clone()).unwrap();
+        let i1 = subtrie_page.insert_value(&v1).unwrap();
         assert_eq!(i1, 0);
 
         let cell_pointer = subtrie_page.get_cell_pointer(i1).unwrap();
@@ -484,7 +494,7 @@ mod tests {
         // shrink the value IN-PLACE to one character
         // this behavior may change in the future
         let v2 = String::from("w");
-        subtrie_page.set_value(i1, v2.clone()).unwrap();
+        subtrie_page.set_value(i1, &v2).unwrap();
 
         let cell_pointer = subtrie_page.get_cell_pointer(i1).unwrap();
         assert_eq!(cell_pointer.length(), 1);
@@ -503,7 +513,7 @@ mod tests {
         let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
 
         let v1 = String::from("one");
-        let i1 = subtrie_page.insert_value(v1.clone()).unwrap();
+        let i1 = subtrie_page.insert_value(&v1).unwrap();
         assert_eq!(i1, 0);
 
         let cell_pointer = subtrie_page.get_cell_pointer(i1).unwrap();
@@ -514,7 +524,7 @@ mod tests {
         assert_eq!(v, v1);
 
         let v2 = String::from("two");
-        let i2 = subtrie_page.insert_value(v2.clone()).unwrap();
+        let i2 = subtrie_page.insert_value(&v2).unwrap();
         assert_eq!(i2, 1);
 
         let cell_pointer = subtrie_page.get_cell_pointer(i2).unwrap();
@@ -525,7 +535,7 @@ mod tests {
         assert_eq!(v, v2);
 
         let v3 = String::from("three");
-        let i3 = subtrie_page.insert_value(v3.clone()).unwrap();
+        let i3 = subtrie_page.insert_value(&v3).unwrap();
         assert_eq!(i3, 2);
 
         let cell_pointer = subtrie_page.get_cell_pointer(i3).unwrap();
@@ -537,7 +547,7 @@ mod tests {
 
         // shrink the middle value to two characters. It should retain the same offset.
         let v4 = String::from("tw");
-        subtrie_page.set_value(i2, v4.clone()).unwrap();
+        subtrie_page.set_value(i2, &v4).unwrap();
 
         let cell_pointer = subtrie_page.get_cell_pointer(i2).unwrap();
         assert_eq!(cell_pointer.length(), 2);
@@ -563,7 +573,7 @@ mod tests {
         let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
 
         let v1 = String::from("this");
-        let i1 = subtrie_page.insert_value(v1.clone()).unwrap();
+        let i1 = subtrie_page.insert_value(&v1).unwrap();
         assert_eq!(i1, 0);
 
         let cell_pointer = subtrie_page.get_cell_pointer(i1).unwrap();
@@ -574,7 +584,7 @@ mod tests {
         assert_eq!(v, v1);
 
         let v2 = String::from("is a test, this is only a test");
-        subtrie_page.set_value(i1, v2.clone()).unwrap();
+        subtrie_page.set_value(i1, &v2).unwrap();
 
         let cell_pointer = subtrie_page.get_cell_pointer(i1).unwrap();
         assert_eq!(cell_pointer.length(), 30);
@@ -593,7 +603,7 @@ mod tests {
         let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
 
         let v1 = String::from("one");
-        let i1 = subtrie_page.insert_value(v1.clone()).unwrap();
+        let i1 = subtrie_page.insert_value(&v1).unwrap();
         assert_eq!(i1, 0);
 
         let cell_pointer = subtrie_page.get_cell_pointer(i1).unwrap();
@@ -604,7 +614,7 @@ mod tests {
         assert_eq!(v, v1);
 
         let v2 = String::from("two");
-        let i2 = subtrie_page.insert_value(v2.clone()).unwrap();
+        let i2 = subtrie_page.insert_value(&v2).unwrap();
         assert_eq!(i2, 1);
 
         let cell_pointer = subtrie_page.get_cell_pointer(i2).unwrap();
@@ -615,7 +625,7 @@ mod tests {
         assert_eq!(v, v2);
 
         let v3 = String::from("three");
-        let i3 = subtrie_page.insert_value(v3.clone()).unwrap();
+        let i3 = subtrie_page.insert_value(&v3).unwrap();
         assert_eq!(i3, 2);
 
         let cell_pointer = subtrie_page.get_cell_pointer(i3).unwrap();
@@ -627,7 +637,7 @@ mod tests {
 
         // grow the middle value to 19 characters. It will need a new offset.
         let v4 = String::from("nineteen characters");
-        subtrie_page.set_value(i2, v4.clone()).unwrap();
+        subtrie_page.set_value(i2, &v4).unwrap();
 
         let cell_pointer = subtrie_page.get_cell_pointer(i2).unwrap();
         assert_eq!(cell_pointer.length(), 19);
@@ -651,20 +661,20 @@ mod tests {
         let mut data = [0; PAGE_SIZE];
         let page = Page::new_rw_with_snapshot(42, 123, &mut data);
         let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
-        let cell_index = subtrie_page.insert_value(String::from("foo")).unwrap();
+        let cell_index = subtrie_page.insert_value(&String::from("foo")).unwrap();
         assert_eq!(cell_index, 0);
         assert_eq!(subtrie_page.num_cells(), 1);
         assert_eq!(subtrie_page.get_cell_pointer(0).unwrap().length(), 3);
         assert_eq!(subtrie_page.get_cell_pointer(0).unwrap().offset(), 3);
 
-        let cell_index = subtrie_page.insert_value(String::from("bar")).unwrap();
+        let cell_index = subtrie_page.insert_value(&String::from("bar")).unwrap();
         assert_eq!(cell_index, 1);
         assert_eq!(subtrie_page.num_cells(), 2);
         assert_eq!(subtrie_page.get_cell_pointer(1).unwrap().length(), 3);
         assert_eq!(subtrie_page.get_cell_pointer(1).unwrap().offset(), 6);
 
         let cell_index = subtrie_page
-            .insert_value(String::from_iter(&['8'; 88]))
+            .insert_value(&String::from_iter(&['8'; 88]))
             .unwrap();
         assert_eq!(cell_index, 2);
         assert_eq!(subtrie_page.num_cells(), 3);
@@ -672,7 +682,7 @@ mod tests {
         assert_eq!(subtrie_page.get_cell_pointer(2).unwrap().offset(), 94);
 
         let cell_index = subtrie_page
-            .insert_value(String::from_iter(&['8'; 88]))
+            .insert_value(&String::from_iter(&['8'; 88]))
             .unwrap();
         assert_eq!(cell_index, 3);
         assert_eq!(subtrie_page.num_cells(), 4);
@@ -680,7 +690,7 @@ mod tests {
         assert_eq!(subtrie_page.get_cell_pointer(3).unwrap().offset(), 182);
 
         let cell_index = subtrie_page
-            .insert_value(String::from_iter(&['8'; 88]))
+            .insert_value(&String::from_iter(&['8'; 88]))
             .unwrap();
         assert_eq!(cell_index, 4);
         assert_eq!(subtrie_page.num_cells(), 5);
@@ -689,23 +699,23 @@ mod tests {
 
         // remaining space should be 4088 - 1 - 3*5 - 270 = 3892
         // still need enough space for the new cell pointer (3 bytes), so this should fail
-        let cell_index = subtrie_page.insert_value(String::from_iter(&['a'; 3802]));
+        let cell_index = subtrie_page.insert_value(&String::from_iter(&['a'; 3802]));
         assert!(cell_index.is_err());
         assert!(matches!(cell_index, Err(PageError::PageIsFull)));
         assert_eq!(subtrie_page.num_cells(), 5);
 
-        let cell_index = subtrie_page.insert_value(String::from_iter(&['b'; 3801]));
+        let cell_index = subtrie_page.insert_value(&String::from_iter(&['b'; 3801]));
         assert!(cell_index.is_err());
         assert!(matches!(cell_index, Err(PageError::PageIsFull)));
         assert_eq!(subtrie_page.num_cells(), 5);
 
-        let cell_index = subtrie_page.insert_value(String::from_iter(&['c'; 3800]));
+        let cell_index = subtrie_page.insert_value(&String::from_iter(&['c'; 3800]));
         assert!(cell_index.is_err());
         assert!(matches!(cell_index, Err(PageError::PageIsFull)));
         assert_eq!(subtrie_page.num_cells(), 5);
 
         let cell_index = subtrie_page
-            .insert_value(String::from_iter(&['d'; 3799]))
+            .insert_value(&String::from_iter(&['d'; 3799]))
             .unwrap();
         assert_eq!(cell_index, 5);
         assert_eq!(subtrie_page.num_cells(), 6);
@@ -759,7 +769,7 @@ mod tests {
         // after cleaning up all of the cells, we should be able to allocate a maximum sized cell
         // 4088 - 1 - 3 = 4084
         let cell_index = subtrie_page
-            .insert_value(String::from_iter(&['x'; 4084]))
+            .insert_value(&String::from_iter(&['x'; 4084]))
             .unwrap();
         assert_eq!(cell_index, 0);
         assert_eq!(subtrie_page.num_cells(), 1);
@@ -774,22 +784,22 @@ mod tests {
         let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
 
         let i0 = subtrie_page
-            .insert_value(String::from_iter(&['a'; 1020]))
+            .insert_value(&String::from_iter(&['a'; 1020]))
             .unwrap();
         assert_eq!(i0, 0);
 
         let i1 = subtrie_page
-            .insert_value(String::from_iter(&['b'; 1020]))
+            .insert_value(&String::from_iter(&['b'; 1020]))
             .unwrap();
         assert_eq!(i1, 1);
 
         let i2 = subtrie_page
-            .insert_value(String::from_iter(&['c'; 1020]))
+            .insert_value(&String::from_iter(&['c'; 1020]))
             .unwrap();
         assert_eq!(i2, 2);
 
         let i3 = subtrie_page
-            .insert_value(String::from_iter(&['d'; 1015]))
+            .insert_value(&String::from_iter(&['d'; 1015]))
             .unwrap();
         assert_eq!(i3, 3);
 
@@ -797,7 +807,7 @@ mod tests {
         assert_eq!(subtrie_page.num_cells(), 4);
 
         let i4 = subtrie_page
-            .insert_value(String::from_iter(&['e'; 1000]))
+            .insert_value(&String::from_iter(&['e'; 1000]))
             .unwrap();
         assert_eq!(i4, 1);
         assert_eq!(subtrie_page.num_cells(), 4);
@@ -817,22 +827,22 @@ mod tests {
         // without defragmenting the page.
 
         let i0 = subtrie_page
-            .insert_value(String::from_iter(&['a'; 1020]))
+            .insert_value(&String::from_iter(&['a'; 1020]))
             .unwrap();
         assert_eq!(i0, 0);
 
         let i1 = subtrie_page
-            .insert_value(String::from_iter(&['b'; 1020]))
+            .insert_value(&String::from_iter(&['b'; 1020]))
             .unwrap();
         assert_eq!(i1, 1);
 
         let i2 = subtrie_page
-            .insert_value(String::from_iter(&['c'; 1020]))
+            .insert_value(&String::from_iter(&['c'; 1020]))
             .unwrap();
         assert_eq!(i2, 2);
 
         let i3 = subtrie_page
-            .insert_value(String::from_iter(&['d'; 1012]))
+            .insert_value(&String::from_iter(&['d'; 1012]))
             .unwrap();
         assert_eq!(i3, 3);
 
@@ -842,7 +852,7 @@ mod tests {
         assert_eq!(subtrie_page.num_cells(), 4);
 
         let i4 = subtrie_page
-            .insert_value(String::from_iter(&['e'; 1500]))
+            .insert_value(&String::from_iter(&['e'; 1500]))
             .unwrap();
         assert_eq!(i4, 1);
         assert_eq!(subtrie_page.num_cells(), 4);
@@ -851,7 +861,7 @@ mod tests {
         assert_eq!(cell_pointer.offset(), 2520); // 2520 = 1020 + 1500
 
         let i5 = subtrie_page
-            .insert_value(String::from_iter(&['f'; 100]))
+            .insert_value(&String::from_iter(&['f'; 100]))
             .unwrap();
         assert_eq!(i5, 2);
         assert_eq!(subtrie_page.num_cells(), 4);
@@ -860,7 +870,7 @@ mod tests {
         assert_eq!(cell_pointer.offset(), 2620); // 2620 = 2520 + 100
 
         let i6 = subtrie_page
-            .insert_value(String::from_iter(&['g'; 100]))
+            .insert_value(&String::from_iter(&['g'; 100]))
             .unwrap();
         assert_eq!(i6, 4);
         assert_eq!(subtrie_page.num_cells(), 5);
@@ -870,7 +880,7 @@ mod tests {
 
         // this additional insertion forces the page to be defragmented to avoid overlapping with the header
         let i7 = subtrie_page
-            .insert_value(String::from_iter(&['h'; 100]))
+            .insert_value(&String::from_iter(&['h'; 100]))
             .unwrap();
         assert_eq!(i7, 5);
         assert_eq!(subtrie_page.num_cells(), 6);
@@ -886,27 +896,27 @@ mod tests {
         let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
 
         let i0 = subtrie_page
-            .insert_value(String::from_iter(&['a'; 814]))
+            .insert_value(&String::from_iter(&['a'; 814]))
             .unwrap();
         assert_eq!(i0, 0);
 
         let i1 = subtrie_page
-            .insert_value(String::from_iter(&['b'; 814]))
+            .insert_value(&String::from_iter(&['b'; 814]))
             .unwrap();
         assert_eq!(i1, 1);
 
         let i2 = subtrie_page
-            .insert_value(String::from_iter(&['c'; 814]))
+            .insert_value(&String::from_iter(&['c'; 814]))
             .unwrap();
         assert_eq!(i2, 2);
 
         let i3 = subtrie_page
-            .insert_value(String::from_iter(&['d'; 814]))
+            .insert_value(&String::from_iter(&['d'; 814]))
             .unwrap();
         assert_eq!(i3, 3);
 
         let i4 = subtrie_page
-            .insert_value(String::from_iter(&['e'; 814]))
+            .insert_value(&String::from_iter(&['e'; 814]))
             .unwrap();
         assert_eq!(i4, 4);
 
@@ -916,13 +926,13 @@ mod tests {
         assert_eq!(subtrie_page.num_cells(), 5);
 
         // should not be able to allocate anything larger than 1630 bytes (4088 - 1 - 3*5 - 814 - 814 - 814 = 1630)
-        let cell_index = subtrie_page.insert_value(String::from_iter(&['f'; 1631]));
+        let cell_index = subtrie_page.insert_value(&String::from_iter(&['f'; 1631]));
         assert!(cell_index.is_err());
         assert!(matches!(cell_index, Err(PageError::PageIsFull)));
 
         // should be able to allocate 1630 bytes
         let i5 = subtrie_page
-            .insert_value(String::from_iter(&['g'; 1630]))
+            .insert_value(&String::from_iter(&['g'; 1630]))
             .unwrap();
         assert_eq!(i5, 1);
 

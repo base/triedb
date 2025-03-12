@@ -413,20 +413,23 @@ fn bench_deletes(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database(size);
         let mut rng = StdRng::seed_from_u64(42);
-        let addresses: Vec<AddressPath> = (0..BATCH_SIZE)
+        let addresses: Vec<AddressPath> = (0..size)
             .map(|_| generate_random_address(&mut rng))
             .collect();
+
+        let mut count = 0;
 
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
         group.bench_with_input(BenchmarkId::new("batch_deletes", size), &size, |b, _| {
             b.iter(|| {
                 let mut tx = db.begin_rw().unwrap();
-                for addr in &addresses {
+                for addr in &addresses[count..count + BATCH_SIZE] {
                     tx.set_account(addr.clone(), None).unwrap();
                 }
                 // because we are deleting data, after each iteration we drop all the changes
                 // we make so that we can delete all the values again.
                 tx.rollback().unwrap();
+                count += BATCH_SIZE;
             });
         });
     }
