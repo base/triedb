@@ -79,15 +79,11 @@ impl Database<MmapPageManager> {
 
         let orphan_manager = OrphanPageManager::new();
 
-        let _root0 = page_manager.allocate(0).map_err(Error::PageError)?;
-        let _root1 = page_manager.allocate(0).map_err(Error::PageError)?;
-        let _subtrie = page_manager.allocate(0).map_err(Error::PageError)?;
-
         let metadata = Metadata {
             snapshot_id: 0,
             root_page_id: 0,
-            max_page_number: 256,
-            root_subtrie_page_id: 256,
+            max_page_number: 255,
+            root_subtrie_page_id: 0,
             state_root: EMPTY_ROOT_HASH,
         };
 
@@ -299,7 +295,7 @@ mod tests {
         // max_page_size + buffer
         let open_size = db.size();
 
-        let max_page_size = 256; // fresh db has root pages + reserved orphan pages
+        let max_page_size = 255; // fresh db has root pages + reserved orphan pages
         assert_eq!(open_size, max_page_size + 20);
 
         // cleanup
@@ -358,5 +354,56 @@ mod tests {
 
         // cleanup
         tmp_dir.close().unwrap();
+    }
+
+    #[test]
+    fn test_data_persistence() {
+        let tmp_dir = TempDir::new("test_db").unwrap();
+        let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
+        let mut db = Database::create(file_path.as_str()).unwrap();
+
+        let address1 = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
+        let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
+
+        let mut tx = db.begin_rw().unwrap();
+        tx.set_account(AddressPath::for_address(address1), Some(account1.clone()))
+            .unwrap();
+
+        tx.commit().unwrap();
+        db.close().unwrap();
+
+        let mut db = Database::open(file_path.as_str()).unwrap();
+        let tx = db.begin_ro().unwrap();
+        let account = tx
+            .get_account(AddressPath::for_address(address1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(account, account1);
+
+        tx.commit().unwrap();
+
+        let address2 = address!("0x1234567890abcdef1234567890abcdef12345678");
+        let account2 = Account::new(2, U256::from(200), EMPTY_ROOT_HASH, KECCAK_EMPTY);
+        let mut tx = db.begin_rw().unwrap();
+        tx.set_account(AddressPath::for_address(address2), Some(account2.clone()))
+            .unwrap();
+
+        tx.commit().unwrap();
+        db.close().unwrap();
+
+        let db = Database::open(file_path.as_str()).unwrap();
+        let tx = db.begin_ro().unwrap();
+
+        let account = tx
+            .get_account(AddressPath::for_address(address1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(account, account1);
+
+        let account = tx
+            .get_account(AddressPath::for_address(address2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(account, account2);
     }
 }
