@@ -962,7 +962,7 @@ impl<P: PageManager> StorageEngine<P> {
     }
 
     pub fn rollback(&self, _context: &TransactionContext) -> Result<(), Error> {
-        todo!()
+        Ok(())
     }
 
     pub fn resize(&mut self, new_page_count: PageId) -> Result<(), Error> {

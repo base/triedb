@@ -426,7 +426,7 @@ fn bench_deletes(c: &mut Criterion) {
                 }
                 // because we are deleting data, after each iteration we drop all the changes
                 // we make so that we can delete all the values again.
-                tx.no_op_commit().unwrap();
+                tx.rollback().unwrap();
             });
         });
     }
@@ -461,7 +461,7 @@ fn bench_storage_single_account_deletes(c: &mut Criterion) {
                     }
                     // because we are deleting data, after each iteration we drop all the changes
                     // we make so that we can delete all the values again.
-                    tx.no_op_commit().unwrap();
+                    tx.rollback().unwrap();
                 });
             },
         );
@@ -500,7 +500,7 @@ fn bench_storage_mutliple_accounts_deletes(c: &mut Criterion) {
                     }
                     // because we are deleting data, after each iteration we drop all the changes
                     // we make so that we can delete all the values again.
-                    tx.no_op_commit().unwrap();
+                    tx.rollback().unwrap();
                 });
             },
         );
@@ -581,7 +581,6 @@ fn bench_mixed_operations(c: &mut Criterion) {
                             let account =
                                 Account::new(1, U256::from(1000u64), EMPTY_ROOT_HASH, KECCAK_EMPTY);
                             tx.set_account(address.clone(), Some(account)).unwrap();
-                            deleted_accounts.remove(&address);
                         }
                         2 => {
                             // Update
@@ -598,7 +597,6 @@ fn bench_mixed_operations(c: &mut Criterion) {
                             // Delete
                             let address = existing_addresses[i].clone();
                             tx.set_account(address.clone(), None).unwrap();
-                            deleted_accounts.insert(address);
                         }
                         4 => {
                             // Read storage
