@@ -65,7 +65,9 @@ impl Node {
                 account.code_hash,
                 None,
             ),
-            TrieValue::Storage(storage) => Node::new_storage_leaf(prefix, encode_fixed_size(storage)),
+            TrieValue::Storage(storage) => {
+                Node::new_storage_leaf(prefix, encode_fixed_size(storage))
+            }
         }
     }
 
