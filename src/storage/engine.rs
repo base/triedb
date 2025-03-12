@@ -1201,7 +1201,45 @@ impl<P: PageManager> StorageEngine<P> {
         todo!()
     }
 
-    pub fn resize(&mut self, new_page_count: PageId) -> Result<(), Error> {
+    // Ensures that the storage engine has a buffer of at least `min_buffer_size` pages.
+    // This includes unallocated pages at the end of the file, as well as any orphaned pages that
+    // are unlocked. If the buffer is insufficient, the storage engine will be scaled by
+    // `grow_by` until it has at least `min_buffer_size` pages.
+    pub(crate) fn ensure_page_buffer(
+        &self,
+        context: &TransactionContext,
+        min_buffer_size: u32,
+        grow_by: f64,
+    ) -> Result<(), Error> {
+        assert!(grow_by > 1.0, "grow_by must be greater than 1.0");
+
+        let mut inner = self.inner.write().unwrap();
+
+        if inner.is_closed() {
+            return Err(Error::EngineClosed);
+        }
+
+        let current_page_count = inner.page_manager.size();
+        let unallocated_page_count = current_page_count - context.metadata.max_page_number - 1;
+        let unlocked_page_count = inner.orphan_manager.unlocked_page_count();
+
+        let mut free_page_count = unlocked_page_count + unallocated_page_count;
+
+        if free_page_count < min_buffer_size {
+            let unusable_page_count = current_page_count - free_page_count;
+            let mut new_page_count = current_page_count;
+            while free_page_count < min_buffer_size {
+                new_page_count = (new_page_count as f64 * grow_by) as u32;
+                free_page_count = new_page_count - unusable_page_count;
+            }
+            inner.resize(new_page_count)?;
+        }
+
+        Ok(())
+    }
+
+    // Resizes the storage engine to the given page count.
+    pub(crate) fn resize(&mut self, new_page_count: PageId) -> Result<(), Error> {
         let mut inner = self.inner.write().unwrap();
 
         if inner.is_closed() {

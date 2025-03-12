@@ -96,7 +96,19 @@ impl<P: PageManager> Transaction<'_, RW, P> {
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
         let mut changes =
             self.pending_changes.drain().collect::<Vec<(Nibbles, Option<TrieValue>)>>();
+
         if !changes.is_empty() {
+            // Assume the worst case scenario where each account and storage slot requires a new
+            // page, plus an extra buffer TODO: page buffer and grow_by should be
+            // configurable, but for now 1000 is assumed to be good enough.
+            // It's also possible that we could use a more sophisticated algorithm to estimate the
+            // number of pages required. Note that resizing the current memory-mapped
+            // page manager requires remapping all pages, and cannot be done while any readers are
+            // open.
+            storage_engine
+                .ensure_page_buffer(&self.context, changes.len() as u32 + 1000, 1.2)
+                .unwrap();
+
             storage_engine.set_values(&mut self.context, changes.as_mut()).unwrap();
         }
 

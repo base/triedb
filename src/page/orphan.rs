@@ -70,6 +70,11 @@ impl OrphanPageManager {
         self.locked_page_ids.entry(snapshot_id).or_default().extend(pages);
     }
 
+    // Returns the number of unlocked orphan pages
+    pub fn unlocked_page_count(&self) -> u32 {
+        self.unlocked_page_ids.len() as u32
+    }
+
     // Returns the number of orphan pages were given out
     pub fn get_num_orphan_pages_used(&self) -> usize {
         self.num_orphan_pages_used
