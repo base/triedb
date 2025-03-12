@@ -1,10 +1,13 @@
 use std::cmp::{max, min};
 
 use alloy_primitives::{hex, StorageValue, B256, U256};
-use alloy_rlp::{decode_exact, encode, encode_fixed_size, BufMut, Encodable, MaxEncodedLen};
+use alloy_rlp::{
+    decode_exact, encode_fixed_size, length_of_length, BufMut, Encodable, Header, MaxEncodedLen,
+    EMPTY_STRING_CODE,
+};
 use alloy_trie::{
-    nodes::{BranchNode, ExtensionNodeRef, LeafNodeRef, RlpNode},
-    Nibbles, TrieMask, EMPTY_ROOT_HASH, KECCAK_EMPTY,
+    nodes::{ExtensionNodeRef, LeafNodeRef, RlpNode},
+    Nibbles, EMPTY_ROOT_HASH, KECCAK_EMPTY,
 };
 use arrayvec::ArrayVec;
 use proptest::prelude::{any, prop, Strategy};
@@ -191,11 +194,29 @@ impl Node {
             _ => panic!("cannot get value of non-leaf node"),
         }
     }
-}
 
-impl Node {
     pub fn rlp_encode(&self) -> RlpNode {
         RlpNode::from_rlp(&encode_fixed_size(self))
+    }
+
+    pub fn size_incr_with_new_child(&self) -> usize {
+        match self {
+            Self::Branch { children, .. } => {
+                let (total_children, slot_size) = Self::children_slot_size(children);
+                let next_total_children = min(total_children + 1, 16);
+                let next_slot_size = max(next_total_children.next_power_of_two(), 2);
+                (next_slot_size - slot_size) * 37
+            }
+            _ => 0,
+        }
+    }
+
+    fn children_slot_size(children: &[Option<Pointer>]) -> (usize, usize) {
+        // children is saved in a list of 2, 4, 8, 16 slots depending on the number of children
+        const MIN_SLOT_SIZE: usize = 2;
+        let total_children = children.iter().filter(|child| child.is_some()).count();
+        let slot_size = max(total_children.next_power_of_two(), MIN_SLOT_SIZE);
+        (total_children, slot_size)
     }
 }
 
@@ -293,8 +314,7 @@ impl Value for Node {
 
                 if let Some(storage_root) = storage_root {
                     // Serialize the pointer
-                    storage_root.serialize_into(&mut buf[offset..offset + 37])?;
-                    offset += 37;
+                    offset += storage_root.serialize_into(&mut buf[offset..offset + 37])?;
                 }
 
                 Ok(offset)
@@ -327,8 +347,7 @@ impl Value for Node {
                 let mut offset = 2 + packed_prefix_length + 2;
                 for child in children.iter() {
                     if let Some(child) = child {
-                        child.serialize_into(&mut buf[offset..offset + 37])?;
-                        offset += 37;
+                        offset += child.serialize_into(&mut buf[offset..offset + 37])?;
                     }
                 }
                 let padding_size = (children_slot_size - total_children) * 37;
@@ -450,28 +469,6 @@ impl Value for Node {
     }
 }
 
-impl Node {
-    pub fn size_incr_with_new_child(&self) -> usize {
-        match self {
-            Self::Branch { children, .. } => {
-                let (total_children, slot_size) = Self::children_slot_size(children);
-                let next_total_children = min(total_children + 1, 16);
-                let next_slot_size = max(next_total_children.next_power_of_two(), 2);
-                (next_slot_size - slot_size) * 37
-            }
-            _ => 0,
-        }
-    }
-
-    fn children_slot_size(children: &[Option<Pointer>]) -> (usize, usize) {
-        // children is saved in a list of 2, 4, 8, 16 slots depending on the number of children
-        const MIN_SLOT_SIZE: usize = 2;
-        let total_children = children.iter().filter(|child| child.is_some()).count();
-        let slot_size = max(total_children.next_power_of_two(), MIN_SLOT_SIZE);
-        (total_children, slot_size)
-    }
-}
-
 impl Encodable for Node {
     fn encode(&self, out: &mut dyn BufMut) {
         match self {
@@ -511,37 +508,16 @@ impl Encodable for Node {
             }
             Self::Branch { prefix, children } => {
                 if prefix.is_empty() {
-                    BranchNode {
-                        stack: children
-                            .iter()
-                            .filter_map(|child| child.as_ref().map(|p| p.rlp().clone()))
-                            .collect(),
-                        state_mask: TrieMask::new(
-                            children
-                                .iter()
-                                .enumerate()
-                                .map(|(i, child)| (child.is_some() as u16) << i)
-                                .sum(),
-                        ),
-                    }
-                    .encode(out);
+                    encode_branch(children, out);
                 } else {
-                    let branch_rlp = encode(&BranchNode {
-                        stack: children
-                            .iter()
-                            .filter_map(|child| child.as_ref().map(|p| p.rlp().clone()))
-                            .collect(),
-                        state_mask: TrieMask::new(
-                            children
-                                .iter()
-                                .enumerate()
-                                .map(|(i, child)| (child.is_some() as u16) << i)
-                                .sum(),
-                        ),
-                    });
+                    let mut buf = [0u8; 3 + 33 * 16 + 1]; // max RLP length for a branch: 3 bytes for the list length, 33 bytes for each of the 16 children, 1 byte for the empty 17th slot
+                    let mut branch_rlp = buf.as_mut();
+
+                    let branch_rlp_length = encode_branch(children, &mut branch_rlp);
+
                     ExtensionNodeRef {
                         key: prefix,
-                        child: &RlpNode::from_rlp(&branch_rlp),
+                        child: &RlpNode::from_rlp(&buf[..branch_rlp_length]),
                     }
                     .encode(out);
                 }
@@ -561,33 +537,55 @@ impl Encodable for Node {
             }
             Self::Branch { prefix, children } => {
                 if prefix.is_empty() {
-                    BranchNode {
-                        stack: children
-                            .iter()
-                            .filter_map(|child| child.as_ref().map(|p| p.rlp().clone()))
-                            .collect(),
-                        state_mask: TrieMask::new(
-                            children
-                                .iter()
-                                .enumerate()
-                                .map(|(i, child)| (child.is_some() as u16) << i)
-                                .sum(),
-                        ),
+                    let mut payload_length = 1;
+                    for child in children.iter() {
+                        if let Some(child) = child {
+                            payload_length += child.rlp().len();
+                        } else {
+                            payload_length += 1;
+                        }
                     }
-                    .length()
+                    payload_length + length_of_length(payload_length)
                 } else {
-                    ExtensionNodeRef {
-                        key: prefix,
-                        // hack: we know that a branch node will always be a
-                        // RlpNode hash. since we only need the length, we use
-                        // a dummy zero value here.
-                        child: &RlpNode::word_rlp(&B256::ZERO),
+                    let mut encoded_key_len = prefix.len() / 2 + 1;
+                    if encoded_key_len != 1 {
+                        encoded_key_len += length_of_length(encoded_key_len);
                     }
-                    .length()
+                    let payload_length = encoded_key_len + 33;
+                    payload_length + length_of_length(payload_length)
                 }
             }
         }
     }
+}
+
+fn encode_branch(children: &[Option<Pointer>], out: &mut dyn BufMut) -> usize {
+    // first encode the header
+    let mut payload_length = 1;
+    for child in children.iter() {
+        if let Some(child) = child {
+            payload_length += child.rlp().len();
+        } else {
+            payload_length += 1;
+        }
+    }
+    Header {
+        list: true,
+        payload_length,
+    }
+    .encode(out);
+    // now encode the children
+    for child in children.iter() {
+        if let Some(child) = child {
+            out.put_slice(child.rlp());
+        } else {
+            out.put_u8(EMPTY_STRING_CODE);
+        }
+    }
+    // and encode the empty 17th slot
+    out.put_u8(EMPTY_STRING_CODE);
+
+    payload_length + length_of_length(payload_length)
 }
 
 fn arb_children() -> impl Strategy<Value = [Option<Pointer>; 16]> {
@@ -609,6 +607,7 @@ pub enum TrieValue {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{b256, hex, B256, U256};
+    use alloy_rlp::encode;
     use alloy_trie::KECCAK_EMPTY;
     use proptest::prelude::*;
 
@@ -1067,8 +1066,7 @@ mod tests {
 
         #[test]
         fn fuzz_node_rlp_encode(node: Node) {
-            let mut bytes = vec![];
-            node.encode(&mut bytes);
+            node.rlp_encode();
         }
     }
 }
