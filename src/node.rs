@@ -52,7 +52,7 @@ fn arb_u256_rlp() -> impl Strategy<Value = ArrayVec<u8, 33>> {
 }
 
 impl Node {
-    pub fn new_leaf(prefix: Nibbles, value: TrieValue) -> Self {
+    pub fn new_leaf(prefix: Nibbles, value: &TrieValue) -> Self {
         assert!(
             prefix.len() <= 64,
             "account and storage leaf prefix's must be at most 64 nibbles"
@@ -66,7 +66,7 @@ impl Node {
                 None,
             ),
             TrieValue::Storage(storage) => {
-                Node::new_storage_leaf(prefix, encode_fixed_size(&storage))
+                Node::new_storage_leaf(prefix, encode_fixed_size(storage))
             }
         }
     }
@@ -687,26 +687,26 @@ mod tests {
     fn test_storage_leaf_node_serialize() {
         let node = Node::new_leaf(
             Nibbles::from_nibbles([0xa, 0xb]),
-            TrieValue::Storage(StorageValue::from_be_slice(&[4, 5, 6])),
+            &TrieValue::Storage(StorageValue::from_be_slice(&[4, 5, 6])),
         );
         let bytes = node.serialize().unwrap();
         assert_eq!(bytes, hex!("0x0002ab83040506"));
 
         let node = Node::new_leaf(
             Nibbles::from_nibbles([0xa, 0xb, 0xc]),
-            TrieValue::Storage(StorageValue::from_be_slice(&[4, 5, 6, 7])),
+            &TrieValue::Storage(StorageValue::from_be_slice(&[4, 5, 6, 7])),
         );
         let bytes = node.serialize().unwrap();
         assert_eq!(bytes, hex!("0x0003abc08404050607"));
 
         let node = Node::new_leaf(
             Nibbles::new(),
-            TrieValue::Storage(StorageValue::from_be_slice(&[255, 255, 255, 255])),
+            &TrieValue::Storage(StorageValue::from_be_slice(&[255, 255, 255, 255])),
         );
         let bytes = node.serialize().unwrap();
         assert_eq!(bytes, hex!("0x000084ffffffff"));
 
-        let node = Node::new_leaf(Nibbles::new(), TrieValue::Storage(StorageValue::from(0)));
+        let node = Node::new_leaf(Nibbles::new(), &TrieValue::Storage(StorageValue::from(0)));
         let bytes = node.serialize().unwrap();
         assert_eq!(bytes, hex!("0x000080"));
 
@@ -714,7 +714,7 @@ mod tests {
             Nibbles::from_nibbles(hex!(
                 "0x000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f"
             )),
-            TrieValue::Storage(StorageValue::from(U256::MAX)),
+            &TrieValue::Storage(StorageValue::from(U256::MAX)),
         );
         let bytes = node.serialize().unwrap();
         assert_eq!(bytes, hex!("0x00200123456789abcdef0123456789abcdefa0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"));
@@ -724,7 +724,7 @@ mod tests {
     fn test_account_leaf_node_serialize() {
         let node = Node::new_leaf(
             Nibbles::from_nibbles([0xa, 0xb]),
-            TrieValue::Account(Account::new(
+            &TrieValue::Account(Account::new(
                 0,
                 U256::from_be_slice(&[4, 5, 6]),
                 EMPTY_ROOT_HASH,
@@ -736,7 +736,7 @@ mod tests {
 
         let node = Node::new_leaf(
             Nibbles::from_nibbles([0xa, 0xb, 0xc]),
-            TrieValue::Account(Account::new(
+            &TrieValue::Account(Account::new(
                 0,
                 U256::from_be_slice(&[4, 5, 6, 7]),
                 EMPTY_ROOT_HASH,
@@ -748,7 +748,7 @@ mod tests {
 
         let node = Node::new_leaf(
             Nibbles::new(),
-            TrieValue::Account(Account::new(
+            &TrieValue::Account(Account::new(
                 0,
                 U256::from_be_slice(&[0xf, 0xf, 0xf, 0xf]),
                 EMPTY_ROOT_HASH,
@@ -760,7 +760,7 @@ mod tests {
 
         let mut node = Node::new_leaf(
             Nibbles::new(),
-            TrieValue::Account(Account::new(
+            &TrieValue::Account(Account::new(
                 0,
                 U256::from_be_slice(&[0xf, 0xf, 0xf, 0xf]),
                 EMPTY_ROOT_HASH,
@@ -854,7 +854,7 @@ mod tests {
     fn test_leaf_node_encode() {
         let node = Node::new_leaf(
             Nibbles::new(),
-            TrieValue::Account(Account::new(0, U256::from(1), B256::ZERO, B256::ZERO)),
+            &TrieValue::Account(Account::new(0, U256::from(1), B256::ZERO, B256::ZERO)),
         );
         let mut bytes = vec![];
         node.encode(&mut bytes);
@@ -862,7 +862,7 @@ mod tests {
 
         let node = Node::new_leaf(
             Nibbles::from_nibbles([0xa, 0xb]),
-            TrieValue::Account(Account::new(1, U256::from(100), B256::ZERO, B256::ZERO)),
+            &TrieValue::Account(Account::new(1, U256::from(100), B256::ZERO, B256::ZERO)),
         );
         let mut bytes = vec![];
         node.encode(&mut bytes);
@@ -870,7 +870,7 @@ mod tests {
 
         let node = Node::new_leaf(
             Nibbles::from_nibbles([0xa, 0xb, 0xc, 0xd, 0xe]),
-            TrieValue::Account(Account::new(
+            &TrieValue::Account(Account::new(
                 999,
                 U256::from(123456789),
                 B256::ZERO,
@@ -885,7 +885,7 @@ mod tests {
             Nibbles::unpack(hex!(
                 "0x761d5c42184a02cc64585ed2ff339fc39a907e82731d70313c83d2212b2da36b"
             )),
-            TrieValue::Account(Account::new(
+            &TrieValue::Account(Account::new(
                 0,
                 U256::from(10_000_000_000_000_000_000u64),
                 EMPTY_ROOT_HASH,
