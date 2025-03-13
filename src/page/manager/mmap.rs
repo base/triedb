@@ -37,22 +37,14 @@ impl MmapPageManager {
         if next_page_id > (mmap.len() / PAGE_SIZE) as u32 {
             panic!("next_page_id is greater than the number of pages in the memory mapped file");
         }
-        Self {
-            mmap,
-            file: Some(file),
-            next_page_id,
-        }
+        Self { mmap, file: Some(file), next_page_id }
     }
 
     // Creates a new MmapPageManager with an anonymous memory mapped file.
     #[cfg(test)]
     pub(crate) fn new_anon(capacity: PageId, next_page_id: PageId) -> Result<Self, PageError> {
         let mmap = MmapMut::map_anon(capacity as usize * PAGE_SIZE).map_err(PageError::IO)?;
-        Ok(Self {
-            mmap,
-            file: None,
-            next_page_id,
-        })
+        Ok(Self { mmap, file: None, next_page_id })
     }
 
     // Returns a mutable reference to the data of the page with the given id.

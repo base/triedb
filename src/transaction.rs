@@ -59,9 +59,7 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
 
     pub fn get_account(&'tx self, address_path: AddressPath) -> Result<Option<Account>, ()> {
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
-        let account = storage_engine
-            .get_account(&self.context, address_path)
-            .unwrap();
+        let account = storage_engine.get_account(&self.context, address_path).unwrap();
 
         self.database.update_metrics_ro(&self.context);
 
@@ -70,9 +68,7 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
 
     pub fn get_storage_slot(&self, storage_path: StoragePath) -> Result<Option<StorageValue>, ()> {
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
-        let storage_slot = storage_engine
-            .get_storage(&self.context, storage_path)
-            .unwrap();
+        let storage_slot = storage_engine.get_storage(&self.context, storage_path).unwrap();
         Ok(storage_slot)
     }
 }
@@ -83,8 +79,7 @@ impl<P: PageManager> Transaction<'_, RW, P> {
         address_path: AddressPath,
         account: Option<Account>,
     ) -> Result<(), ()> {
-        self.pending_changes
-            .insert(address_path.into(), account.map(TrieValue::Account));
+        self.pending_changes.insert(address_path.into(), account.map(TrieValue::Account));
         Ok(())
     }
 
@@ -93,21 +88,16 @@ impl<P: PageManager> Transaction<'_, RW, P> {
         storage_path: StoragePath,
         value: Option<StorageValue>,
     ) -> Result<(), ()> {
-        self.pending_changes
-            .insert(storage_path.full_path(), value.map(TrieValue::Storage));
+        self.pending_changes.insert(storage_path.full_path(), value.map(TrieValue::Storage));
         Ok(())
     }
 
     pub fn commit(mut self) -> Result<(), ()> {
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
-        let mut changes = self
-            .pending_changes
-            .drain()
-            .collect::<Vec<(Nibbles, Option<TrieValue>)>>();
+        let mut changes =
+            self.pending_changes.drain().collect::<Vec<(Nibbles, Option<TrieValue>)>>();
         if !changes.is_empty() {
-            storage_engine
-                .set_values(&mut self.context, changes.as_mut())
-                .unwrap();
+            storage_engine.set_values(&mut self.context, changes.as_mut()).unwrap();
         }
 
         let mut transaction_manager = self.database.inner.transaction_manager.write().unwrap();

@@ -22,10 +22,7 @@ impl Pointer {
     }
 
     pub fn new_unhashed(location: Location) -> Self {
-        Self {
-            location,
-            rlp: RlpNode::from_rlp(&[]),
-        }
+        Self { location, rlp: RlpNode::from_rlp(&[]) }
     }
 
     pub fn rlp(&self) -> &RlpNode {
@@ -53,9 +50,7 @@ impl Value for Pointer {
     }
 
     fn from_bytes(bytes: &[u8]) -> value::Result<Self> {
-        let arr: [u8; 37] = bytes
-            .try_into()
-            .map_err(|_| value::Error::InvalidEncoding)?;
+        let arr: [u8; 37] = bytes.try_into().map_err(|_| value::Error::InvalidEncoding)?;
         let first_rlp_byte = arr[4];
         // Because the RLP string must be 1-33 bytes, we can safely use the first byte to determine
         // the length. If the first byte is less than 0x80, then this byte is the actual
@@ -70,10 +65,7 @@ impl Value for Pointer {
         } else {
             return Err(value::Error::InvalidEncoding);
         };
-        Ok(Pointer::new(
-            Location::from(u32::from_be_bytes(arr[..4].try_into().unwrap())),
-            rlp,
-        ))
+        Ok(Pointer::new(Location::from(u32::from_be_bytes(arr[..4].try_into().unwrap())), rlp))
     }
 }
 
@@ -104,15 +96,11 @@ fn u256_or_hash() -> impl Strategy<Value = RlpNode> {
 }
 
 fn arb_u256_rlp() -> impl Strategy<Value = RlpNode> {
-    any::<U256>()
-        .prop_map(|u| RlpNode::from_rlp(&encode(u)))
-        .boxed()
+    any::<U256>().prop_map(|u| RlpNode::from_rlp(&encode(u))).boxed()
 }
 
 fn arb_hash_rlp() -> impl Strategy<Value = RlpNode> {
-    any::<B256>()
-        .prop_map(|h: B256| RlpNode::word_rlp(&h))
-        .boxed()
+    any::<B256>().prop_map(|h: B256| RlpNode::word_rlp(&h)).boxed()
 }
 
 #[cfg(test)]

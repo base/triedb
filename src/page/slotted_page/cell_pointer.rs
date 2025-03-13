@@ -47,12 +47,7 @@ impl<'p> CellPointer<'p> {
 
 impl std::fmt::Debug for CellPointer<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "CellPointer {{ offset: {}, length: {} }}",
-            self.offset(),
-            self.length()
-        )
+        write!(f, "CellPointer {{ offset: {}, length: {} }}", self.offset(), self.length())
     }
 }
 

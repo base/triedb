@@ -27,11 +27,7 @@ impl OrphanPageManager {
 
     // Creates a new OrphanPageManager with provided unlocked page ids.
     pub fn new_with_unlocked_page_ids(unlocked_page_ids: Vec<PageId>) -> Self {
-        Self {
-            unlocked_page_ids,
-            locked_page_ids: BTreeMap::new(),
-            num_orphan_pages_used: 0,
-        }
+        Self { unlocked_page_ids, locked_page_ids: BTreeMap::new(), num_orphan_pages_used: 0 }
     }
 
     // Returns an unlocked orphaned page id, if one exists.
@@ -70,10 +66,7 @@ impl OrphanPageManager {
         snapshot_id: SnapshotId,
         pages: impl IntoIterator<Item = PageId>,
     ) {
-        self.locked_page_ids
-            .entry(snapshot_id)
-            .or_default()
-            .extend(pages);
+        self.locked_page_ids.entry(snapshot_id).or_default().extend(pages);
     }
 
     // Returns the number of orphan pages were given out
