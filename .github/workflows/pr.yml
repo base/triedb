@@ -22,12 +22,16 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - uses: rui314/setup-mold@v1
+    - uses: dtolnay/rust-toolchain@nightly
+      with:
+        components: rustfmt
     - name: Format
       run: |
         cargo +nightly fmt --all -- --check
         if [ $? -ne 0 ]; then
-          echo "::error::Formatting check failed. Please run 'cargo fmt' locally and commit the changes."
-          cargo fmt --all -- --check
+          echo "::error::Formatting check failed. Please run 'make format' locally and commit the changes."
+          cargo +nightly fmt --all -- --check
           exit 1
         fi
   
