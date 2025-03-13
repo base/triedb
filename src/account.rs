@@ -12,12 +12,7 @@ pub struct Account {
 
 impl Account {
     pub fn new(nonce: u64, balance: U256, storage_root: B256, code_hash: B256) -> Self {
-        Self {
-            nonce,
-            balance,
-            storage_root,
-            code_hash,
-        }
+        Self { nonce, balance, storage_root, code_hash }
     }
 }
 

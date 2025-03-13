@@ -29,12 +29,8 @@ fn setup_database(size: usize) -> (TempDir, Database<MmapPageManager>) {
         let mut tx = db.begin_rw().unwrap();
         for i in 1..=size {
             let address = generate_random_address(&mut rng);
-            let account = Account::new(
-                i as u64,
-                U256::from(i as u64),
-                EMPTY_ROOT_HASH,
-                KECCAK_EMPTY,
-            );
+            let account =
+                Account::new(i as u64, U256::from(i as u64), EMPTY_ROOT_HASH, KECCAK_EMPTY);
 
             tx.set_account(address, Some(account)).unwrap();
         }
@@ -57,12 +53,8 @@ fn setup_database_with_storage(size: usize) -> (TempDir, Database<MmapPageManage
         let num_accounts_to_generate = size / BATCH_SIZE;
         for i in 1..=num_accounts_to_generate {
             let address = generate_random_address(&mut rng);
-            let account = Account::new(
-                i as u64,
-                U256::from(i as u64),
-                EMPTY_ROOT_HASH,
-                KECCAK_EMPTY,
-            );
+            let account =
+                Account::new(i as u64, U256::from(i as u64), EMPTY_ROOT_HASH, KECCAK_EMPTY);
 
             tx.set_account(address.clone(), Some(account)).unwrap();
 
@@ -74,8 +66,7 @@ fn setup_database_with_storage(size: usize) -> (TempDir, Database<MmapPageManage
                 let storage_value =
                     StorageValue::from_be_slice(storage_path.get_slot().pack().as_slice());
 
-                tx.set_storage_slot(storage_path, Some(storage_value))
-                    .unwrap();
+                tx.set_storage_slot(storage_path, Some(storage_value)).unwrap();
             }
         }
 
@@ -90,9 +81,8 @@ fn bench_reads(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database(size);
         let mut rng = StdRng::seed_from_u64(42);
-        let addresses: Vec<AddressPath> = (0..BATCH_SIZE)
-            .map(|_| generate_random_address(&mut rng))
-            .collect();
+        let addresses: Vec<AddressPath> =
+            (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
         group.bench_with_input(BenchmarkId::new("random_reads", size), &size, |b, _| {
@@ -150,9 +140,8 @@ fn bench_storage_reads_multiple_accounts(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database_with_storage(size);
         let mut rng = StdRng::seed_from_u64(42);
-        let addresses: Vec<AddressPath> = (0..(size / BATCH_SIZE))
-            .map(|_| generate_random_address(&mut rng))
-            .collect();
+        let addresses: Vec<AddressPath> =
+            (0..(size / BATCH_SIZE)).map(|_| generate_random_address(&mut rng)).collect();
         let mut storage_paths: Vec<StoragePath> = Vec::new();
         for address in addresses {
             for i in 0..=(BATCH_SIZE / (size / BATCH_SIZE)) {
@@ -188,9 +177,8 @@ fn bench_inserts(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database(size);
         let mut rng = StdRng::seed_from_u64(43);
-        let addresses: Vec<AddressPath> = (0..BATCH_SIZE)
-            .map(|_| generate_random_address(&mut rng))
-            .collect();
+        let addresses: Vec<AddressPath> =
+            (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
         group.bench_with_input(BenchmarkId::new("batch_inserts", size), &size, |b, _| {
@@ -228,8 +216,7 @@ fn bench_storage_inserts_single_account(c: &mut Criterion) {
 
         let account = Account::new(1, U256::from(1000u64), EMPTY_ROOT_HASH, KECCAK_EMPTY);
         let mut tx = db.begin_rw().unwrap();
-        tx.set_account(single_address.clone(), Some(account))
-            .unwrap();
+        tx.set_account(single_address.clone(), Some(account)).unwrap();
         tx.commit().unwrap();
 
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
@@ -240,8 +227,7 @@ fn bench_storage_inserts_single_account(c: &mut Criterion) {
                 b.iter(|| {
                     let mut tx = db.begin_rw().unwrap();
                     for (storage_path, storage_value) in &storage_paths_values {
-                        tx.set_storage_slot(storage_path.clone(), Some(*storage_value))
-                            .unwrap();
+                        tx.set_storage_slot(storage_path.clone(), Some(*storage_value)).unwrap();
                     }
                     tx.commit().unwrap();
                 });
@@ -257,9 +243,8 @@ fn bench_storage_inserts_multiple_accounts(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database_with_storage(size);
         let mut rng = StdRng::seed_from_u64(43);
-        let addresses: Vec<AddressPath> = (0..(size / BATCH_SIZE))
-            .map(|_| generate_random_address(&mut rng))
-            .collect();
+        let addresses: Vec<AddressPath> =
+            (0..(size / BATCH_SIZE)).map(|_| generate_random_address(&mut rng)).collect();
         let mut storage_paths_values: Vec<(StoragePath, StorageValue)> = Vec::new();
         for address in &addresses {
             for i in 0..=(BATCH_SIZE / (size / BATCH_SIZE)) {
@@ -287,8 +272,7 @@ fn bench_storage_inserts_multiple_accounts(c: &mut Criterion) {
                 b.iter(|| {
                     let mut tx = db.begin_rw().unwrap();
                     for (storage_path, storage_value) in &storage_paths_values {
-                        tx.set_storage_slot(storage_path.clone(), Some(*storage_value))
-                            .unwrap();
+                        tx.set_storage_slot(storage_path.clone(), Some(*storage_value)).unwrap();
                     }
                     tx.commit().unwrap();
                 });
@@ -304,9 +288,8 @@ fn bench_updates(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database(size);
         let mut rng = StdRng::seed_from_u64(42);
-        let addresses: Vec<AddressPath> = (0..BATCH_SIZE)
-            .map(|_| generate_random_address(&mut rng))
-            .collect();
+        let addresses: Vec<AddressPath> =
+            (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
         group.bench_with_input(BenchmarkId::new("batch_updates", size), &size, |b, _| {
@@ -355,8 +338,7 @@ fn bench_storage_single_account_updates(c: &mut Criterion) {
                 b.iter(|| {
                     let mut tx = db.begin_rw().unwrap();
                     for (storage_path, storage_value) in &storage_paths_values {
-                        tx.set_storage_slot(storage_path.clone(), Some(*storage_value))
-                            .unwrap();
+                        tx.set_storage_slot(storage_path.clone(), Some(*storage_value)).unwrap();
                     }
                     tx.commit().unwrap();
                 });
@@ -372,9 +354,8 @@ fn bench_storage_multiple_account_updates(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database_with_storage(size);
         let mut rng = StdRng::seed_from_u64(42);
-        let addresses: Vec<AddressPath> = (0..(size / BATCH_SIZE))
-            .map(|_| generate_random_address(&mut rng))
-            .collect();
+        let addresses: Vec<AddressPath> =
+            (0..(size / BATCH_SIZE)).map(|_| generate_random_address(&mut rng)).collect();
         let mut storage_paths_values: Vec<(StoragePath, StorageValue)> = Vec::new();
         for address in &addresses {
             for i in 0..=(BATCH_SIZE / (size / BATCH_SIZE)) {
@@ -396,8 +377,7 @@ fn bench_storage_multiple_account_updates(c: &mut Criterion) {
                 b.iter(|| {
                     let mut tx = db.begin_rw().unwrap();
                     for (storage_path, storage_value) in &storage_paths_values {
-                        tx.set_storage_slot(storage_path.clone(), Some(*storage_value))
-                            .unwrap();
+                        tx.set_storage_slot(storage_path.clone(), Some(*storage_value)).unwrap();
                     }
                     tx.commit().unwrap();
                 });
@@ -413,9 +393,8 @@ fn bench_deletes(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database(size);
         let mut rng = StdRng::seed_from_u64(42);
-        let addresses: Vec<AddressPath> = (0..size)
-            .map(|_| generate_random_address(&mut rng))
-            .collect();
+        let addresses: Vec<AddressPath> =
+            (0..size).map(|_| generate_random_address(&mut rng)).collect();
 
         let mut count = 0;
 
@@ -478,9 +457,8 @@ fn bench_storage_mutliple_accounts_deletes(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database_with_storage(size);
         let mut rng = StdRng::seed_from_u64(42);
-        let addresses: Vec<AddressPath> = (0..(size / BATCH_SIZE))
-            .map(|_| generate_random_address(&mut rng))
-            .collect();
+        let addresses: Vec<AddressPath> =
+            (0..(size / BATCH_SIZE)).map(|_| generate_random_address(&mut rng)).collect();
         let mut storage_paths: Vec<StoragePath> = Vec::new();
         for address in &addresses {
             for i in 0..=(BATCH_SIZE / (size / BATCH_SIZE)) {
@@ -517,15 +495,12 @@ fn bench_mixed_operations(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database(size);
         let mut rng = StdRng::seed_from_u64(42);
-        let existing_addresses: Vec<AddressPath> = (0..BATCH_SIZE)
-            .map(|_| generate_random_address(&mut rng))
-            .collect();
-        let new_addresses: Vec<AddressPath> = (0..BATCH_SIZE)
-            .map(|_| generate_random_address(&mut rng))
-            .collect();
-        let existing_accounts_with_storage: Vec<AddressPath> = (0..BATCH_SIZE)
-            .map(|_| generate_random_address(&mut rng))
-            .collect();
+        let existing_addresses: Vec<AddressPath> =
+            (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
+        let new_addresses: Vec<AddressPath> =
+            (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
+        let existing_accounts_with_storage: Vec<AddressPath> =
+            (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
         let mut existing_storage_slots: Vec<(StoragePath, StorageValue)> = Vec::new();
         for address in &existing_accounts_with_storage {
@@ -543,8 +518,7 @@ fn bench_mixed_operations(c: &mut Criterion) {
         // add these storage slots
         let mut tx = db.begin_rw().unwrap();
         for (storage_path, storage_value) in &existing_storage_slots {
-            tx.set_storage_slot(storage_path.clone(), Some(*storage_value))
-                .unwrap();
+            tx.set_storage_slot(storage_path.clone(), Some(*storage_value)).unwrap();
         }
         tx.commit().unwrap();
 
@@ -611,8 +585,7 @@ fn bench_mixed_operations(c: &mut Criterion) {
                             let (storage_path, storage_value) =
                                 new_storage_slots_in_existing_accounts_with_storage[i].clone();
 
-                            tx.set_storage_slot(storage_path, Some(storage_value))
-                                .unwrap();
+                            tx.set_storage_slot(storage_path, Some(storage_value)).unwrap();
                         }
                         6 => {
                             // Update storage
