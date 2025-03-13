@@ -24,6 +24,8 @@ use crate::{
 const EMPTY_ROOT_RLP: [u8; 33] =
     hex!("0xa056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");
 
+/// A node in the trie.
+/// This may be an account leaf, a storage leaf, or a branch.
 #[derive(Debug, Clone, PartialEq, Eq, Arbitrary)]
 pub enum Node {
     AccountLeaf {
@@ -56,6 +58,11 @@ fn arb_u256_rlp() -> impl Strategy<Value = ArrayVec<u8, 33>> {
 }
 
 impl Node {
+    /// Creates a new account leaf or storage leaf [Node] from a [Nibbles] prefix and a [TrieValue].
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the provided prefix is greater than 64 nibbles long.
     pub fn new_leaf(prefix: Nibbles, value: &TrieValue) -> Self {
         assert!(prefix.len() <= 64, "account and storage leaf prefix's must be at most 64 nibbles");
         match value {
@@ -72,7 +79,7 @@ impl Node {
         }
     }
 
-    pub fn new_account_leaf(
+    fn new_account_leaf(
         prefix: Nibbles,
         balance_rlp: ArrayVec<u8, 33>,
         nonce_rlp: ArrayVec<u8, 9>,
@@ -82,14 +89,21 @@ impl Node {
         Self::AccountLeaf { prefix, balance_rlp, nonce_rlp, code_hash, storage_root }
     }
 
-    pub fn new_storage_leaf(prefix: Nibbles, value_rlp: ArrayVec<u8, 33>) -> Self {
+    fn new_storage_leaf(prefix: Nibbles, value_rlp: ArrayVec<u8, 33>) -> Self {
         Self::StorageLeaf { prefix, value_rlp }
     }
 
+    /// Creates a new branch [Node] from a [Nibbles] prefix.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the provided prefix is greater than 64 nibbles long.
     pub fn new_branch(prefix: Nibbles) -> Self {
+        assert!(prefix.len() <= 64, "branch prefix's must be at most 64 nibbles");
         Self::Branch { prefix, children: [const { None }; 16] }
     }
 
+    /// Returns the prefix of the [Node].
     pub fn prefix(&self) -> &Nibbles {
         match self {
             Self::StorageLeaf { prefix, .. } => prefix,
@@ -98,7 +112,13 @@ impl Node {
         }
     }
 
+    /// Sets the prefix of the [Node].
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the provided prefix is greater than 64 nibbles long.
     pub fn set_prefix(&mut self, new_prefix: Nibbles) {
+        assert!(new_prefix.len() <= 64, "prefix's must be at most 64 nibbles");
         match self {
             Self::StorageLeaf { prefix, .. } => *prefix = new_prefix,
             Self::AccountLeaf { prefix, .. } => *prefix = new_prefix,
@@ -106,14 +126,21 @@ impl Node {
         }
     }
 
+    /// Returns whether the [Node] type supports children.
     pub fn has_children(&self) -> bool {
         matches!(self, Self::Branch { .. } | Self::AccountLeaf { .. })
     }
 
+    /// Returns whether the [Node] is a branch.
     pub fn is_branch(&self) -> bool {
         matches!(self, Self::Branch { .. })
     }
 
+    /// Enumerates the children of the [Node].
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the [Node] type does not support children.
     pub fn enumerate_children(&self) -> Vec<(u8, &Pointer)> {
         match self {
             Self::AccountLeaf { storage_root, .. } => [storage_root]
@@ -130,6 +157,11 @@ impl Node {
         }
     }
 
+    /// Returns the child of the [Node] at the given index.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the [Node] is not a branch.
     pub fn child(&self, index: u8) -> Option<&Pointer> {
         match self {
             Self::Branch { children, .. } => children[index as usize].as_ref(),
@@ -137,6 +169,11 @@ impl Node {
         }
     }
 
+    /// Returns the direct child of the [Node].
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the [Node] is not an account leaf.
     pub fn direct_child(&self) -> Option<&Pointer> {
         match self {
             Self::AccountLeaf { storage_root, .. } => storage_root.as_ref(),
@@ -144,6 +181,11 @@ impl Node {
         }
     }
 
+    /// Sets the child of the [Node] at the given index.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the [Node] type does not support children.
     pub fn set_child(&mut self, index: u8, child: Pointer) {
         match self {
             Self::AccountLeaf { storage_root, .. } => *storage_root = Some(child),
@@ -152,6 +194,11 @@ impl Node {
         }
     }
 
+    /// Removes the child of the [Node] at the given index.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the [Node] type does not support children.
     pub fn remove_child(&mut self, index: u8) {
         match self {
             Self::AccountLeaf { storage_root, .. } => *storage_root = None,
@@ -160,6 +207,11 @@ impl Node {
         }
     }
 
+    /// Returns the value of the [Node].
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the [Node] is not a leaf.
     pub fn value(&self) -> TrieValue {
         match self {
             Self::StorageLeaf { value_rlp, .. } => {
@@ -180,10 +232,13 @@ impl Node {
         }
     }
 
+    /// Returns the RLP encoding of the [Node].
+    /// This will typically be a 33 byte prefixed keccak256 hash.
     pub fn rlp_encode(&self) -> RlpNode {
         RlpNode::from_rlp(&encode_fixed_size(self))
     }
 
+    /// Returns the size of the [Node] if a new child were to be added.
     pub fn size_incr_with_new_child(&self) -> usize {
         match self {
             Self::Branch { children, .. } => {
@@ -547,10 +602,12 @@ fn arb_children() -> impl Strategy<Value = [Option<Pointer>; 16]> {
     })
 }
 
+/// The value stored in a [Node].
+/// This can be either an [Account] or a [StorageValue].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrieValue {
-    Storage(StorageValue),
     Account(Account),
+    Storage(StorageValue),
 }
 
 impl From<Account> for TrieValue {

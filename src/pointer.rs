@@ -9,6 +9,8 @@ use alloy_rlp::encode;
 use proptest::prelude::*;
 use proptest_derive::Arbitrary;
 
+/// A pointer to a node in the trie.
+/// This is a wrapper around a [Location] and an [RlpNode].
 #[derive(Debug, Clone, PartialEq, Eq, Arbitrary)]
 pub struct Pointer {
     location: Location,
@@ -17,18 +19,22 @@ pub struct Pointer {
 }
 
 impl Pointer {
+    /// Creates a new [Pointer] from a [Location] and an [RlpNode].
     pub fn new(location: Location, rlp: RlpNode) -> Self {
         Self { location, rlp }
     }
 
+    /// Creates a new [Pointer] from a [Location] with an unhashed [RlpNode].
     pub fn new_unhashed(location: Location) -> Self {
         Self { location, rlp: RlpNode::from_rlp(&[]) }
     }
 
+    /// Returns the [RlpNode] wrapped by the [Pointer].
     pub fn rlp(&self) -> &RlpNode {
         &self.rlp
     }
 
+    /// Returns the [Location] wrapped by the [Pointer].
     pub fn location(&self) -> Location {
         self.location
     }

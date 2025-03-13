@@ -3,7 +3,8 @@ use crate::snapshot::SnapshotId;
 use std::fmt::Debug;
 pub mod mmap;
 
-/// currently we use 4 bytes for page ids, which implies a maximum of 16TB of data.
+/// Type alias for page ids.
+/// Currently we use 4 bytes for page ids, which implies a maximum of 16TB of data.
 pub type PageId = u32;
 
 /// Represents various errors that might arise from page operations.

@@ -1,3 +1,3 @@
-/// TODO: potentially use a a more sophisticated snapshotting mechanism that requires a Snapshot
-/// struct to carry more context.
+/// Type alias for snapshot id.
+/// This represents an auto-incrementing version number for each committed database state.
 pub type SnapshotId = u64;
