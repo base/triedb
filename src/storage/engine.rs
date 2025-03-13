@@ -3253,9 +3253,10 @@ mod tests {
         ));
         let account = create_test_account(100, 1);
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
-                vec![(AddressPath::new(address_nibbles), Some(account.clone()))],
+                vec![(AddressPath::new(address_nibbles).into(), Some(account.clone().into()))]
+                    .as_mut(),
             )
             .unwrap();
         assert_eq!(context.metadata.root_subtrie_page_id, 256);
@@ -3268,7 +3269,10 @@ mod tests {
             "0xf80f21938e5248ec70b870ac1103d0dd01b7811550a7ffffffffffffffffffff"
         ));
         storage_engine
-            .set_accounts(&mut context, vec![(AddressPath::new(address_nibbles), None)])
+            .set_values(
+                &mut context,
+                vec![(AddressPath::new(address_nibbles).into(), None)].as_mut(),
+            )
             .unwrap();
 
         // THEN: the trie should remain unchanged
@@ -3282,9 +3286,10 @@ mod tests {
         // GIVEN: a trie with a branch node
         let address = address!("0xe8da6bf26964af9d7eed9e03e53415d37aa96045"); // first nibble is different, hash should force a branch node
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
-                vec![(AddressPath::for_address(address), Some(account.clone()))],
+                vec![(AddressPath::for_address(address).into(), Some(account.clone().into()))]
+                    .as_mut(),
             )
             .unwrap();
         let root_node_page =
@@ -3297,7 +3302,10 @@ mod tests {
         // WHEN: a non-existent value is deleted from the branch node
         let address = address!("0xf8da6bf26964af9d7eed9e03e53415d37aa96045"); // first nibble is different, hash doesn't exist
         storage_engine
-            .set_accounts(&mut context, vec![(AddressPath::for_address(address), None)])
+            .set_values(
+                &mut context,
+                vec![(AddressPath::for_address(address).into(), None)].as_mut(),
+            )
             .unwrap();
 
         // THEN: the trie should remain unchanged
