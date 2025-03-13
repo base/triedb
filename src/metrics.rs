@@ -31,6 +31,7 @@ struct TransactionMetricsInner {
     pages_split: u32,
 }
 
+// Veryyy long comment Veryyy long comment Veryyy long comment Veryyy long comment Veryyy long comment Veryyy long comment Veryyy long comment Veryyy long comment Veryyy long comment Veryyy long comment
 #[derive(Debug, Default)]
 pub(crate) struct TransactionMetrics {
     inner: RefCell<TransactionMetricsInner>,

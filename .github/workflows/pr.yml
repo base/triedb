@@ -23,7 +23,13 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Format
-      run: cargo fmt --check
+      run: |
+        cargo fmt --all -- --check
+        if [ $? -ne 0 ]; then
+          echo "::error::Formatting check failed. Please run 'cargo fmt' locally and commit the changes."
+          cargo fmt --all -- --check
+          exit 1
+        fi
   
   tests:
     runs-on: ubuntu-latest
