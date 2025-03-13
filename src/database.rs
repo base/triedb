@@ -68,7 +68,7 @@ impl Database<MmapPageManager> {
         // TODO: handle the case where the file already exists.
         let mut page_manager = MmapPageManager::open(file_path).map_err(Error::PageError)?;
         // allocate the first 256 pages for the root, orphans, and root subtrie
-        page_manager.resize(3_000_000).map_err(Error::PageError)?;
+        page_manager.resize(1000).map_err(Error::PageError)?;
         for i in 0..256 {
             let page = page_manager.allocate(0).map_err(Error::PageError)?;
             assert_eq!(page.page_id(), i);
@@ -113,8 +113,9 @@ impl Database<MmapPageManager> {
 
         let storage_engine = StorageEngine::new(page_manager, orphan_manager);
         let database = Database::new(metadata, storage_engine);
-        // add a buffer of 20 pages
-        database.resize(max_page_count + 20).unwrap();
+        // add a buffer of 1000 pages
+        // TODO: make this configurable
+        database.resize(max_page_count + 1000).unwrap();
         Ok(database)
     }
 }
@@ -283,7 +284,7 @@ mod tests {
         let open_size = db.size();
 
         let max_page_size = 255; // fresh db has root pages + reserved orphan pages
-        assert_eq!(open_size, max_page_size + 20);
+        assert_eq!(open_size, max_page_size + 1000);
 
         // cleanup
         tmp_dir.close().unwrap();
@@ -300,7 +301,7 @@ mod tests {
         let mut db = Database::create(file_path.as_str()).unwrap();
         let create_size = db.size();
 
-        assert_eq!(create_size, 3000000);
+        assert_eq!(create_size, 1000);
 
         // WHEN: the database is closed
         db.close().unwrap();
@@ -329,7 +330,7 @@ mod tests {
             let db = Database::create(file_path.as_str()).unwrap();
 
             let create_size = db.size();
-            assert_eq!(create_size, 3_000_000);
+            assert_eq!(create_size, 1000);
         }
 
         // WHEN: the database is dropped from scope
