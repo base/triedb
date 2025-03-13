@@ -36,8 +36,9 @@ impl OrphanPageManager {
 
     // Returns an unlocked orphaned page id, if one exists.
     pub fn get_orphaned_page_id(&mut self) -> Option<PageId> {
-        self.num_orphan_pages_used += 1;
-        self.unlocked_page_ids.pop()
+        self.unlocked_page_ids.pop().inspect(|_| {
+            self.num_orphan_pages_used += 1;
+        })
     }
 
     // Unlocks all pages that were locked as of the given snapshot id.
