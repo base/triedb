@@ -1015,6 +1015,10 @@ impl<P: PageManager> StorageEngine<P> {
 
             // Move the subtrie to the new page
             let cell_index = largest_child_pointer.location().cell_index().expect(
+                // although we dont expect this case to occur in practice, this check is useful during development
+                // to make sure we don't accidentally malform slotted pages. For example, if we explicitly set an
+                // account with an EMPTY_ROOT_HASH as storage root, we may accidentally orphan all of it's storage
+                // trie on the same page, triggering this case to happen.
                 "largest child pointer doesn't exist on the same page. infinite loop detected.",
             );
             // Move all child nodes that are in the current page
