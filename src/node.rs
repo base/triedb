@@ -272,8 +272,8 @@ impl Value for Node {
                 }
 
                 let flags = 1 |
-                    (storage_root.is_some() as u8) << 7 |
-                    ((*code_hash != KECCAK_EMPTY) as u8) << 6;
+                    ((storage_root.is_some() as u8) << 7) |
+                    (((*code_hash != KECCAK_EMPTY) as u8) << 6);
 
                 buf[0] = flags;
                 buf[1] = prefix_length as u8;
