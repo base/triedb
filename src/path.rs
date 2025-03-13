@@ -73,8 +73,4 @@ impl From<StoragePath> for Nibbles {
     fn from(path: StoragePath) -> Self {
         path.full_path()
     }
-
-    pub fn get_address_path(&self) -> &AddressPath {
-        &self.address
-    }
 }
