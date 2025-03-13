@@ -1,9 +1,12 @@
 BASELINE := main
 
-# this will modify files in place
+.PHONY: format
 format:
-	@cargo clippy --fix
-	@cargo fmt
+	@cargo +nightly fmt
+
+.PHONY: lint
+lint:
+	@cargo clippy --fix --allow-dirty
 
 bench-baseline:
 	@cargo bench -- --save-baseline $(shell git rev-parse --abbrev-ref HEAD)

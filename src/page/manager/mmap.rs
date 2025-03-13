@@ -37,22 +37,14 @@ impl MmapPageManager {
         if next_page_id > (mmap.len() / PAGE_SIZE) as u32 {
             panic!("next_page_id is greater than the number of pages in the memory mapped file");
         }
-        Self {
-            mmap,
-            file: Some(file),
-            next_page_id,
-        }
+        Self { mmap, file: Some(file), next_page_id }
     }
 
     // Creates a new MmapPageManager with an anonymous memory mapped file.
     #[cfg(test)]
     pub(crate) fn new_anon(capacity: PageId, next_page_id: PageId) -> Result<Self, PageError> {
         let mmap = MmapMut::map_anon(capacity as usize * PAGE_SIZE).map_err(PageError::IO)?;
-        Ok(Self {
-            mmap,
-            file: None,
-            next_page_id,
-        })
+        Ok(Self { mmap, file: None, next_page_id })
     }
 
     // Returns a mutable reference to the data of the page with the given id.
@@ -108,7 +100,8 @@ impl PageManager for MmapPageManager {
     }
 
     // Resizes the memory mapped file to the given number of pages.
-    // If the file size is reduced, the file is truncated and the next page is is lowered to match the new file size.
+    // If the file size is reduced, the file is truncated and the next page is is lowered to match
+    // the new file size.
     fn resize(&mut self, new_page_count: PageId) -> Result<(), PageError> {
         let old_len = self.mmap.len() as u64;
         let file_len = new_page_count as u64 * PAGE_SIZE as u64;

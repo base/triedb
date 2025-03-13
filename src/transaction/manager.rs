@@ -15,10 +15,7 @@ impl Default for TransactionManager {
 
 impl TransactionManager {
     pub fn new() -> Self {
-        Self {
-            has_writer: false,
-            open_txs: Vec::new(),
-        }
+        Self { has_writer: false, open_txs: Vec::new() }
     }
 
     pub fn begin_rw(&mut self, snapshot_id: SnapshotId) -> Result<SnapshotId, ()> {
