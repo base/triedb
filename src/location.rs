@@ -1,20 +1,30 @@
 use crate::page::PageId;
 use proptest_derive::Arbitrary;
 
+/// A concise representation of a node's location in the trie. This is a wrapper around a u32.
+/// Values less than 256 are refer to cell ids on the same page, while values 256 and greater refer
+/// to the root of another page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Arbitrary)]
 pub struct Location(u32);
 
 impl Location {
+    /// Creates a new [Location] for a page.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the provided [PageId] is less than 256.
     pub fn for_page(page_id: PageId) -> Self {
         assert!(page_id >= 256);
 
         Self(page_id)
     }
 
+    /// Creates a new [Location] for a cell on the same page.
     pub fn for_cell(cell_index: u8) -> Self {
         Self(cell_index as u32)
     }
 
+    /// Returns the [PageId] of the page if the location is for a page, otherwise returns `None`.
     pub fn page_id(&self) -> Option<PageId> {
         if self.0 < 256 {
             None
@@ -23,6 +33,8 @@ impl Location {
         }
     }
 
+    /// Returns the cell index of the cell if the location is for a cell on the same page, otherwise
+    /// returns `None`.
     pub fn cell_index(&self) -> Option<u8> {
         if self.0 >= 256 {
             None

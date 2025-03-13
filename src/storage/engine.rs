@@ -22,6 +22,14 @@ use std::{
 
 use super::value::Value;
 
+/// The [StorageEngine] is responsible for managing the storage of data in the database.
+/// It handles reading and writing account and storage values, as well as managing the lifecycle of
+/// pages.
+///
+/// The storage engine uses a [PageManager] (`P`) to interact with the underlying storage medium,
+/// which could be memory-mapped files, in-memory storage, or other implementations.
+///
+/// All operations are thread-safe through the use of a read-write lock around the inner state.
 #[derive(Debug)]
 pub struct StorageEngine<P: PageManager> {
     inner: Arc<RwLock<Inner<P>>>,
@@ -41,6 +49,7 @@ enum Status {
 }
 
 impl<P: PageManager> StorageEngine<P> {
+    /// Creates a new [StorageEngine] with the given [PageManager] and [OrphanPageManager].
     pub fn new(page_manager: P, orphan_manager: OrphanPageManager) -> Self {
         Self {
             inner: Arc::new(RwLock::new(Inner {
@@ -51,6 +60,7 @@ impl<P: PageManager> StorageEngine<P> {
         }
     }
 
+    /// Unlocks any orphaned pages as of the given [SnapshotId] for reuse.
     pub(crate) fn unlock(&self, snapshot_id: SnapshotId) {
         let mut inner = self.inner.write().unwrap();
 
@@ -61,9 +71,9 @@ impl<P: PageManager> StorageEngine<P> {
         inner.orphan_manager.unlock(snapshot_id);
     }
 
-    // Allocates a new page from the underlying page manager.
-    // If there is an orphaned page available as of the given snapshot id,
-    // it is used to allocate a new page instead.
+    /// Allocates a new page from the underlying page manager.
+    /// If there is an orphaned page available as of the given [SnapshotId],
+    /// it is used to allocate a new page instead.
     fn allocate_page<'p>(&self, context: &mut TransactionContext) -> Result<Page<'p, RW>, Error> {
         let mut inner = self.inner.write().unwrap();
 
@@ -74,9 +84,9 @@ impl<P: PageManager> StorageEngine<P> {
         inner.allocate_page(context)
     }
 
-    // Retrieves a mutable clone of a page from the underlying page manager.
-    // The original page is marked as orphaned and a new page is allocated, potentially from an
-    // orphaned page.
+    /// Retrieves a mutable clone of a [Page] from the underlying [PageManager].
+    /// The original page is marked as orphaned and a new page is allocated, potentially from an
+    /// orphaned page.
     fn get_mut_clone<'p>(
         &self,
         context: &mut TransactionContext,
@@ -102,6 +112,7 @@ impl<P: PageManager> StorageEngine<P> {
         Ok(new_page)
     }
 
+    /// Retrieves a read-only [Page] from the underlying [PageManager].
     fn get_page<'p>(
         &self,
         context: &TransactionContext,
@@ -116,6 +127,7 @@ impl<P: PageManager> StorageEngine<P> {
         inner.get_page(context, page_id)
     }
 
+    /// Retrieves a mutable [Page] from the underlying [PageManager].
     #[cfg(test)]
     fn get_mut_page<'p>(
         &self,
@@ -131,6 +143,8 @@ impl<P: PageManager> StorageEngine<P> {
         inner.get_page_mut(context, page_id)
     }
 
+    /// Retrieves an [Account] from the storage engine, identified by the given [AddressPath].
+    /// Returns [None] if the path is not found.
     pub fn get_account(
         &self,
         context: &TransactionContext,
@@ -149,6 +163,28 @@ impl<P: PageManager> StorageEngine<P> {
         }
     }
 
+    /// Retrieves a [StorageValue] from the storage engine, identified by the given [StoragePath].
+    /// Returns [None] if the path is not found.
+    pub fn get_storage(
+        &self,
+        context: &TransactionContext,
+        storage_path: StoragePath,
+    ) -> Result<Option<StorageValue>, Error> {
+        if context.metadata.root_subtrie_page_id == 0 {
+            return Ok(None);
+        }
+
+        let page = self.get_page(context, context.metadata.root_subtrie_page_id)?;
+        let slotted_page = SlottedPage::try_from(page)?;
+
+        match self.get_value_from_page(context, storage_path.full_path(), slotted_page, 0)? {
+            Some(TrieValue::Storage(storage_value)) => Ok(Some(storage_value)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Retrieves a [TrieValue] from the given page or any of its descendants.
+    /// Returns [None] if the path is not found.
     fn get_value_from_page(
         &self,
         context: &TransactionContext,
@@ -198,36 +234,6 @@ impl<P: PageManager> StorageEngine<P> {
             }
             None => Ok(None),
         }
-    }
-
-    pub fn set_accounts(
-        &self,
-        context: &mut TransactionContext,
-        account_changes: impl IntoIterator<Item = (AddressPath, Option<Account>)>,
-    ) -> Result<(), Error> {
-        self.set_values(
-            context,
-            account_changes
-                .into_iter()
-                .map(|(path, value)| (path.into(), value.map(TrieValue::Account)))
-                .collect::<Vec<(Nibbles, Option<TrieValue>)>>()
-                .as_mut(),
-        )
-    }
-
-    pub fn set_storage(
-        &self,
-        context: &mut TransactionContext,
-        storage_changes: impl IntoIterator<Item = (StoragePath, Option<StorageValue>)>,
-    ) -> Result<(), Error> {
-        self.set_values(
-            context,
-            storage_changes
-                .into_iter()
-                .map(|(path, value)| (path.full_path(), value.map(TrieValue::Storage)))
-                .collect::<Vec<(Nibbles, Option<TrieValue>)>>()
-                .as_mut(),
-        )
     }
 
     pub fn set_values(
@@ -992,7 +998,7 @@ impl<P: PageManager> StorageEngine<P> {
         )))
     }
 
-    /// Handles merging a branch with a child on a different page
+    // Handles merging a branch with a child on a different page
     fn merge_with_child_on_different_page(
         &self,
         context: &mut TransactionContext,
@@ -1141,6 +1147,8 @@ impl<P: PageManager> StorageEngine<P> {
         Ok(self.node_location(target_page.page_id(), new_index))
     }
 
+    // Recursively deletes a subtrie from the page, orphaning any pages that become fully
+    // unreferenced as a result.
     fn delete_subtrie(
         &self,
         context: &mut TransactionContext,
@@ -1179,6 +1187,8 @@ impl<P: PageManager> StorageEngine<P> {
         Ok(())
     }
 
+    // Orphans a subtrie from the page, orphaning any pages that become fully unreferenced as a
+    // result.
     fn orphan_subtrie(&self, context: &mut TransactionContext, page_id: u32) -> Result<(), Error> {
         let page = self.get_page(context, page_id)?;
         let slotted_page = SlottedPage::try_from(page)?;
@@ -1233,24 +1243,7 @@ impl<P: PageManager> StorageEngine<P> {
         Ok(())
     }
 
-    pub fn get_storage(
-        &self,
-        context: &TransactionContext,
-        storage_path: StoragePath,
-    ) -> Result<Option<StorageValue>, Error> {
-        if context.metadata.root_subtrie_page_id == 0 {
-            return Ok(None);
-        }
-
-        let page = self.get_page(context, context.metadata.root_subtrie_page_id)?;
-        let slotted_page = SlottedPage::try_from(page)?;
-
-        match self.get_value_from_page(context, storage_path.full_path(), slotted_page, 0)? {
-            Some(TrieValue::Storage(storage_value)) => Ok(Some(storage_value)),
-            _ => Ok(None),
-        }
-    }
-
+    /// Commits all outstanding data to disk.
     pub fn commit(&self, context: &TransactionContext) -> Result<(), Error> {
         let mut inner = self.inner.write().unwrap();
 
@@ -1261,6 +1254,7 @@ impl<P: PageManager> StorageEngine<P> {
         inner.commit(context)
     }
 
+    /// Rolls back all outstanding data to disk. Currently unimplemented.
     pub fn rollback(&self, _context: &TransactionContext) -> Result<(), Error> {
         Ok(())
     }
@@ -1302,7 +1296,7 @@ impl<P: PageManager> StorageEngine<P> {
         Ok(())
     }
 
-    // Resizes the storage engine to the given page count.
+    /// Resizes the storage engine to the given number of pages.
     pub(crate) fn resize(&mut self, new_page_count: PageId) -> Result<(), Error> {
         let mut inner = self.inner.write().unwrap();
 
@@ -1313,11 +1307,13 @@ impl<P: PageManager> StorageEngine<P> {
         inner.resize(new_page_count)
     }
 
+    /// Returns the total number of pages in the storage engine.
     pub fn size(&self) -> u32 {
         let inner = self.inner.read().unwrap();
         inner.page_manager.size()
     }
 
+    /// Closes the storage engine and commits all outstanding data to disk.
     pub fn close(&self, context: &TransactionContext) -> Result<(), Error> {
         let mut inner = self.inner.write().unwrap();
 
@@ -1618,9 +1614,10 @@ mod tests {
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
-                vec![(AddressPath::for_address(address), Some(account.clone()))],
+                vec![(AddressPath::for_address(address).into(), Some(account.clone().into()))]
+                    .as_mut(),
             )
             .unwrap();
         assert_eq!(context.metadata.root_subtrie_page_id, 256);
@@ -1646,7 +1643,12 @@ mod tests {
             let read_account = storage_engine.get_account(&context, path.clone()).unwrap();
             assert_eq!(read_account, None);
 
-            storage_engine.set_accounts(&mut context, vec![(path, Some(account.clone()))]).unwrap();
+            storage_engine
+                .set_values(
+                    &mut context,
+                    vec![(path.into(), Some(account.clone().into()))].as_mut(),
+                )
+                .unwrap();
         }
 
         // Verify all accounts exist after insertion
@@ -1670,9 +1672,13 @@ mod tests {
         let path2 = AddressPath::for_address(address2);
 
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
-                vec![(path1, Some(account1.clone())), (path2, Some(account2.clone()))],
+                vec![
+                    (path1.into(), Some(account1.clone().into())),
+                    (path2.into(), Some(account2.clone().into())),
+                ]
+                .as_mut(),
             )
             .unwrap();
         assert_metrics(&context, 1, 1, 0, 0);
@@ -1701,9 +1707,14 @@ mod tests {
         let path3 = AddressPath::for_address(address3);
 
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
-                vec![(path1, Some(account1)), (path2, Some(account2)), (path3, Some(account3))],
+                vec![
+                    (path1.into(), Some(account1.into())),
+                    (path2.into(), Some(account2.into())),
+                    (path3.into(), Some(account3.into())),
+                ]
+                .as_mut(),
             )
             .unwrap();
         assert_metrics(&context, 1, 1, 0, 0);
@@ -1838,21 +1849,26 @@ mod tests {
         accounts.shuffle(&mut rng);
         for (address, _, mut storage) in accounts.clone() {
             storage_engine
-                .set_accounts(
+                .set_values(
                     &mut context,
-                    vec![(AddressPath::for_address(address), Some(random_test_account(&mut rng)))],
+                    vec![(
+                        AddressPath::for_address(address).into(),
+                        Some(random_test_account(&mut rng).into()),
+                    )]
+                    .as_mut(),
                 )
                 .unwrap();
 
             storage.shuffle(&mut rng);
             for (slot, _) in storage {
                 storage_engine
-                    .set_storage(
+                    .set_values(
                         &mut context,
                         vec![(
-                            StoragePath::for_address_and_slot(address, slot),
-                            Some(StorageValue::from(rng.next_u64())),
-                        )],
+                            StoragePath::for_address_and_slot(address, slot).into(),
+                            Some(StorageValue::from(rng.next_u64()).into()),
+                        )]
+                        .as_mut(),
                     )
                     .unwrap();
             }
@@ -1861,18 +1877,22 @@ mod tests {
         accounts.shuffle(&mut rng);
         for (address, account, mut storage) in accounts.clone() {
             storage_engine
-                .set_accounts(
+                .set_values(
                     &mut context,
-                    vec![(AddressPath::for_address(address), Some(account))],
+                    vec![(AddressPath::for_address(address).into(), Some(account.into()))].as_mut(),
                 )
                 .unwrap();
 
             storage.shuffle(&mut rng);
             for (slot, value) in storage {
                 storage_engine
-                    .set_storage(
+                    .set_values(
                         &mut context,
-                        vec![(StoragePath::for_address_and_slot(address, slot), Some(value))],
+                        vec![(
+                            StoragePath::for_address_and_slot(address, slot).into(),
+                            Some(value.into()),
+                        )]
+                        .as_mut(),
                     )
                     .unwrap();
             }
@@ -1917,7 +1937,12 @@ mod tests {
         // Insert all accounts
         for (nibbles, account) in test_accounts.iter() {
             let path = AddressPath::new(Nibbles::from_nibbles(*nibbles));
-            storage_engine.set_accounts(&mut context, vec![(path, Some(account.clone()))]).unwrap();
+            storage_engine
+                .set_values(
+                    &mut context,
+                    vec![(path.into(), Some(account.clone().into()))].as_mut(),
+                )
+                .unwrap();
         }
 
         // Verify all accounts exist
@@ -1943,7 +1968,12 @@ mod tests {
         // Insert accounts
         for (nibbles, account) in test_accounts.iter() {
             let path = AddressPath::new(Nibbles::from_nibbles(*nibbles));
-            storage_engine.set_accounts(&mut context, vec![(path, Some(account.clone()))]).unwrap();
+            storage_engine
+                .set_values(
+                    &mut context,
+                    vec![(path.into(), Some(account.clone().into()))].as_mut(),
+                )
+                .unwrap();
         }
 
         // Split the page
@@ -1967,7 +1997,10 @@ mod tests {
             let path = address_path_for_idx(i);
             let account = create_test_account(i, i);
             storage_engine
-                .set_accounts(&mut context, vec![(path.clone(), Some(account.clone()))])
+                .set_values(
+                    &mut context,
+                    vec![(path.clone().into(), Some(account.clone().into()))].as_mut(),
+                )
                 .unwrap();
 
             context.metadata.snapshot_id += 1;
@@ -1996,7 +2029,10 @@ mod tests {
         let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
         storage_engine
-            .set_storage(&mut context, vec![(storage_path, Some(storage_value))])
+            .set_values(
+                &mut context,
+                vec![(storage_path.into(), Some(storage_value.into()))].as_mut(),
+            )
             .unwrap();
     }
 
@@ -2007,9 +2043,10 @@ mod tests {
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
-                vec![(AddressPath::for_address(address), Some(account.clone()))],
+                vec![(AddressPath::for_address(address).into(), Some(account.clone().into()))]
+                    .as_mut(),
             )
             .unwrap();
         assert_eq!(context.metadata.root_subtrie_page_id, 256);
@@ -2044,15 +2081,18 @@ mod tests {
                 storage_engine.get_storage(&context, storage_path.clone()).unwrap();
             assert_eq!(read_storage_slot, None);
         }
-
         storage_engine
-            .set_storage(
+            .set_values(
                 &mut context,
-                test_cases.iter().map(|(key, value)| {
-                    let storage_path = StoragePath::for_address_and_slot(address, *key);
-                    let storage_value = StorageValue::from_be_slice(value.as_slice());
-                    (storage_path, Some(storage_value))
-                }),
+                test_cases
+                    .iter()
+                    .map(|(key, value)| {
+                        let storage_path = StoragePath::for_address_and_slot(address, *key);
+                        let storage_value = StorageValue::from_be_slice(value.as_slice());
+                        (storage_path.into(), Some(storage_value.into()))
+                    })
+                    .collect::<Vec<(Nibbles, Option<TrieValue>)>>()
+                    .as_mut(),
             )
             .unwrap();
         context.metadata = context.metadata.next();
@@ -2073,9 +2113,10 @@ mod tests {
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
-                vec![(AddressPath::for_address(address), Some(account.clone()))],
+                vec![(AddressPath::for_address(address).into(), Some(account.clone().into()))]
+                    .as_mut(),
             )
             .unwrap();
         assert_eq!(context.metadata.root_subtrie_page_id, 256);
@@ -2114,7 +2155,10 @@ mod tests {
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             storage_engine
-                .set_storage(&mut context, vec![(storage_path, Some(storage_value))])
+                .set_values(
+                    &mut context,
+                    vec![(storage_path.into(), Some(storage_value.into()))].as_mut(),
+                )
                 .unwrap();
 
             context.metadata = context.metadata.next();
@@ -2144,7 +2188,10 @@ mod tests {
             let path = AddressPath::for_address(address);
             let account = create_test_account(i, i);
             storage_engine
-                .set_accounts(&mut context, vec![(path.clone(), Some(account.clone()))])
+                .set_values(
+                    &mut context,
+                    vec![(path.into(), Some(account.clone().into()))].as_mut(),
+                )
                 .unwrap();
 
             context.metadata.snapshot_id += 1;
@@ -2161,9 +2208,10 @@ mod tests {
 
                 let storage_path = StoragePath::for_address_and_slot(address, storage_slot_key);
                 storage_engine
-                    .set_storage(
+                    .set_values(
                         &mut context,
-                        vec![(storage_path.clone(), Some(storage_slot_value))],
+                        vec![(storage_path.clone().into(), Some(storage_slot_value.into()))]
+                            .as_mut(),
                     )
                     .unwrap();
 
@@ -2263,7 +2311,10 @@ mod tests {
         // Insert all accounts
         for (path, account) in &accounts {
             storage_engine
-                .set_accounts(&mut context, vec![(path.clone(), Some(account.clone()))])
+                .set_values(
+                    &mut context,
+                    vec![(path.clone().into(), Some(account.clone().into()))].as_mut(),
+                )
                 .unwrap();
         }
 
@@ -2326,11 +2377,13 @@ mod tests {
 
         // Insert additional accounts
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
                 additional_accounts
                     .iter()
-                    .map(|(path, account)| (path.clone(), Some(account.clone()))),
+                    .map(|(path, account)| (path.clone().into(), Some(account.clone().into())))
+                    .collect::<Vec<(Nibbles, Option<TrieValue>)>>()
+                    .as_mut(),
             )
             .unwrap();
 
@@ -2381,9 +2434,14 @@ mod tests {
 
         // Insert all accounts
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
-                accounts.clone().into_iter().map(|(path, account)| (path, Some(account))),
+                accounts
+                    .clone()
+                    .into_iter()
+                    .map(|(path, account)| (path.into(), Some(account.into())))
+                    .collect::<Vec<(Nibbles, Option<TrieValue>)>>()
+                    .as_mut(),
             )
             .unwrap();
 
@@ -2452,7 +2510,10 @@ mod tests {
         for (idx, path, new_account) in &updates {
             // Update in the trie
             storage_engine
-                .set_accounts(&mut context, vec![(path.clone(), Some(new_account.clone()))])
+                .set_values(
+                    &mut context,
+                    vec![(path.clone().into(), Some(new_account.clone().into()))].as_mut(),
+                )
                 .unwrap();
 
             // Update in our test data
@@ -2477,9 +2538,10 @@ mod tests {
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
-                vec![(AddressPath::for_address(address), Some(account.clone()))],
+                vec![(AddressPath::for_address(address).into(), Some(account.clone().into()))]
+                    .as_mut(),
             )
             .unwrap();
         assert_metrics(&context, 0, 1, 0, 0);
@@ -2492,7 +2554,10 @@ mod tests {
         // Reset the context metrics
         let mut context = TransactionContext::new(context.metadata);
         storage_engine
-            .set_accounts(&mut context, vec![(AddressPath::for_address(address), None)])
+            .set_values(
+                &mut context,
+                vec![(AddressPath::for_address(address).into(), None)].as_mut(),
+            )
             .unwrap();
         assert_metrics(&context, 2, 0, 0, 0);
 
@@ -2509,9 +2574,10 @@ mod tests {
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
-                vec![(AddressPath::for_address(address), Some(account.clone()))],
+                vec![(AddressPath::for_address(address).into(), Some(account.clone().into()))]
+                    .as_mut(),
             )
             .unwrap();
         assert_eq!(context.metadata.root_subtrie_page_id, 256);
@@ -2536,7 +2602,12 @@ mod tests {
             let read_account = storage_engine.get_account(&context, path.clone()).unwrap();
             assert_eq!(read_account, None);
 
-            storage_engine.set_accounts(&mut context, vec![(path, Some(account.clone()))]).unwrap();
+            storage_engine
+                .set_values(
+                    &mut context,
+                    vec![(path.into(), Some(account.clone().into()))].as_mut(),
+                )
+                .unwrap();
         }
 
         // Verify all accounts exist after insertion
@@ -2549,7 +2620,10 @@ mod tests {
         // Delete all accounts
         for (address, _) in &test_cases {
             storage_engine
-                .set_accounts(&mut context, vec![(AddressPath::for_address(*address), None)])
+                .set_values(
+                    &mut context,
+                    vec![(AddressPath::for_address(*address).into(), None)].as_mut(),
+                )
                 .unwrap();
         }
 
@@ -2568,9 +2642,10 @@ mod tests {
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
-                vec![(AddressPath::for_address(address), Some(account.clone()))],
+                vec![(AddressPath::for_address(address).into(), Some(account.clone().into()))]
+                    .as_mut(),
             )
             .unwrap();
         assert_eq!(context.metadata.root_subtrie_page_id, 256);
@@ -2595,7 +2670,12 @@ mod tests {
             let read_account = storage_engine.get_account(&context, path.clone()).unwrap();
             assert_eq!(read_account, None);
 
-            storage_engine.set_accounts(&mut context, vec![(path, Some(account.clone()))]).unwrap();
+            storage_engine
+                .set_values(
+                    &mut context,
+                    vec![(path.into(), Some(account.clone().into()))].as_mut(),
+                )
+                .unwrap();
         }
 
         // Verify all accounts exist after insertion
@@ -2608,7 +2688,10 @@ mod tests {
         // Delete only a portion of the accounts
         for (address, _) in &test_cases[0..2] {
             storage_engine
-                .set_accounts(&mut context, vec![(AddressPath::for_address(*address), None)])
+                .set_values(
+                    &mut context,
+                    vec![(AddressPath::for_address(*address).into(), None)].as_mut(),
+                )
                 .unwrap();
         }
 
@@ -2634,9 +2717,10 @@ mod tests {
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
-                vec![(AddressPath::for_address(address), Some(account.clone()))],
+                vec![(AddressPath::for_address(address).into(), Some(account.clone().into()))]
+                    .as_mut(),
             )
             .unwrap();
         assert_eq!(context.metadata.root_subtrie_page_id, 256);
@@ -2675,7 +2759,10 @@ mod tests {
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             storage_engine
-                .set_storage(&mut context, vec![(storage_path, Some(storage_value))])
+                .set_values(
+                    &mut context,
+                    vec![(storage_path.into(), Some(storage_value.into()))].as_mut(),
+                )
                 .unwrap();
 
             context = TransactionContext::new(context.metadata.next());
@@ -2712,7 +2799,9 @@ mod tests {
         for (storage_key, _) in &test_cases {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
-            storage_engine.set_storage(&mut context, vec![(storage_path.clone(), None)]).unwrap();
+            storage_engine
+                .set_values(&mut context, vec![(storage_path.clone().into(), None)].as_mut())
+                .unwrap();
 
             let read_storage_slot =
                 storage_engine.get_storage(&context, storage_path.clone()).unwrap();
@@ -2738,9 +2827,10 @@ mod tests {
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
-                vec![(AddressPath::for_address(address), Some(account.clone()))],
+                vec![(AddressPath::for_address(address).into(), Some(account.clone().into()))]
+                    .as_mut(),
             )
             .unwrap();
         assert_eq!(context.metadata.root_subtrie_page_id, 256);
@@ -2779,7 +2869,10 @@ mod tests {
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             storage_engine
-                .set_storage(&mut context, vec![(storage_path, Some(storage_value))])
+                .set_values(
+                    &mut context,
+                    vec![(storage_path.into(), Some(storage_value.into()))].as_mut(),
+                )
                 .unwrap();
 
             context = TransactionContext::new(context.metadata.next());
@@ -2798,7 +2891,10 @@ mod tests {
 
         // Delete the account
         storage_engine
-            .set_accounts(&mut context, vec![(AddressPath::for_address(address), None)])
+            .set_values(
+                &mut context,
+                vec![(AddressPath::for_address(address).into(), None)].as_mut(),
+            )
             .unwrap();
 
         // Verify the account no longer exists
@@ -2815,9 +2911,10 @@ mod tests {
 
         // Now create a new account with the same address again and set storage
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
-                vec![(AddressPath::for_address(address), Some(account.clone()))],
+                vec![(AddressPath::for_address(address).into(), Some(account.clone().into()))]
+                    .as_mut(),
             )
             .unwrap();
 
@@ -2843,23 +2940,25 @@ mod tests {
 
         let account1 = create_test_account(100, 1);
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
                 vec![(
-                    AddressPath::new(Nibbles::from_nibbles(account_1_nibbles)),
-                    Some(account1.clone()),
-                )],
+                    AddressPath::new(Nibbles::from_nibbles(account_1_nibbles)).into(),
+                    Some(account1.clone().into()),
+                )]
+                .as_mut(),
             )
             .unwrap();
 
         let account2 = create_test_account(101, 2);
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
                 vec![(
-                    AddressPath::new(Nibbles::from_nibbles(account_2_nibbles)),
-                    Some(account2.clone()),
-                )],
+                    AddressPath::new(Nibbles::from_nibbles(account_2_nibbles)).into(),
+                    Some(account2.clone().into()),
+                )]
+                .as_mut(),
             )
             .unwrap();
         assert_eq!(context.metadata.root_subtrie_page_id, 256);
@@ -2872,9 +2971,10 @@ mod tests {
 
         // WHEN: one of these accounts is deleted
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
-                vec![(AddressPath::new(Nibbles::from_nibbles(account_1_nibbles)), None)],
+                vec![(AddressPath::new(Nibbles::from_nibbles(account_1_nibbles)).into(), None)]
+                    .as_mut(),
             )
             .unwrap();
 
@@ -2915,23 +3015,25 @@ mod tests {
 
         let account1 = create_test_account(100, 1);
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
                 vec![(
-                    AddressPath::new(Nibbles::from_nibbles(account_1_nibbles)),
-                    Some(account1.clone()),
-                )],
+                    AddressPath::new(Nibbles::from_nibbles(account_1_nibbles)).into(),
+                    Some(account1.clone().into()),
+                )]
+                .as_mut(),
             )
             .unwrap();
 
         let account2 = create_test_account(101, 2);
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
                 vec![(
-                    AddressPath::new(Nibbles::from_nibbles(account_2_nibbles)),
-                    Some(account2.clone()),
-                )],
+                    AddressPath::new(Nibbles::from_nibbles(account_2_nibbles)).into(),
+                    Some(account2.clone().into()),
+                )]
+                .as_mut(),
             )
             .unwrap();
         assert_eq!(context.metadata.root_subtrie_page_id, 256);
@@ -3016,7 +3118,7 @@ mod tests {
         // WHEN: child 1 is deleted
         let child_1_path = Nibbles::from_nibbles(child_1_full_path);
         storage_engine
-            .set_accounts(&mut context, vec![(AddressPath::new(child_1_path), None)])
+            .set_values(&mut context, vec![(AddressPath::new(child_1_path).into(), None)].as_mut())
             .unwrap();
 
         // THEN: the branch node should be deleted and the root node should go to child 2 leaf at
@@ -3115,7 +3217,10 @@ mod tests {
 
         // WHEN: child 1 is deleted
         storage_engine
-            .set_accounts(&mut context, vec![(AddressPath::new(child_1_nibbles.clone()), None)])
+            .set_values(
+                &mut context,
+                vec![(AddressPath::new(child_1_nibbles.clone()).into(), None)].as_mut(),
+            )
             .unwrap();
 
         // THEN: the root branch node should be deleted and the root node should be the leaf of
@@ -3149,9 +3254,10 @@ mod tests {
         ));
         let account = create_test_account(100, 1);
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
-                vec![(AddressPath::new(address_nibbles), Some(account.clone()))],
+                vec![(AddressPath::new(address_nibbles).into(), Some(account.clone().into()))]
+                    .as_mut(),
             )
             .unwrap();
         assert_eq!(context.metadata.root_subtrie_page_id, 256);
@@ -3164,7 +3270,10 @@ mod tests {
             "0xf80f21938e5248ec70b870ac1103d0dd01b7811550a7ffffffffffffffffffff"
         ));
         storage_engine
-            .set_accounts(&mut context, vec![(AddressPath::new(address_nibbles), None)])
+            .set_values(
+                &mut context,
+                vec![(AddressPath::new(address_nibbles).into(), None)].as_mut(),
+            )
             .unwrap();
 
         // THEN: the trie should remain unchanged
@@ -3178,9 +3287,10 @@ mod tests {
         // GIVEN: a trie with a branch node
         let address = address!("0xe8da6bf26964af9d7eed9e03e53415d37aa96045"); // first nibble is different, hash should force a branch node
         storage_engine
-            .set_accounts(
+            .set_values(
                 &mut context,
-                vec![(AddressPath::for_address(address), Some(account.clone()))],
+                vec![(AddressPath::for_address(address).into(), Some(account.clone().into()))]
+                    .as_mut(),
             )
             .unwrap();
         let root_node_page =
@@ -3193,7 +3303,10 @@ mod tests {
         // WHEN: a non-existent value is deleted from the branch node
         let address = address!("0xf8da6bf26964af9d7eed9e03e53415d37aa96045"); // first nibble is different, hash doesn't exist
         storage_engine
-            .set_accounts(&mut context, vec![(AddressPath::for_address(address), None)])
+            .set_values(
+                &mut context,
+                vec![(AddressPath::for_address(address).into(), None)].as_mut(),
+            )
             .unwrap();
 
         // THEN: the trie should remain unchanged
@@ -3228,7 +3341,7 @@ mod tests {
 
             for (address, account) in &accounts {
                 storage_engine
-                    .set_accounts(&mut context, vec![(AddressPath::for_address(*address), Some(account.clone()))])
+                    .set_values(&mut context, vec![(AddressPath::for_address(*address).into(), Some(account.clone().into()))].as_mut())
                     .unwrap();
             }
 
