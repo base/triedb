@@ -553,6 +553,18 @@ pub enum TrieValue {
     Account(Account),
 }
 
+impl From<Account> for TrieValue {
+    fn from(val: Account) -> Self {
+        TrieValue::Account(val)
+    }
+}
+
+impl From<StorageValue> for TrieValue {
+    fn from(val: StorageValue) -> Self {
+        TrieValue::Storage(val)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{b256, hex, B256, U256};

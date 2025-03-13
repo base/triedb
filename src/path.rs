@@ -48,3 +48,9 @@ impl StoragePath {
         self.slot.clone()
     }
 }
+
+impl From<StoragePath> for Nibbles {
+    fn from(path: StoragePath) -> Self {
+        path.full_path()
+    }
+}
