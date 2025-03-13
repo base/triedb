@@ -3273,12 +3273,14 @@ mod tests {
         let (storage_engine, mut context) = create_test_engine(300);
 
         // GIVEN: a trie with a single account
-        let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
+        let address_nibbles = Nibbles::unpack(hex!(
+            "0xf80f21938e5248ec70b870ac1103d0dd01b7811550a7a5c971e1c3e85ea62492"
+        ));
         let account = create_test_account(100, 1);
         storage_engine
             .set_accounts(
                 &mut context,
-                vec![(AddressPath::for_address(address), Some(account.clone()))],
+                vec![(AddressPath::new(address_nibbles), Some(account.clone()))],
             )
             .unwrap();
         assert_eq!(context.metadata.root_subtrie_page_id, 256);
@@ -3288,11 +3290,13 @@ mod tests {
         let root_subtrie_contents_before = root_subtrie_page.contents().to_vec();
 
         // WHEN: an account with a similiar but divergent path is deleted
-        let address = address!("0xd8da6bf26964af9d7eed9e03ffffffffffffffff");
+        let address_nibbles = Nibbles::unpack(hex!(
+            "0xf80f21938e5248ec70b870ac1103d0dd01b7811550a7ffffffffffffffffffff"
+        ));
         storage_engine
             .set_accounts(
                 &mut context,
-                vec![(AddressPath::for_address(address), None)],
+                vec![(AddressPath::new(address_nibbles), None)],
             )
             .unwrap();
 
