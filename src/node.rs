@@ -19,7 +19,8 @@ use crate::{
     storage::value::{self, Value},
 };
 
-// This is equivalent to RlpNode::word_rlp(&EMPTY_ROOT_HASH), and is used to encode the storage root of an account with no storage.
+// This is equivalent to RlpNode::word_rlp(&EMPTY_ROOT_HASH), and is used to encode the storage root
+// of an account with no storage.
 const EMPTY_ROOT_RLP: [u8; 33] =
     hex!("0xa056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");
 
@@ -221,8 +222,8 @@ impl Node {
 }
 
 // This is the maximum possible RLP-encoded length of a node.
-// This value is derived from the maximum possible length of a branch node, which is the largest case.
-// A branch node is encoded as a list of 17 elements, including 16 children and an empty list.
+// This value is derived from the maximum possible length of a branch node, which is the largest
+// case. A branch node is encoded as a list of 17 elements, including 16 children and an empty list.
 // Each child is encoded with up to 33 bytes, and the empty list adds 1 byte.
 // Another 3 bytes are required to encode the list itself.
 // The total length is 3 + 16*33 + 1 = 532.
@@ -243,17 +244,21 @@ impl Value for Node {
                 code_hash,
             } => {
                 let packed_prefix_length = (prefix.len() + 1) / 2;
-                2 + packed_prefix_length
-                    + balance_rlp.len()
-                    + nonce_rlp.len()
-                    + storage_root.is_some() as usize * 37
-                    + (*code_hash != KECCAK_EMPTY) as usize * 32 // 2 bytes for flags and prefix length
+                2 + packed_prefix_length +
+                    balance_rlp.len() +
+                    nonce_rlp.len() +
+                    storage_root.is_some() as usize * 37 +
+                    (*code_hash != KECCAK_EMPTY) as usize * 32 // 2 bytes for flags and prefix
+                                                               // length
             }
             Self::Branch { prefix, children } => {
                 let (_, children_slot_size) = Self::children_slot_size(children);
 
                 let packed_prefix_length = (prefix.len() + 1) / 2;
-                2 + packed_prefix_length + 2 + children_slot_size * 37 // 2 bytes for type and prefix length, 2 for bitmask, 37 for each child pointer
+                2 + packed_prefix_length + 2 + children_slot_size * 37 // 2 bytes for type and
+                                                                       // prefix length, 2 for
+                                                                       // bitmask, 37 for each child
+                                                                       // pointer
             }
         }
     }
@@ -284,19 +289,19 @@ impl Value for Node {
             } => {
                 let prefix_length = prefix.len();
                 let packed_prefix_length = (prefix.len() + 1) / 2;
-                let total_size = 2
-                    + packed_prefix_length
-                    + balance_rlp.len()
-                    + nonce_rlp.len()
-                    + storage_root.is_some() as usize * 37
-                    + (*code_hash != KECCAK_EMPTY) as usize * 32;
+                let total_size = 2 +
+                    packed_prefix_length +
+                    balance_rlp.len() +
+                    nonce_rlp.len() +
+                    storage_root.is_some() as usize * 37 +
+                    (*code_hash != KECCAK_EMPTY) as usize * 32;
                 if buf.len() < total_size {
                     return Err(value::Error::InvalidEncoding);
                 }
 
-                let flags = 1
-                    | (storage_root.is_some() as u8) << 7
-                    | ((*code_hash != KECCAK_EMPTY) as u8) << 6;
+                let flags = 1 |
+                    (storage_root.is_some() as u8) << 7 |
+                    ((*code_hash != KECCAK_EMPTY) as u8) << 6;
 
                 buf[0] = flags;
                 buf[1] = prefix_length as u8;
@@ -484,7 +489,8 @@ impl Encodable for Node {
                 code_hash,
                 storage_root,
             } => {
-                let mut buf = [0u8; 110]; // max RLP length for an account: 2 bytes for list length, 9 for nonce, 33 for balance, 33 for storage root, 33 for code hash
+                let mut buf = [0u8; 110]; // max RLP length for an account: 2 bytes for list length, 9 for nonce, 33 for
+                                          // balance, 33 for storage root, 33 for code hash
                 let mut value_rlp = buf.as_mut();
                 let storage_root_rlp = storage_root
                     .as_ref()
@@ -508,7 +514,8 @@ impl Encodable for Node {
                 if prefix.is_empty() {
                     encode_branch(children, out);
                 } else {
-                    let mut buf = [0u8; 3 + 33 * 16 + 1]; // max RLP length for a branch: 3 bytes for the list length, 33 bytes for each of the 16 children, 1 byte for the empty 17th slot
+                    let mut buf = [0u8; 3 + 33 * 16 + 1]; // max RLP length for a branch: 3 bytes for the list length, 33 bytes for each
+                                                          // of the 16 children, 1 byte for the empty 17th slot
                     let mut branch_rlp = buf.as_mut();
 
                     let branch_rlp_length = encode_branch(children, &mut branch_rlp);
@@ -677,7 +684,8 @@ mod tests {
             );
         }
         let size = node.size();
-        assert_eq!(size, 2 + 2 + 37 * 16); // 2 bytes for type and prefix length, 2 for bitmask, 37 for each 16 children pointers
+        assert_eq!(size, 2 + 2 + 37 * 16); // 2 bytes for type and prefix length, 2 for bitmask, 37
+                                           // for each 16 children pointers
     }
 
     #[test]

@@ -108,7 +108,8 @@ impl PageManager for MmapPageManager {
     }
 
     // Resizes the memory mapped file to the given number of pages.
-    // If the file size is reduced, the file is truncated and the next page is is lowered to match the new file size.
+    // If the file size is reduced, the file is truncated and the next page is is lowered to match
+    // the new file size.
     fn resize(&mut self, new_page_count: PageId) -> Result<(), PageError> {
         let old_len = self.mmap.len() as u64;
         let file_len = new_page_count as u64 * PAGE_SIZE as u64;

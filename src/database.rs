@@ -258,7 +258,8 @@ mod tests {
         let ro_tx = db.begin_ro().unwrap();
         tx.commit().unwrap();
 
-        // The read transaction was created before the write was committed, so it should not see the changes.
+        // The read transaction was created before the write was committed, so it should not see the
+        // changes.
         let read_account = ro_tx
             .get_account(AddressPath::for_address(address))
             .unwrap();

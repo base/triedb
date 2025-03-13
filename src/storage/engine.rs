@@ -74,7 +74,8 @@ impl<P: PageManager> StorageEngine<P> {
     }
 
     // Retrieves a mutable clone of a page from the underlying page manager.
-    // The original page is marked as orphaned and a new page is allocated, potentially from an orphaned page.
+    // The original page is marked as orphaned and a new page is allocated, potentially from an
+    // orphaned page.
     fn get_mut_clone<'p>(
         &self,
         context: &mut TransactionContext,
@@ -303,9 +304,10 @@ impl<P: PageManager> StorageEngine<P> {
                     return Ok(None);
                 }
                 Ok(pointer) => return Ok(pointer),
-                // In the case of a page split, re-attempt the operation from scratch. This ensures that a page will be
-                // consistently evaluated, and not modified in the middle of an operation, which could result in
-                // inconsistent cell pointers.
+                // In the case of a page split, re-attempt the operation from scratch. This ensures
+                // that a page will be consistently evaluated, and not modified in
+                // the middle of an operation, which could result in inconsistent
+                // cell pointers.
                 Err(Error::PageSplit) => {
                     context.transaction_metrics.inc_pages_split();
                     split_count += 1;
@@ -334,7 +336,8 @@ impl<P: PageManager> StorageEngine<P> {
     /// # Parameters
     /// - `context`: Transaction context for the operation
     /// - `changes`: List of key-value pairs to apply (None value means delete)
-    /// - `path_offset`: Current offset into the path being processed. All `changes` must have the same prefix up to this point.
+    /// - `path_offset`: Current offset into the path being processed. All `changes` must have the
+    ///   same prefix up to this point.
     /// - `slotted_page`: The page being modified
     /// - `page_index`: Index of the current node in the page
     ///
@@ -361,7 +364,8 @@ impl<P: PageManager> StorageEngine<P> {
         let common_prefix_length = path.common_prefix_length(node.prefix());
         let common_prefix = path.slice(0..common_prefix_length);
 
-        // Case 1: The path does not match the node prefix, create a new branch node as the parent of the current node
+        // Case 1: The path does not match the node prefix, create a new branch node as the parent
+        // of the current node
         if common_prefix_length < node.prefix().len() {
             return self.handle_prefix_mismatch(
                 context,
@@ -635,8 +639,8 @@ impl<P: PageManager> StorageEngine<P> {
         node: &mut Node,
         common_prefix_length: usize,
     ) -> Result<Option<Pointer>, Error> {
-        // the account has no storage trie yet, so we need to create a new leaf node for the first slot
-        // Get the first change and create a new leaf node
+        // the account has no storage trie yet, so we need to create a new leaf node for the first
+        // slot Get the first change and create a new leaf node
         let ((path, value), changes) = changes.split_first().unwrap();
         let node_size_incr = node.size_incr_with_new_child();
         let remaining_path = path.slice(path_offset as usize + common_prefix_length..);
@@ -759,7 +763,8 @@ impl<P: PageManager> StorageEngine<P> {
                     }
                 }
                 None => {
-                    // the child node does not exist, so we need to create a new leaf node with the remaining path.
+                    // the child node does not exist, so we need to create a new leaf node with the
+                    // remaining path.
                     let ((path, value), matching_changes) = matching_changes.split_first().unwrap();
                     let remaining_path: Nibbles =
                         path.slice(path_offset as usize + common_prefix_length + 1..);
@@ -777,8 +782,8 @@ impl<P: PageManager> StorageEngine<P> {
                     // 3. and add new cell pointer for the new leaf node (3 bytes)
                     // when adding the new child, split the page.
                     // FIXME: is it safe to split the page here if we've already modified the page?
-                    if slotted_page.num_free_bytes()
-                        < node_size_incr + new_node.size() + CELL_POINTER_SIZE
+                    if slotted_page.num_free_bytes() <
+                        node_size_incr + new_node.size() + CELL_POINTER_SIZE
                     {
                         self.split_page(context, slotted_page)?;
                         return Err(Error::PageSplit);
@@ -986,7 +991,8 @@ impl<P: PageManager> StorageEngine<P> {
         }
     }
 
-    // Split the page into two, moving the largest immediate subtrie of the root node to a new child page.
+    // Split the page into two, moving the largest immediate subtrie of the root node to a new child
+    // page.
     fn split_page(
         &self,
         context: &mut TransactionContext,
@@ -1480,7 +1486,8 @@ mod tests {
         assert_ne!(cloned_page.page_id(), page.page_id());
         assert_metrics(&context, 2, 1, 0, 0);
 
-        // the next allocation should not come from the orphaned page, as the snapshot id is the same as when the page was orphaned
+        // the next allocation should not come from the orphaned page, as the snapshot id is the
+        // same as when the page was orphaned
         let page = storage_engine.allocate_page(&mut context).unwrap();
         assert_eq!(page.page_id(), 258);
         assert_eq!(page.contents()[0], 0);
@@ -1490,7 +1497,8 @@ mod tests {
         storage_engine.commit(&context).unwrap();
         context = TransactionContext::new(context.metadata.next());
 
-        // the next allocation should not come from the orphaned page, as the snapshot has not been unlocked yet
+        // the next allocation should not come from the orphaned page, as the snapshot has not been
+        // unlocked yet
         let page = storage_engine.allocate_page(&mut context).unwrap();
         assert_eq!(page.page_id(), 259);
         assert_eq!(page.contents()[0], 0);
@@ -1499,8 +1507,8 @@ mod tests {
 
         storage_engine.unlock(3);
 
-        // the next allocation should come from the orphaned page because the snapshot id has increased.
-        // The page data should be zeroed out.
+        // the next allocation should come from the orphaned page because the snapshot id has
+        // increased. The page data should be zeroed out.
         let page = storage_engine.allocate_page(&mut context).unwrap();
         assert_eq!(page.page_id(), 256);
         assert_eq!(page.contents()[0], 0);
@@ -1780,7 +1788,8 @@ mod tests {
 
         let (storage_engine, mut context) = create_test_engine(30000);
 
-        // insert accounts in a different random order, but only after inserting different values first
+        // insert accounts in a different random order, but only after inserting different values
+        // first
         accounts.shuffle(&mut rng);
         for (address, _, mut storage) in accounts.clone() {
             storage_engine
@@ -2951,7 +2960,8 @@ mod tests {
     fn test_delete_single_child_non_root_branch_on_different_pages() {
         let (storage_engine, mut context) = create_test_engine(300);
 
-        // GIVEN: a non-root branch node with 2 children where both children are on a different pages
+        // GIVEN: a non-root branch node with 2 children where both children are on a different
+        // pages
         //
         // first we construct a root branch node.
         let mut account_1_nibbles = [0u8; 64];
@@ -3071,7 +3081,8 @@ mod tests {
             .set_accounts(&mut context, vec![(AddressPath::new(child_1_path), None)])
             .unwrap();
 
-        // THEN: the branch node should be deleted and the root node should go to child 2 leaf at index 5
+        // THEN: the branch node should be deleted and the root node should go to child 2 leaf at
+        // index 5
         let root_node: Node = slotted_page.get_value(0).unwrap();
         assert!(root_node.is_branch());
         let child_2_pointer = root_node.child(5).unwrap();
@@ -3180,7 +3191,8 @@ mod tests {
             )
             .unwrap();
 
-        // THEN: the root branch node should be deleted and the root node should be the leaf of child 2 on the child's page
+        // THEN: the root branch node should be deleted and the root node should be the leaf of
+        // child 2 on the child's page
         let root_node_page = storage_engine
             .get_page(&context, context.metadata.root_subtrie_page_id)
             .unwrap();

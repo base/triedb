@@ -88,10 +88,10 @@ impl<P: PageKind> SlottedPage<'_, P> {
             .map(|cp| cp.length())
             .sum::<u16>();
 
-        self.page.contents().len()
-            - total_occupied_space as usize
-            - CELL_POINTER_SIZE * num_cells as usize
-            - 1
+        self.page.contents().len() -
+            total_occupied_space as usize -
+            CELL_POINTER_SIZE * num_cells as usize -
+            1
     }
 
     fn num_dead_bytes(&self, num_cells: u8) -> usize {
@@ -129,7 +129,8 @@ impl SlottedPage<'_, RW> {
 
         if value_length > length as usize {
             // The value is larger than the current cell, so we need to allocate a new cell.
-            // Delete the current cell so that the calculation of the total occupied space is correct.
+            // Delete the current cell so that the calculation of the total occupied space is
+            // correct.
             self.delete_value(index)?;
 
             let cell_pointer = self.allocate_cell_pointer(index, value_length as u16)?;
@@ -198,7 +199,8 @@ impl SlottedPage<'_, RW> {
         Ok(num_cells)
     }
 
-    // Allocates a cell pointer at the given index with the given length and returns the cell pointer.
+    // Allocates a cell pointer at the given index with the given length and returns the cell
+    // pointer.
     fn allocate_cell_pointer(&mut self, index: u8, length: u16) -> Result<CellPointer, PageError> {
         match self.find_available_slot(index, length)? {
             Some(offset) => {
@@ -227,11 +229,11 @@ impl SlottedPage<'_, RW> {
             .sum::<u16>();
 
         let new_num_cells = max(num_cells, index + 1);
-        if (total_occupied_space
-            + additional_slot_length
-            + new_num_cells as u16 * CELL_POINTER_SIZE as u16
-            + 1) as usize
-            > PAGE_DATA_SIZE
+        if (total_occupied_space +
+            additional_slot_length +
+            new_num_cells as u16 * CELL_POINTER_SIZE as u16 +
+            1) as usize >
+            PAGE_DATA_SIZE
         {
             return Ok(false);
         }
@@ -878,7 +880,8 @@ mod tests {
         assert_eq!(cell_pointer.length(), 100);
         assert_eq!(cell_pointer.offset(), 2720); // 2720 = 2620 + 100
 
-        // this additional insertion forces the page to be defragmented to avoid overlapping with the header
+        // this additional insertion forces the page to be defragmented to avoid overlapping with
+        // the header
         let i7 = subtrie_page
             .insert_value(&String::from_iter(&['h'; 100]))
             .unwrap();
@@ -925,7 +928,8 @@ mod tests {
         subtrie_page.delete_value(i3).unwrap();
         assert_eq!(subtrie_page.num_cells(), 5);
 
-        // should not be able to allocate anything larger than 1630 bytes (4088 - 1 - 3*5 - 814 - 814 - 814 = 1630)
+        // should not be able to allocate anything larger than 1630 bytes (4088 - 1 - 3*5 - 814 -
+        // 814 - 814 = 1630)
         let cell_index = subtrie_page.insert_value(&String::from_iter(&['f'; 1631]));
         assert!(cell_index.is_err());
         assert!(matches!(cell_index, Err(PageError::PageIsFull)));

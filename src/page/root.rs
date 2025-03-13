@@ -45,8 +45,9 @@ impl<P: PageKind> RootPage<'_, P> {
         page_manager: &PM,
     ) -> Result<Vec<PageId>, PageError> {
         // A "slot" can be thought of as a single orphan page_id which is 4 bytes.
-        // We start at slot 10 (byte index 40 == 10*4) because the root page contains metadata before the orphan
-        // list starts: state_root(32 bytes) + root_subtrie_page_number(4 bytes) + max_page_number(4 bytes)
+        // We start at slot 10 (byte index 40 == 10*4) because the root page contains metadata
+        // before the orphan list starts: state_root(32 bytes) + root_subtrie_page_number(4
+        // bytes) + max_page_number(4 bytes)
         let current_slot_index = 10;
         let mut orphan_page_ids = Vec::new();
 
@@ -125,8 +126,9 @@ impl<'p> RootPage<'p, RW> {
         page_manager: &mut P,
     ) -> Result<(), PageError> {
         // A "slot" can be thought of as a single orphan page_id which is 4 bytes.
-        // We start at slot 10 (byte index 40 == 10*4) because the root page contains metadata before the orphan
-        // list starts: state_root(32 bytes) + root_subtrie_page_number(4 bytes) + max_page_number(4 bytes)
+        // We start at slot 10 (byte index 40 == 10*4) because the root page contains metadata
+        // before the orphan list starts: state_root(32 bytes) + root_subtrie_page_number(4
+        // bytes) + max_page_number(4 bytes)
         let current_slot_index = 10;
 
         // TODO: this can be optimized by storing the length of the on disk
@@ -220,8 +222,8 @@ impl<'p> RootPage<'p, RW> {
 
                     // Write the next_page page's id into the last slot of the current page,
                     // signaling that the list continues at the written page number.
-                    page_contents[current_orphan_page_id_start_index
-                        ..current_orphan_page_id_start_index + 4]
+                    page_contents[current_orphan_page_id_start_index..
+                        current_orphan_page_id_start_index + 4]
                         .copy_from_slice(&next_page.page_id().to_le_bytes());
                 } else {
                     // the last slot is populated with a page id. we need to continue adding
@@ -454,8 +456,8 @@ mod tests {
             .add_orphaned_page_ids(&my_orphan_page_ids, 0, &mut page_manager)
             .unwrap();
 
-        // WHEN: The first 20 orphan page ids are popped off and used for new pages, and 100 new pages
-        // are orphaned
+        // WHEN: The first 20 orphan page ids are popped off and used for new pages, and 100 new
+        // pages are orphaned
         let num_orphan_slots_used = 20;
         for _ in 0..num_orphan_slots_used {
             my_orphan_page_ids.pop_front();
