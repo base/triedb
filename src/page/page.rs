@@ -48,24 +48,14 @@ impl<P: PageKind> Page<'_, P> {
 impl<'p> Page<'p, RO> {
     pub fn new_ro(id: PageId, data: &'p mut [u8; PAGE_SIZE]) -> Self {
         let snapshot_id = u64::from_le_bytes(data[0..8].try_into().unwrap());
-        Self {
-            id,
-            snapshot_id,
-            data,
-            _marker: std::marker::PhantomData,
-        }
+        Self { id, snapshot_id, data, _marker: std::marker::PhantomData }
     }
 }
 
 impl<'p> Page<'p, RW> {
     pub fn new_rw(id: PageId, data: &'p mut [u8; PAGE_SIZE]) -> Self {
         let snapshot_id = u64::from_le_bytes(data[0..8].try_into().unwrap());
-        Self {
-            id,
-            snapshot_id,
-            data,
-            _marker: std::marker::PhantomData,
-        }
+        Self { id, snapshot_id, data, _marker: std::marker::PhantomData }
     }
 
     // Creates a new RW Page with the given id, snapshot id, and data.
@@ -75,12 +65,7 @@ impl<'p> Page<'p, RW> {
         data: &'p mut [u8; PAGE_SIZE],
     ) -> Self {
         data[0..8].copy_from_slice(&snapshot_id.to_le_bytes());
-        Self {
-            id,
-            snapshot_id,
-            data,
-            _marker: std::marker::PhantomData,
-        }
+        Self { id, snapshot_id, data, _marker: std::marker::PhantomData }
     }
 
     pub fn set_snapshot_id(&mut self, snapshot_id: SnapshotId) {

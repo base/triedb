@@ -27,11 +27,7 @@ impl OrphanPageManager {
 
     // Creates a new OrphanPageManager with provided unlocked page ids.
     pub fn new_with_unlocked_page_ids(unlocked_page_ids: Vec<PageId>) -> Self {
-        Self {
-            unlocked_page_ids,
-            locked_page_ids: BTreeMap::new(),
-            num_orphan_pages_used: 0,
-        }
+        Self { unlocked_page_ids, locked_page_ids: BTreeMap::new(), num_orphan_pages_used: 0 }
     }
 
     // Returns an unlocked orphaned page id, if one exists.
@@ -45,8 +41,9 @@ impl OrphanPageManager {
     pub fn unlock(&mut self, max_snapshot_id: SnapshotId) {
         let mut to_remove = Vec::new();
         for (snapshot_id, pages) in self.locked_page_ids.iter_mut() {
-            // This is currently necessary because the same page may be added multiple times when the page is split.
-            // TODO: revisit this behavior when splitting is performed in a more deterministic fashion.
+            // This is currently necessary because the same page may be added multiple times when
+            // the page is split. TODO: revisit this behavior when splitting is
+            // performed in a more deterministic fashion.
             pages.sort_unstable();
             pages.dedup();
             if *snapshot_id <= max_snapshot_id {
@@ -70,10 +67,7 @@ impl OrphanPageManager {
         snapshot_id: SnapshotId,
         pages: impl IntoIterator<Item = PageId>,
     ) {
-        self.locked_page_ids
-            .entry(snapshot_id)
-            .or_default()
-            .extend(pages);
+        self.locked_page_ids.entry(snapshot_id).or_default().extend(pages);
     }
 
     // Returns the number of orphan pages were given out

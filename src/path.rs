@@ -16,9 +16,7 @@ impl AddressPath {
 
     pub fn for_address(address: Address) -> Self {
         let hash = keccak256(address);
-        Self {
-            path: Nibbles::unpack(hash),
-        }
+        Self { path: Nibbles::unpack(hash) }
     }
 }
 
@@ -39,10 +37,7 @@ impl StoragePath {
         let address_nibbles = AddressPath::for_address(address);
         let slot_hash = keccak256(slot);
         let slot_nibbles = Nibbles::unpack(slot_hash);
-        Self {
-            address: address_nibbles,
-            slot: slot_nibbles,
-        }
+        Self { address: address_nibbles, slot: slot_nibbles }
     }
 
     pub fn full_path(&self) -> Nibbles {

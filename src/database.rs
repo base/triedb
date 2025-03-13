@@ -53,10 +53,7 @@ pub struct TransactionContext {
 
 impl TransactionContext {
     pub fn new(metadata: Metadata) -> Self {
-        Self {
-            metadata,
-            transaction_metrics: Default::default(),
-        }
+        Self { metadata, transaction_metrics: Default::default() }
     }
 }
 
@@ -104,17 +101,12 @@ impl Database<MmapPageManager> {
         let root_0 = RootPage::try_from(root_page_0).map_err(Error::PageError)?;
         let root_1 = RootPage::try_from(root_page_1).map_err(Error::PageError)?;
 
-        let root_page = if root_0.snapshot_id() > root_1.snapshot_id() {
-            root_0
-        } else {
-            root_1
-        };
+        let root_page = if root_0.snapshot_id() > root_1.snapshot_id() { root_0 } else { root_1 };
 
         let max_page_count = root_page.max_page_number();
 
-        let orphaned_page_ids = root_page
-            .get_orphaned_page_ids(&page_manager)
-            .map_err(Error::PageError)?;
+        let orphaned_page_ids =
+            root_page.get_orphaned_page_ids(&page_manager).map_err(Error::PageError)?;
         let orphan_manager = OrphanPageManager::new_with_unlocked_page_ids(orphaned_page_ids);
 
         let metadata: Metadata = root_page.into();
@@ -245,32 +237,27 @@ mod tests {
 
         let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
         let mut tx = db.begin_rw().unwrap();
-        tx.set_account(AddressPath::for_address(address), Some(account1.clone()))
-            .unwrap();
+        tx.set_account(AddressPath::for_address(address), Some(account1.clone())).unwrap();
 
         tx.commit().unwrap();
 
         let account2 = Account::new(456, U256::from(123), EMPTY_ROOT_HASH, KECCAK_EMPTY);
         let mut tx = db.begin_rw().unwrap();
-        tx.set_account(AddressPath::for_address(address), Some(account2.clone()))
-            .unwrap();
+        tx.set_account(AddressPath::for_address(address), Some(account2.clone())).unwrap();
 
         let ro_tx = db.begin_ro().unwrap();
         tx.commit().unwrap();
 
-        // The read transaction was created before the write was committed, so it should not see the changes.
-        let read_account = ro_tx
-            .get_account(AddressPath::for_address(address))
-            .unwrap();
+        // The read transaction was created before the write was committed, so it should not see the
+        // changes.
+        let read_account = ro_tx.get_account(AddressPath::for_address(address)).unwrap();
 
         assert_eq!(account1, read_account.unwrap());
 
         // The writer transaction is committed, so the read transaction should see the changes.
         let ro_tx = db.begin_ro().unwrap();
 
-        let read_account = ro_tx
-            .get_account(AddressPath::for_address(address))
-            .unwrap();
+        let read_account = ro_tx.get_account(AddressPath::for_address(address)).unwrap();
 
         assert_eq!(account2, read_account.unwrap());
 
@@ -366,18 +353,14 @@ mod tests {
         let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
 
         let mut tx = db.begin_rw().unwrap();
-        tx.set_account(AddressPath::for_address(address1), Some(account1.clone()))
-            .unwrap();
+        tx.set_account(AddressPath::for_address(address1), Some(account1.clone())).unwrap();
 
         tx.commit().unwrap();
         db.close().unwrap();
 
         let mut db = Database::open(file_path.as_str()).unwrap();
         let tx = db.begin_ro().unwrap();
-        let account = tx
-            .get_account(AddressPath::for_address(address1))
-            .unwrap()
-            .unwrap();
+        let account = tx.get_account(AddressPath::for_address(address1)).unwrap().unwrap();
         assert_eq!(account, account1);
 
         tx.commit().unwrap();
@@ -385,8 +368,7 @@ mod tests {
         let address2 = address!("0x1234567890abcdef1234567890abcdef12345678");
         let account2 = Account::new(2, U256::from(200), EMPTY_ROOT_HASH, KECCAK_EMPTY);
         let mut tx = db.begin_rw().unwrap();
-        tx.set_account(AddressPath::for_address(address2), Some(account2.clone()))
-            .unwrap();
+        tx.set_account(AddressPath::for_address(address2), Some(account2.clone())).unwrap();
 
         tx.commit().unwrap();
         db.close().unwrap();
@@ -394,16 +376,10 @@ mod tests {
         let db = Database::open(file_path.as_str()).unwrap();
         let tx = db.begin_ro().unwrap();
 
-        let account = tx
-            .get_account(AddressPath::for_address(address1))
-            .unwrap()
-            .unwrap();
+        let account = tx.get_account(AddressPath::for_address(address1)).unwrap().unwrap();
         assert_eq!(account, account1);
 
-        let account = tx
-            .get_account(AddressPath::for_address(address2))
-            .unwrap()
-            .unwrap();
+        let account = tx.get_account(AddressPath::for_address(address2)).unwrap().unwrap();
         assert_eq!(account, account2);
     }
 }

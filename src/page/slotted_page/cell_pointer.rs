@@ -36,7 +36,7 @@ impl<'p> CellPointer<'p> {
 
     // Returns the length of the cell pointer, derived from the last 12 bits.
     pub fn length(&self) -> u16 {
-        (self.0[1] as u16 & 0b1111) << 8 | self.0[2] as u16
+        ((self.0[1] as u16 & 0b1111) << 8) | self.0[2] as u16
     }
 
     // Returns true if the cell pointer is deleted (all bytes are 0).
@@ -47,12 +47,7 @@ impl<'p> CellPointer<'p> {
 
 impl std::fmt::Debug for CellPointer<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "CellPointer {{ offset: {}, length: {} }}",
-            self.offset(),
-            self.length()
-        )
+        write!(f, "CellPointer {{ offset: {}, length: {} }}", self.offset(), self.length())
     }
 }
 

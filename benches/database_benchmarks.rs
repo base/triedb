@@ -24,12 +24,8 @@ fn setup_database(size: usize) -> (TempDir, Database<MmapPageManager>) {
         let mut tx = db.begin_rw().unwrap();
         for i in 1..=size {
             let address = generate_random_address(&mut rng);
-            let account = Account::new(
-                i as u64,
-                U256::from(i as u64),
-                EMPTY_ROOT_HASH,
-                KECCAK_EMPTY,
-            );
+            let account =
+                Account::new(i as u64, U256::from(i as u64), EMPTY_ROOT_HASH, KECCAK_EMPTY);
 
             tx.set_account(address, Some(account)).unwrap();
         }
@@ -46,9 +42,8 @@ fn bench_reads(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database(size);
         let mut rng = StdRng::seed_from_u64(42);
-        let addresses: Vec<AddressPath> = (0..BATCH_SIZE)
-            .map(|_| generate_random_address(&mut rng))
-            .collect();
+        let addresses: Vec<AddressPath> =
+            (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
         group.bench_with_input(BenchmarkId::new("random_reads", size), &size, |b, _| {
@@ -71,9 +66,8 @@ fn bench_inserts(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database(size);
         let mut rng = StdRng::seed_from_u64(43);
-        let addresses: Vec<AddressPath> = (0..BATCH_SIZE)
-            .map(|_| generate_random_address(&mut rng))
-            .collect();
+        let addresses: Vec<AddressPath> =
+            (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
         group.bench_with_input(BenchmarkId::new("batch_inserts", size), &size, |b, _| {
@@ -97,9 +91,8 @@ fn bench_updates(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database(size);
         let mut rng = StdRng::seed_from_u64(42);
-        let addresses: Vec<AddressPath> = (0..BATCH_SIZE)
-            .map(|_| generate_random_address(&mut rng))
-            .collect();
+        let addresses: Vec<AddressPath> =
+            (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
         group.bench_with_input(BenchmarkId::new("batch_updates", size), &size, |b, _| {
@@ -127,9 +120,8 @@ fn bench_deletes(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database(size);
         let mut rng = StdRng::seed_from_u64(42);
-        let addresses: Vec<AddressPath> = (0..size)
-            .map(|_| generate_random_address(&mut rng))
-            .collect();
+        let addresses: Vec<AddressPath> =
+            (0..size).map(|_| generate_random_address(&mut rng)).collect();
 
         let mut count = 0;
 
@@ -154,12 +146,10 @@ fn bench_mixed_operations(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database(size);
         let mut rng = StdRng::seed_from_u64(42);
-        let existing_addresses: Vec<AddressPath> = (0..BATCH_SIZE)
-            .map(|_| generate_random_address(&mut rng))
-            .collect();
-        let new_addresses: Vec<AddressPath> = (0..BATCH_SIZE)
-            .map(|_| generate_random_address(&mut rng))
-            .collect();
+        let existing_addresses: Vec<AddressPath> =
+            (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
+        let new_addresses: Vec<AddressPath> =
+            (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
         group.bench_with_input(BenchmarkId::new("mixed_workload", size), &size, |b, _| {
