@@ -1014,25 +1014,25 @@ impl<P: PageManager> StorageEngine<P> {
                 .ok_or(Error::PageError(PageError::PageIsFull))?;
 
             // Move the subtrie to the new page
-            if let Some(cell_index) = largest_child_pointer.location().cell_index() {
-                // Move all child nodes that are in the current page
-                let location =
-                    self.move_subtrie_nodes(page, cell_index, &mut child_slotted_page)?;
-                assert!(
-                    location.page_id().is_some(),
-                    "expected subtrie to be moved to a new page"
-                );
+            let cell_index = largest_child_pointer.location().cell_index().expect(
+                "largest child pointer doesn't exist on the same page. infinite loop detected.",
+            );
+            // Move all child nodes that are in the current page
+            let location = self.move_subtrie_nodes(page, cell_index, &mut child_slotted_page)?;
+            assert!(
+                location.page_id().is_some(),
+                "expected subtrie to be moved to a new page"
+            );
 
-                // Update the pointer in the root node to point to the new page
-                root_node.set_child(
-                    largest_child_index,
-                    Pointer::new(
-                        Location::for_page(child_slotted_page.page_id()),
-                        largest_child_pointer.rlp().clone(),
-                    ),
-                );
-                page.set_value(0, &root_node)?;
-            }
+            // Update the pointer in the root node to point to the new page
+            root_node.set_child(
+                largest_child_index,
+                Pointer::new(
+                    Location::for_page(child_slotted_page.page_id()),
+                    largest_child_pointer.rlp().clone(),
+                ),
+            );
+            page.set_value(0, &root_node)?;
         }
 
         Ok(())
