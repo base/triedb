@@ -1,8 +1,12 @@
 use std::fs::File;
 
-use crate::page::page::{RO, RW};
-use crate::page::{Page, PageError, PageId, PageManager, PAGE_SIZE};
-use crate::snapshot::SnapshotId;
+use crate::{
+    page::{
+        page::{RO, RW},
+        Page, PageError, PageId, PageManager, PAGE_SIZE,
+    },
+    snapshot::SnapshotId,
+};
 use memmap2::MmapMut;
 
 // Manages pages in a memory mapped file.
