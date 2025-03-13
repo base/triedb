@@ -1,8 +1,7 @@
-use alloy_primitives::{hex, Address, StorageKey, StorageValue, U256};
-use alloy_trie::{Nibbles, EMPTY_ROOT_HASH, KECCAK_EMPTY};
+use alloy_primitives::{Address, StorageKey, StorageValue, U256};
+use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::prelude::*;
-use std::collections::HashSet;
 use tempdir::TempDir;
 use triedb::{
     account::Account,
@@ -396,19 +395,16 @@ fn bench_deletes(c: &mut Criterion) {
         let addresses: Vec<AddressPath> =
             (0..size).map(|_| generate_random_address(&mut rng)).collect();
 
-        let mut count = 0;
-
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
         group.bench_with_input(BenchmarkId::new("batch_deletes", size), &size, |b, _| {
             b.iter(|| {
                 let mut tx = db.begin_rw().unwrap();
-                for addr in &addresses[count..count + BATCH_SIZE] {
+                for addr in &addresses[0..BATCH_SIZE] {
                     tx.set_account(addr.clone(), None).unwrap();
                 }
                 // because we are deleting data, after each iteration we drop all the changes
                 // we make so that we can delete all the values again.
                 tx.rollback().unwrap();
-                count += BATCH_SIZE;
             });
         });
     }
@@ -551,6 +547,7 @@ fn bench_mixed_operations(c: &mut Criterion) {
                             // Read
                             let address = existing_addresses[i].clone();
                             let account = tx.get_account(address).unwrap();
+                            assert!(account.is_some());
                         }
                         1 => {
                             // Insert
@@ -578,7 +575,8 @@ fn bench_mixed_operations(c: &mut Criterion) {
                         4 => {
                             // Read storage
                             let (storage_path, _) = existing_storage_slots[i].clone();
-                            tx.get_storage_slot(storage_path).unwrap();
+                            let storage_value = tx.get_storage_slot(storage_path.clone()).unwrap();
+                            assert!(storage_value.is_some());
                         }
                         5 => {
                             // Insert storage
@@ -604,7 +602,8 @@ fn bench_mixed_operations(c: &mut Criterion) {
                         _ => unreachable!(),
                     }
                 }
-                tx.commit().unwrap();
+                // rollback changes to undo deletions for the next iteration
+                tx.rollback().unwrap();
             });
         });
     }
