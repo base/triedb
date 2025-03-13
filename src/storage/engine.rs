@@ -352,7 +352,7 @@ impl<P: PageManager> StorageEngine<P> {
     ) -> Result<Option<Pointer>, Error> {
         let mut node = slotted_page.get_value::<Node>(page_index)?;
 
-        if changes.len() == 0 {
+        if changes.is_empty() {
             // no changes to make. just return a pointer to ourself.
             let rlp_node = node.rlp_encode();
             return Ok(Some(Pointer::new(
@@ -480,7 +480,7 @@ impl<P: PageManager> StorageEngine<P> {
         common_prefix: Nibbles,
         common_prefix_length: usize,
     ) -> Result<Option<Pointer>, Error> {
-        if changes.len() == 0 {
+        if changes.is_empty() {
             // no changes to make. just return a pointer to ourself.
             // this can be the case for example if all of our changes are deletes
             // for values that do not exist.
@@ -669,7 +669,7 @@ impl<P: PageManager> StorageEngine<P> {
         node: &mut Node,
         common_prefix_length: usize,
     ) -> Result<Option<Pointer>, Error> {
-        if changes.len() == 0 {
+        if changes.is_empty() {
             // there are no changes to make. just return a pointer to our current node.
             let rlp_node = node.rlp_encode();
             return Ok(Some(Pointer::new(
