@@ -157,9 +157,19 @@ impl<P: PageManager> StorageEngine<P> {
         let page = self.get_page(context, context.metadata.root_subtrie_page_id)?;
         let slotted_page = SlottedPage::try_from(page)?;
 
-        context.original_account_path = Some(address_path);
+        // context.original_account_path = Some(address_path.clone());
+        let path: Nibbles = address_path.into();
+        // let _original_path = &address_path;
 
-        match self.get_value_from_page(context, address_path.into(), slotted_page, 0)? {
+        match self.get_value_from_page(
+            context,
+            // &address_path,
+            // address_path.into(),
+            &path,
+            &path,
+            slotted_page,
+            0,
+        )? {
             Some(TrieValue::Account(account)) => Ok(Some(account)),
             _ => Ok(None),
         }
@@ -179,7 +189,9 @@ impl<P: PageManager> StorageEngine<P> {
         let page = self.get_page(context, context.metadata.root_subtrie_page_id)?;
         let slotted_page = SlottedPage::try_from(page)?;
 
-        match self.get_value_from_page(context, storage_path.full_path(), slotted_page, 0)? {
+        let path: Nibbles = storage_path.full_path();
+
+        match self.get_value_from_page(context, &path, &path, slotted_page, 0)? {
             Some(TrieValue::Storage(storage_value)) => Ok(Some(storage_value)),
             _ => Ok(None),
         }
@@ -190,7 +202,8 @@ impl<P: PageManager> StorageEngine<P> {
     fn get_value_from_page(
         &self,
         context: &TransactionContext,
-        path: Nibbles,
+        original_path: &Nibbles,
+        path: &Nibbles,
         slotted_page: SlottedPage<'_, RO>,
         page_index: u8,
     ) -> Result<Option<TrieValue>, Error> {
@@ -204,11 +217,10 @@ impl<P: PageManager> StorageEngine<P> {
         let remaining_path = path.slice(common_prefix_length..);
         if remaining_path.is_empty() {
             // cache the account in the contract account cache
-            if let Some(original_account_path) = &context.original_account_path {
-                context.account_location_cache.insert(
-                    original_account_path.clone(),
-                    (slotted_page.page_id(), page_index),
-                );
+            if original_path.len() == 20 {
+                context
+                    .account_location_cache
+                    .insert(original_path.clone(), (slotted_page.page_id(), page_index));
             }
 
             return Ok(Some(node.value()));
@@ -231,7 +243,8 @@ impl<P: PageManager> StorageEngine<P> {
                 if child_location.cell_index().is_some() {
                     self.get_value_from_page(
                         context,
-                        remaining_path,
+                        original_path,
+                        &remaining_path,
                         slotted_page,
                         child_location.cell_index().unwrap(),
                     )
@@ -239,7 +252,13 @@ impl<P: PageManager> StorageEngine<P> {
                     let child_page_id = child_location.page_id().unwrap();
                     let child_page = self.get_page(context, child_page_id)?;
                     let child_slotted_page = SlottedPage::try_from(child_page)?;
-                    self.get_value_from_page(context, remaining_path, child_slotted_page, 0)
+                    self.get_value_from_page(
+                        context,
+                        original_path,
+                        &remaining_path,
+                        child_slotted_page,
+                        0,
+                    )
                 }
             }
             None => Ok(None),
@@ -862,8 +881,8 @@ impl<P: PageManager> StorageEngine<P> {
                     // 3. and add new cell pointer for the new leaf node (3 bytes)
                     // when adding the new child, split the page.
                     // FIXME: is it safe to split the page here if we've already modified the page?
-                    if slotted_page.num_free_bytes() <
-                        node_size_incr + new_node.size() + CELL_POINTER_SIZE
+                    if slotted_page.num_free_bytes()
+                        < node_size_incr + new_node.size() + CELL_POINTER_SIZE
                     {
                         self.split_page(context, slotted_page)?;
                         return Err(Error::PageSplit);
@@ -2057,6 +2076,72 @@ mod tests {
                 vec![(storage_path.into(), Some(storage_value.into()))].as_mut(),
             )
             .unwrap();
+    }
+
+    #[test]
+    fn test_get_account_storage_cache() {
+        let (storage_engine, mut context) = create_test_engine(300);
+
+        let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
+        let address_path = AddressPath::for_address(address);
+        let account = create_test_account(100, 1);
+
+        storage_engine
+            .set_values(
+                &mut context,
+                vec![(address_path.clone().into(), Some(account.clone().into()))].as_mut(),
+            )
+            .unwrap();
+
+        // storage key and storage value
+        let test_cases = vec![
+            (
+                b256!("0x0000000000000000000000000000000000000000000000000000000000000000"),
+                b256!("0x0000000000000000000000000000000000000000000000000000000062617365"),
+            ),
+            (
+                b256!("0x0000000000000000000000000000000000000000000000000000000000000001"),
+                b256!("0x000000000000000000000000000000006274632040202439362c3434322e3735"),
+            ),
+            (
+                b256!("0x0000000000000000000000000000000000000000000000000000000000000002"),
+                b256!("0x0000000000000000000000000000000000000000000000000000747269656462"),
+            ),
+            (
+                b256!("0x0000000000000000000000000000000000000000000000000000000000000003"),
+                b256!("0x000000000000000000000000000000000000000000000000436f696e62617365"),
+            ),
+        ];
+        storage_engine
+            .set_values(
+                &mut context,
+                test_cases
+                    .iter()
+                    .map(|(key, value)| {
+                        let storage_path = StoragePath::for_address_and_slot(address, *key);
+                        let storage_value = StorageValue::from_be_slice(value.as_slice());
+                        (storage_path.into(), Some(storage_value.into()))
+                    })
+                    .collect::<Vec<(Nibbles, Option<TrieValue>)>>()
+                    .as_mut(),
+            )
+            .unwrap();
+
+        // new read context
+        context = TransactionContext::new(context.metadata.next());
+        let account =
+            storage_engine.get_account(&context, AddressPath::for_address(address)).unwrap();
+        assert_eq!(account, Some(create_test_account(100, 1)));
+
+        let _cache_value = context.account_location_cache.get::<Nibbles>(&address_path.into());
+        // TODO: check the cache value
+
+        // reading the storage slots should hit the cache
+        // for (key, _) in &test_cases {
+        //     let storage_path = StoragePath::for_address_and_slot(address, *key);
+        //     let read_storage_slot = storage_engine.get_storage(&context, storage_path).unwrap();
+        //     assert_eq!(read_storage_slot, Some(StorageValue::from_be_slice(value.as_slice())));
+        // }
     }
 
     #[test]

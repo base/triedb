@@ -3,12 +3,14 @@ use crate::{
     page::{
         MmapPageManager, OrphanPageManager, PageError, PageId, PageKind, PageManager, RootPage,
     },
+    path::AddressPath,
     snapshot::SnapshotId,
-    storage::{engine, engine::StorageEngine},
+    storage::engine::{self, StorageEngine},
     transaction::{Transaction, TransactionManager, RO, RW},
 };
 use alloy_primitives::B256;
-use alloy_trie::EMPTY_ROOT_HASH;
+use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
+use dashmap::DashMap;
 use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone)]
@@ -49,8 +51,7 @@ impl Metadata {
 pub struct TransactionContext {
     pub(crate) metadata: Metadata,
     pub(crate) transaction_metrics: TransactionMetrics,
-    pub(crate) original_account_path: Option<AddressPath>,
-    pub(crate) account_location_cache: DashMap<AddressPath, (PageId, u8)>, // (page_id, cell_index)
+    pub(crate) account_location_cache: DashMap<Nibbles, (PageId, u8)>, // (page_id, cell_index)
 }
 
 impl TransactionContext {
