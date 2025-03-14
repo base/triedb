@@ -247,6 +247,13 @@ impl Node {
                 let next_slot_size = max(next_total_children.next_power_of_two(), 2);
                 (next_slot_size - slot_size) * 37
             }
+            Self::AccountLeaf { storage_root, .. } => {
+                if storage_root.is_none() {
+                    37
+                } else {
+                    0
+                }
+            }
             _ => 0,
         }
     }
