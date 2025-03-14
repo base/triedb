@@ -37,7 +37,7 @@ impl From<AddressPath> for Nibbles {
 /// A path to a `slot` in the storage trie of an `account`.
 /// This should contain exactly 64 nibbles, representing the keccak256 hash of an address, followed
 /// by 64 nibbles, representing the keccak256 hash of a slot.
-#[derive(Debug, Clone, PartialEq, Eq, Arbitrary)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Arbitrary)]
 pub struct StoragePath {
     address: AddressPath,
     slot: Nibbles,

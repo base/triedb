@@ -2,6 +2,8 @@ use alloy_primitives::{Address, StorageKey, StorageValue, U256};
 use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::prelude::*;
+use std::cell::RefCell;
+use std::collections::HashSet;
 use tempdir::TempDir;
 use triedb::{
     account::Account,
@@ -139,11 +141,14 @@ fn bench_storage_reads_multiple_accounts(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database_with_storage(size);
         let mut rng = StdRng::seed_from_u64(42);
+        let total_addresses = size / BATCH_SIZE;
         let addresses: Vec<AddressPath> =
-            (0..(size / BATCH_SIZE)).map(|_| generate_random_address(&mut rng)).collect();
+            (0..total_addresses).map(|_| generate_random_address(&mut rng)).collect();
+
+        let total_storage_per_address = BATCH_SIZE / total_addresses;
         let mut storage_paths: Vec<StoragePath> = Vec::new();
         for address in addresses {
-            for i in 0..=(BATCH_SIZE / (size / BATCH_SIZE)) {
+            for i in 0..=total_storage_per_address {
                 let storage_key = StorageKey::from(U256::from(i));
                 let storage_path =
                     StoragePath::for_address_path_and_slot(address.clone(), storage_key);
@@ -242,11 +247,14 @@ fn bench_storage_inserts_multiple_accounts(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database_with_storage(size);
         let mut rng = StdRng::seed_from_u64(43);
+        let total_addresses = size / BATCH_SIZE;
         let addresses: Vec<AddressPath> =
-            (0..(size / BATCH_SIZE)).map(|_| generate_random_address(&mut rng)).collect();
+            (0..total_addresses).map(|_| generate_random_address(&mut rng)).collect();
+
+        let total_storage_per_address = BATCH_SIZE / total_addresses;
         let mut storage_paths_values: Vec<(StoragePath, StorageValue)> = Vec::new();
         for address in &addresses {
-            for i in 0..=(BATCH_SIZE / (size / BATCH_SIZE)) {
+            for i in 0..=total_storage_per_address {
                 let storage_key = StorageKey::from(U256::from(i));
                 let storage_path =
                     StoragePath::for_address_path_and_slot(address.clone(), storage_key);
@@ -353,11 +361,14 @@ fn bench_storage_multiple_account_updates(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database_with_storage(size);
         let mut rng = StdRng::seed_from_u64(42);
+        let total_addresses = size / BATCH_SIZE;
         let addresses: Vec<AddressPath> =
-            (0..(size / BATCH_SIZE)).map(|_| generate_random_address(&mut rng)).collect();
+            (0..total_addresses).map(|_| generate_random_address(&mut rng)).collect();
+
+        let total_storage_per_address = BATCH_SIZE / total_addresses;
         let mut storage_paths_values: Vec<(StoragePath, StorageValue)> = Vec::new();
         for address in &addresses {
-            for i in 0..=(BATCH_SIZE / (size / BATCH_SIZE)) {
+            for i in 0..=total_storage_per_address {
                 let storage_key = StorageKey::from(U256::from(i));
                 let storage_path =
                     StoragePath::for_address_path_and_slot(address.clone(), storage_key);
@@ -453,11 +464,14 @@ fn bench_storage_mutliple_accounts_deletes(c: &mut Criterion) {
     for &size in SIZES {
         let (_dir, db) = setup_database_with_storage(size);
         let mut rng = StdRng::seed_from_u64(42);
+        let total_addresses = size / BATCH_SIZE;
         let addresses: Vec<AddressPath> =
-            (0..(size / BATCH_SIZE)).map(|_| generate_random_address(&mut rng)).collect();
+            (0..total_addresses).map(|_| generate_random_address(&mut rng)).collect();
+
+        let total_storage_per_address = BATCH_SIZE / total_addresses;
         let mut storage_paths: Vec<StoragePath> = Vec::new();
         for address in &addresses {
-            for i in 0..=(BATCH_SIZE / (size / BATCH_SIZE)) {
+            for i in 0..=total_storage_per_address {
                 let storage_key = StorageKey::from(U256::from(i));
                 let storage_path =
                     StoragePath::for_address_path_and_slot(address.clone(), storage_key);
@@ -536,75 +550,108 @@ fn bench_mixed_operations(c: &mut Criterion) {
             }
         }
 
+        let deleted_accounts: RefCell<HashSet<AddressPath>> = RefCell::new(HashSet::new());
+        let deleted_storage: RefCell<HashSet<StoragePath>> = RefCell::new(HashSet::new());
+
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
         group.bench_with_input(BenchmarkId::new("mixed_workload", size), &size, |b, _| {
-            b.iter(|| {
-                let mut tx = db.begin_rw().unwrap();
-                for i in 0..BATCH_SIZE {
-                    let op = rng.gen_range(0..=7);
-                    match op {
-                        0 => {
-                            // Read
-                            let address = existing_addresses[i].clone();
-                            let account = tx.get_account(address).unwrap();
-                            assert!(account.is_some());
-                        }
-                        1 => {
-                            // Insert
-                            let address = new_addresses[i].clone();
-                            let account =
-                                Account::new(1, U256::from(1000u64), EMPTY_ROOT_HASH, KECCAK_EMPTY);
-                            tx.set_account(address.clone(), Some(account)).unwrap();
-                        }
-                        2 => {
-                            // Update
-                            let address = existing_addresses[i].clone();
-                            let new_account = Account::new(
-                                123,
-                                U256::from(999_999_999u64),
-                                EMPTY_ROOT_HASH,
-                                KECCAK_EMPTY,
-                            );
-                            tx.set_account(address.clone(), Some(new_account)).unwrap();
-                        }
-                        3 => {
-                            // Delete
-                            let address = existing_addresses[i].clone();
-                            tx.set_account(address.clone(), None).unwrap();
-                        }
-                        4 => {
-                            // Read storage
-                            let (storage_path, _) = existing_storage_slots[i].clone();
-                            let storage_value = tx.get_storage_slot(storage_path.clone()).unwrap();
-                            assert!(storage_value.is_some());
-                        }
-                        5 => {
-                            // Insert storage
-                            let (storage_path, storage_value) =
-                                new_storage_slots_in_existing_accounts_with_storage[i].clone();
-
-                            tx.set_storage_slot(storage_path, Some(storage_value)).unwrap();
-                        }
-                        6 => {
-                            // Update storage
-                            let (storage_path, _) = existing_storage_slots[i].clone();
-                            tx.set_storage_slot(
-                                storage_path,
-                                Some(StorageValue::from(U256::from(i))),
-                            )
-                            .unwrap();
-                        }
-                        7 => {
-                            // Delete storage
-                            let (storage_path, _) = existing_storage_slots[i].clone();
-                            tx.set_storage_slot(storage_path, None).unwrap();
-                        }
-                        _ => unreachable!(),
+            b.iter_with_setup(
+                || {
+                    // repopulate deleted values
+                    let mut tx = db.begin_rw().unwrap();
+                    for deleted_account_address in deleted_accounts.borrow().clone().into_iter() {
+                        let account =
+                            Account::new(1, U256::from(1000u64), EMPTY_ROOT_HASH, KECCAK_EMPTY);
+                        tx.set_account(deleted_account_address.clone(), Some(account)).unwrap();
                     }
-                }
-                // rollback changes to undo deletions for the next iteration
-                tx.rollback().unwrap();
-            });
+
+                    for deleted_storage_path in deleted_storage.borrow().clone().into_iter() {
+                        let mut new_value = deleted_storage_path.get_slot().pack();
+                        new_value.reverse();
+                        let storage_value = StorageValue::from_be_slice(new_value.as_slice());
+                        tx.set_storage_slot(deleted_storage_path.clone(), Some(storage_value))
+                            .unwrap();
+                    }
+
+                    tx.commit().unwrap();
+
+                    deleted_accounts.borrow_mut().clear();
+                    deleted_storage.borrow_mut().clear();
+                },
+                |_| {
+                    let mut tx = db.begin_rw().unwrap();
+                    for i in 0..BATCH_SIZE {
+                        let op = rng.gen_range(0..=7);
+                        match op {
+                            0 => {
+                                // Read
+                                let address = existing_addresses[i].clone();
+                                let account = tx.get_account(address.clone()).unwrap();
+                                assert!(account.is_some());
+                            }
+                            1 => {
+                                // Insert
+                                let address = new_addresses[i].clone();
+                                let account = Account::new(
+                                    1,
+                                    U256::from(1000u64),
+                                    EMPTY_ROOT_HASH,
+                                    KECCAK_EMPTY,
+                                );
+                                tx.set_account(address.clone(), Some(account)).unwrap();
+                            }
+                            2 => {
+                                // Update
+                                let address = existing_addresses[i].clone();
+                                let new_account = Account::new(
+                                    123,
+                                    U256::from(999_999_999u64),
+                                    EMPTY_ROOT_HASH,
+                                    KECCAK_EMPTY,
+                                );
+                                tx.set_account(address.clone(), Some(new_account)).unwrap();
+                            }
+                            3 => {
+                                // Delete
+                                let address = existing_addresses[i].clone();
+                                tx.set_account(address.clone(), None).unwrap();
+                                deleted_accounts.borrow_mut().insert(address);
+                            }
+                            4 => {
+                                // Read storage
+                                let (storage_path, _) = existing_storage_slots[i].clone();
+                                let storage_value =
+                                    tx.get_storage_slot(storage_path.clone()).unwrap();
+                                assert!(storage_value.is_some());
+                            }
+                            5 => {
+                                // Insert storage
+                                let (storage_path, storage_value) =
+                                    new_storage_slots_in_existing_accounts_with_storage[i].clone();
+
+                                tx.set_storage_slot(storage_path, Some(storage_value)).unwrap();
+                            }
+                            6 => {
+                                // Update storage
+                                let (storage_path, _) = existing_storage_slots[i].clone();
+                                tx.set_storage_slot(
+                                    storage_path,
+                                    Some(StorageValue::from(U256::from(i))),
+                                )
+                                .unwrap();
+                            }
+                            7 => {
+                                // Delete storage
+                                let (storage_path, _) = existing_storage_slots[i].clone();
+                                tx.set_storage_slot(storage_path.clone(), None).unwrap();
+                                deleted_storage.borrow_mut().insert(storage_path);
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    tx.commit().unwrap();
+                },
+            );
         });
     }
     group.finish();
