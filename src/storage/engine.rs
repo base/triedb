@@ -11,6 +11,7 @@ use crate::{
     pointer::Pointer,
     snapshot::SnapshotId,
 };
+
 use alloy_primitives::StorageValue;
 use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
 use std::{
@@ -1266,7 +1267,7 @@ impl<P: PageManager> StorageEngine<P> {
 
     /// Rolls back all outstanding data to disk. Currently unimplemented.
     pub fn rollback(&self, _context: &TransactionContext) -> Result<(), Error> {
-        todo!()
+        Ok(())
     }
 
     // Ensures that the storage engine has a buffer of at least `min_buffer_size` pages.

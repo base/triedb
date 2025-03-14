@@ -130,6 +130,11 @@ impl<P: PageManager> Transaction<'_, RW, P> {
     pub fn rollback(mut self) -> Result<(), ()> {
         let mut transaction_manager = self.database.inner.transaction_manager.write().unwrap();
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
+        // TODO: this is temperorary until we actually implement rollback.
+        // we need to update the metadata to the next snapshot id.
+        let mut metadata = self.database.inner.metadata.write().unwrap();
+        *metadata = self.context.metadata.clone();
+
         storage_engine.rollback(&self.context).unwrap();
         transaction_manager.remove_transaction(self.context.metadata.snapshot_id, true)?;
 
