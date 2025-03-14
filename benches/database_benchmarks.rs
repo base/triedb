@@ -2,8 +2,7 @@ use alloy_primitives::{Address, StorageKey, StorageValue, U256};
 use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::prelude::*;
-use std::cell::RefCell;
-use std::collections::HashSet;
+use std::{cell::RefCell, collections::HashSet};
 use tempdir::TempDir;
 use triedb::{
     account::Account,
