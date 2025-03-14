@@ -571,6 +571,17 @@ impl<P: PageManager> StorageEngine<P> {
                 new_node.set_child(0, child_pointer.clone());
             }
         }
+
+        let old_node_size = node.size();
+        let new_node_size = new_node.size();
+        if new_node_size > old_node_size {
+            let node_size_incr = new_node_size - old_node_size;
+            if slotted_page.num_free_bytes() < node_size_incr {
+                self.split_page(context, slotted_page)?;
+                return Err(Error::PageSplit);
+            }
+        }
+
         let rlp_node = new_node.rlp_encode();
         slotted_page.set_value(page_index, &new_node)?;
 
@@ -3328,12 +3339,11 @@ mod tests {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(100))]
         #[test]
         fn fuzz_insert_get_accounts(
             accounts in prop::collection::vec(
                 (any::<Address>(), any::<Account>()),
-                1..20
+                1..100
             )
         ) {
             let (storage_engine, mut context) = create_test_engine(10_000);
@@ -3349,6 +3359,86 @@ mod tests {
                     .get_account(&context, AddressPath::for_address(address))
                     .unwrap();
                 assert_eq!(read_account, Some(Account::new(account.nonce, account.balance, EMPTY_ROOT_HASH, account.code_hash)));
+            }
+        }
+
+        #[test]
+        fn fuzz_insert_get_accounts_and_storage(
+            accounts in prop::collection::vec(
+                (any::<Address>(), any::<Account>(), prop::collection::vec(
+                    (any::<B256>(), any::<U256>()),
+                    0..5
+                )),
+                1..100
+            ),
+        ) {
+            let (storage_engine, mut context) = create_test_engine(10_000);
+
+            let mut changes = vec![];
+            for (address, account, storage) in &accounts {
+                changes.push((AddressPath::for_address(*address).into(), Some(account.clone().into())));
+
+                for (key, value) in storage {
+                    changes.push((StoragePath::for_address_and_slot(*address, *key).into(), Some(value.clone().into())));
+                }
+            }
+            storage_engine
+                .set_values(&mut context, changes.as_mut())
+                .unwrap();
+
+            for (address, account, storage) in accounts {
+                let read_account = storage_engine
+                    .get_account(&context, AddressPath::for_address(address))
+                    .unwrap();
+                let read_account = read_account.unwrap();
+                assert_eq!(read_account.nonce, account.nonce);
+                assert_eq!(read_account.balance, account.balance);
+                assert_eq!(read_account.code_hash, account.code_hash);
+
+                for (key, value) in storage {
+                    let read_storage = storage_engine
+                        .get_storage(&context, StoragePath::for_address_and_slot(address, key))
+                        .unwrap();
+                    assert_eq!(read_storage, Some(value.clone()));
+                }
+            }
+        }
+
+        #[test]
+        fn fuzz_insert_update_accounts(
+            account_revisions in prop::collection::vec(
+                (any::<Address>(), prop::collection::vec(any::<Account>(), 1..100)),
+                1..100
+            ),
+        ) {
+            let (storage_engine, mut context) = create_test_engine(10_000);
+
+            let mut revision = 0;
+            loop {
+                let mut changes = vec![];
+                for (address, revisions) in &account_revisions {
+                    if revisions.len() > revision {
+                        changes.push((AddressPath::for_address(*address).into(), Some(revisions[revision].clone().into())));
+                    }
+                }
+                if changes.is_empty() {
+                    break;
+                }
+                storage_engine
+                    .set_values(&mut context, changes.as_mut())
+                    .unwrap();
+                revision += 1;
+            }
+
+            for (address, revisions) in &account_revisions {
+                let last_revision = revisions.last().unwrap();
+                let read_account = storage_engine
+                    .get_account(&context, AddressPath::for_address(*address))
+                    .unwrap();
+                let read_account = read_account.unwrap();
+                assert_eq!(read_account.nonce, last_revision.nonce);
+                assert_eq!(read_account.balance, last_revision.balance);
+                assert_eq!(read_account.code_hash, last_revision.code_hash);
             }
         }
     }
