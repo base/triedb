@@ -49,11 +49,17 @@ impl Metadata {
 pub struct TransactionContext {
     pub(crate) metadata: Metadata,
     pub(crate) transaction_metrics: TransactionMetrics,
+    pub(crate) original_account_path: Option<AddressPath>,
+    pub(crate) account_location_cache: DashMap<AddressPath, (PageId, u8)>, // (page_id, cell_index)
 }
 
 impl TransactionContext {
     pub fn new(metadata: Metadata) -> Self {
-        Self { metadata, transaction_metrics: Default::default() }
+        Self {
+            metadata,
+            transaction_metrics: Default::default(),
+            account_location_cache: Default::default(),
+        }
     }
 }
 

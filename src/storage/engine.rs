@@ -157,6 +157,8 @@ impl<P: PageManager> StorageEngine<P> {
         let page = self.get_page(context, context.metadata.root_subtrie_page_id)?;
         let slotted_page = SlottedPage::try_from(page)?;
 
+        context.original_account_path = Some(address_path);
+
         match self.get_value_from_page(context, address_path.into(), slotted_page, 0)? {
             Some(TrieValue::Account(account)) => Ok(Some(account)),
             _ => Ok(None),
@@ -201,6 +203,14 @@ impl<P: PageManager> StorageEngine<P> {
 
         let remaining_path = path.slice(common_prefix_length..);
         if remaining_path.is_empty() {
+            // cache the account in the contract account cache
+            if let Some(original_account_path) = &context.original_account_path {
+                context.account_location_cache.insert(
+                    original_account_path.clone(),
+                    (slotted_page.page_id(), page_index),
+                );
+            }
+
             return Ok(Some(node.value()));
         }
 
@@ -406,6 +416,8 @@ impl<P: PageManager> StorageEngine<P> {
 
         // Case 3: Handle leaf node with child pointer (e.g., AccountLeaf with storage)
         if !node.is_branch() {
+            // TODO: cache the child pointer in the node
+            // what is the path so far?
             return self.handle_leaf_node_traversal(
                 context,
                 changes,
