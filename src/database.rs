@@ -194,6 +194,11 @@ impl<P: PageManager> Database<P> {
         self.metrics
             .ro_transaction_pages_read
             .record(context.transaction_metrics.take_pages_read() as f64);
+
+        let (cache_storage_read_hit, cache_storage_read_miss) =
+            context.transaction_metrics.take_cache_storage_read();
+        self.metrics.cache_storage_read_hit.increment(cache_storage_read_hit as u64);
+        self.metrics.cache_storage_read_miss.increment(cache_storage_read_miss as u64);
     }
 
     pub fn update_metrics_rw(&self, context: &TransactionContext) {

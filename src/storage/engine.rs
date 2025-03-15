@@ -156,20 +156,9 @@ impl<P: PageManager> StorageEngine<P> {
 
         let page = self.get_page(context, context.metadata.root_subtrie_page_id)?;
         let slotted_page = SlottedPage::try_from(page)?;
-
-        // context.original_account_path = Some(address_path.clone());
         let path: Nibbles = address_path.into();
-        // let _original_path = &address_path;
 
-        match self.get_value_from_page(
-            context,
-            // &address_path,
-            // address_path.into(),
-            &path,
-            &path,
-            slotted_page,
-            0,
-        )? {
+        match self.get_value_from_page(context, &path, &path, slotted_page, 0)? {
             Some(TrieValue::Account(account)) => Ok(Some(account)),
             _ => Ok(None),
         }
@@ -195,7 +184,8 @@ impl<P: PageManager> StorageEngine<P> {
         // get page_index, slotted_page_id, path
         let (slotted_page, page_index, path) = match cache_location {
             Some(cache_location) => {
-                // todo: some metrics here
+                context.transaction_metrics.inc_cache_storage_read_hit();
+
                 let slot = storage_path.get_slot();
                 let page_id = cache_location.0;
                 let page_index = cache_location.1;
@@ -204,6 +194,7 @@ impl<P: PageManager> StorageEngine<P> {
                 let page = self.get_page(context, page_id)?;
                 let slotted_page = SlottedPage::try_from(page)?;
                 let node: Node = slotted_page.get_value(page_index)?;
+                // node in the cache is an account leaf and has a storage root
                 let child_pointer = node.direct_child().unwrap();
                 let child_location = child_pointer.location();
                 let (slotted_page, page_index) = if child_location.cell_index().is_some() {
@@ -217,6 +208,8 @@ impl<P: PageManager> StorageEngine<P> {
                 (slotted_page, page_index, slot)
             }
             None => {
+                context.transaction_metrics.inc_cache_storage_read_miss();
+
                 let page_id = context.metadata.root_subtrie_page_id;
                 let page_index = 0;
 
@@ -2121,6 +2114,7 @@ mod tests {
     fn test_get_account_storage_cache() {
         let (storage_engine, mut context) = create_test_engine(300);
         {
+            // An account with no storage should not be cached
             let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96555");
             let address_path = AddressPath::for_address(address);
             let account = create_test_account(22, 22);
@@ -2136,10 +2130,12 @@ mod tests {
             let read_account =
                 storage_engine.get_account(&context, address_path.clone()).unwrap().unwrap();
             assert_eq!(read_account, account);
-            let x = context.account_location_cache.get::<Nibbles>(&address_path.into());
-            assert!(x.is_none());
+            let cached_location =
+                context.account_location_cache.get::<Nibbles>(&address_path.into());
+            assert!(cached_location.is_none());
         }
         {
+            // An account with storage should be cache when read the account first
             let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
             let address_path = AddressPath::for_address(address);
             let account = create_test_account(100, 1);
@@ -2151,7 +2147,6 @@ mod tests {
                 )
                 .unwrap();
 
-            // storage key and storage value
             let test_cases = vec![
                 (
                     b256!("0x0000000000000000000000000000000000000000000000000000000000000000"),
