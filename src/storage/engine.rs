@@ -218,8 +218,8 @@ impl<P: PageManager> StorageEngine<P> {
         if remaining_path.is_empty() {
             // cache the account location if it is a contract account
             if let TrieValue::Account(account) = node.value() {
-                if account.storage_root != EMPTY_ROOT_HASH
-                    && original_path.len() == ADDRESS_PATH_LENGTH
+                if account.storage_root != EMPTY_ROOT_HASH &&
+                    original_path.len() == ADDRESS_PATH_LENGTH
                 {
                     context
                         .account_location_cache
@@ -885,8 +885,8 @@ impl<P: PageManager> StorageEngine<P> {
                     // 3. and add new cell pointer for the new leaf node (3 bytes)
                     // when adding the new child, split the page.
                     // FIXME: is it safe to split the page here if we've already modified the page?
-                    if slotted_page.num_free_bytes()
-                        < node_size_incr + new_node.size() + CELL_POINTER_SIZE
+                    if slotted_page.num_free_bytes() <
+                        node_size_incr + new_node.size() + CELL_POINTER_SIZE
                     {
                         self.split_page(context, slotted_page)?;
                         return Err(Error::PageSplit);
@@ -2085,66 +2085,87 @@ mod tests {
     #[test]
     fn test_get_account_storage_cache() {
         let (storage_engine, mut context) = create_test_engine(300);
+        {
+            let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96555");
+            let address_path = AddressPath::for_address(address);
+            let account = create_test_account(22, 22);
 
-        let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
-        let address_path = AddressPath::for_address(address);
-        let account = create_test_account(100, 1);
+            storage_engine
+                .set_values(
+                    &mut context,
+                    vec![(address_path.clone().into(), Some(account.clone().into()))].as_mut(),
+                )
+                .unwrap();
+            context = TransactionContext::new(context.metadata.next());
 
-        storage_engine
-            .set_values(
-                &mut context,
-                vec![(address_path.clone().into(), Some(account.clone().into()))].as_mut(),
-            )
-            .unwrap();
+            let read_account =
+                storage_engine.get_account(&context, address_path.clone()).unwrap().unwrap();
+            assert_eq!(read_account, account);
+            let x = context.account_location_cache.get::<Nibbles>(&address_path.into());
+            assert!(x.is_none());
+        }
+        {
+            let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
+            let address_path = AddressPath::for_address(address);
+            let account = create_test_account(100, 1);
 
-        // storage key and storage value
-        let test_cases = vec![
-            (
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000000"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000062617365"),
-            ),
-            (
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000001"),
-                b256!("0x000000000000000000000000000000006274632040202439362c3434322e3735"),
-            ),
-            (
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000002"),
-                b256!("0x0000000000000000000000000000000000000000000000000000747269656462"),
-            ),
-            (
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000003"),
-                b256!("0x000000000000000000000000000000000000000000000000436f696e62617365"),
-            ),
-        ];
-        storage_engine
-            .set_values(
-                &mut context,
-                test_cases
-                    .iter()
-                    .map(|(key, value)| {
-                        let storage_path = StoragePath::for_address_and_slot(address, *key);
-                        let storage_value = StorageValue::from_be_slice(value.as_slice());
-                        (storage_path.into(), Some(storage_value.into()))
-                    })
-                    .collect::<Vec<(Nibbles, Option<TrieValue>)>>()
-                    .as_mut(),
-            )
-            .unwrap();
+            storage_engine
+                .set_values(
+                    &mut context,
+                    vec![(address_path.clone().into(), Some(account.clone().into()))].as_mut(),
+                )
+                .unwrap();
 
-        context = TransactionContext::new(context.metadata.next());
-        let read_account = storage_engine
-            .get_account(&context, AddressPath::for_address(address))
-            .unwrap()
-            .unwrap();
-        assert_eq!(read_account.balance, account.balance);
-        assert_eq!(read_account.nonce, account.nonce);
-        assert_ne!(read_account.storage_root, EMPTY_ROOT_HASH);
+            // storage key and storage value
+            let test_cases = vec![
+                (
+                    b256!("0x0000000000000000000000000000000000000000000000000000000000000000"),
+                    b256!("0x0000000000000000000000000000000000000000000000000000000062617365"),
+                ),
+                (
+                    b256!("0x0000000000000000000000000000000000000000000000000000000000000001"),
+                    b256!("0x000000000000000000000000000000006274632040202439362c3434322e3735"),
+                ),
+                (
+                    b256!("0x0000000000000000000000000000000000000000000000000000000000000002"),
+                    b256!("0x0000000000000000000000000000000000000000000000000000747269656462"),
+                ),
+                (
+                    b256!("0x0000000000000000000000000000000000000000000000000000000000000003"),
+                    b256!("0x000000000000000000000000000000000000000000000000436f696e62617365"),
+                ),
+            ];
+            storage_engine
+                .set_values(
+                    &mut context,
+                    test_cases
+                        .iter()
+                        .map(|(key, value)| {
+                            let storage_path = StoragePath::for_address_and_slot(address, *key);
+                            let storage_value = StorageValue::from_be_slice(value.as_slice());
+                            (storage_path.into(), Some(storage_value.into()))
+                        })
+                        .collect::<Vec<(Nibbles, Option<TrieValue>)>>()
+                        .as_mut(),
+                )
+                .unwrap();
 
-        // the account should be cached
-        let account_cache_location =
-            context.account_location_cache.get::<Nibbles>(&address_path.into()).unwrap();
-        assert_eq!(account_cache_location.0, 256);
-        assert_eq!(account_cache_location.1, 0);
+            context = TransactionContext::new(context.metadata.next());
+            let read_account = storage_engine
+                .get_account(&context, AddressPath::for_address(address))
+                .unwrap()
+                .unwrap();
+            assert_eq!(read_account.balance, account.balance);
+            assert_eq!(read_account.nonce, account.nonce);
+            assert_ne!(read_account.storage_root, EMPTY_ROOT_HASH);
+
+            // the account should be cached
+            let account_cache_location =
+                context.account_location_cache.get::<Nibbles>(&address_path.into()).unwrap();
+            assert_eq!(account_cache_location.0, 257);
+            assert_eq!(account_cache_location.1, 2); // 0 is the branch page, 1 is the first EOA
+                                                     // account, 2 is the this contract account
+        }
     }
 
     #[test]
