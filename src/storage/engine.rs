@@ -7,13 +7,13 @@ use crate::{
         OrphanPageManager, Page, PageError, PageId, PageManager, RootPage, SlottedPage,
         CELL_POINTER_SIZE, PAGE_DATA_SIZE, RO, RW,
     },
-    path::{AddressPath, StoragePath},
+    path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH},
     pointer::Pointer,
     snapshot::SnapshotId,
 };
 
-use alloy_primitives::StorageValue;
-use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
+use alloy_primitives::{StorageValue, B256};
+use alloy_trie::{root::storage_root, Nibbles, EMPTY_ROOT_HASH, KECCAK_EMPTY};
 use std::{
     cmp::max,
     fmt::Debug,
@@ -216,11 +216,15 @@ impl<P: PageManager> StorageEngine<P> {
 
         let remaining_path = path.slice(common_prefix_length..);
         if remaining_path.is_empty() {
-            // cache the account in the contract account cache
-            if original_path.len() == 20 {
-                context
-                    .account_location_cache
-                    .insert(original_path.clone(), (slotted_page.page_id(), page_index));
+            // cache the account location if it is a contract account
+            if let TrieValue::Account(account) = node.value() {
+                if account.storage_root != EMPTY_ROOT_HASH
+                    && original_path.len() == ADDRESS_PATH_LENGTH
+                {
+                    context
+                        .account_location_cache
+                        .insert(original_path.clone(), (slotted_page.page_id(), page_index));
+                }
             }
 
             return Ok(Some(node.value()));
@@ -2127,21 +2131,20 @@ mod tests {
             )
             .unwrap();
 
-        // new read context
         context = TransactionContext::new(context.metadata.next());
-        let account =
-            storage_engine.get_account(&context, AddressPath::for_address(address)).unwrap();
-        assert_eq!(account, Some(create_test_account(100, 1)));
+        let read_account = storage_engine
+            .get_account(&context, AddressPath::for_address(address))
+            .unwrap()
+            .unwrap();
+        assert_eq!(read_account.balance, account.balance);
+        assert_eq!(read_account.nonce, account.nonce);
+        assert_ne!(read_account.storage_root, EMPTY_ROOT_HASH);
 
-        let _cache_value = context.account_location_cache.get::<Nibbles>(&address_path.into());
-        // TODO: check the cache value
-
-        // reading the storage slots should hit the cache
-        // for (key, _) in &test_cases {
-        //     let storage_path = StoragePath::for_address_and_slot(address, *key);
-        //     let read_storage_slot = storage_engine.get_storage(&context, storage_path).unwrap();
-        //     assert_eq!(read_storage_slot, Some(StorageValue::from_be_slice(value.as_slice())));
-        // }
+        // the account should be cached
+        let account_cache_location =
+            context.account_location_cache.get::<Nibbles>(&address_path.into()).unwrap();
+        assert_eq!(account_cache_location.0, 256);
+        assert_eq!(account_cache_location.1, 0);
     }
 
     #[test]
