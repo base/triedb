@@ -69,6 +69,11 @@ impl StoragePath {
     pub fn get_slot(&self) -> &Nibbles {
         &self.slot
     }
+
+    /// Returns the [ADDRESS_PATH_LENGTH] nibble address portion of the storage path.
+    pub fn get_address(&self) -> &AddressPath {
+        &self.address
+    }
 }
 
 impl From<StoragePath> for Nibbles {

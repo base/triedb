@@ -12,8 +12,8 @@ use crate::{
     snapshot::SnapshotId,
 };
 
-use alloy_primitives::{StorageValue, B256};
-use alloy_trie::{root::storage_root, Nibbles, EMPTY_ROOT_HASH, KECCAK_EMPTY};
+use alloy_primitives::StorageValue;
+use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
 use std::{
     cmp::max,
     fmt::Debug,
@@ -185,13 +185,43 @@ impl<P: PageManager> StorageEngine<P> {
         if context.metadata.root_subtrie_page_id == 0 {
             return Ok(None);
         }
+        let original_path: Nibbles = storage_path.full_path();
 
-        let page = self.get_page(context, context.metadata.root_subtrie_page_id)?;
+        // check the cache
+        let address_path = storage_path.get_address().clone();
+        let nibbles: Nibbles = address_path.into();
+
+        let cache_location = context.account_location_cache.get::<Nibbles>(&nibbles);
+        // get page_index, slotted_page_id, path
+        let (page_id, page_index, path) = match cache_location {
+            Some(cache_location) => {
+                // todo: some metrics here
+                let slot = storage_path.get_slot();
+                // (cache_location.0, cache_location.1, slot)
+                let page_id = cache_location.0;
+                let page_index = cache_location.1;
+
+                // read the current account
+                let page = self.get_page(context, page_id)?;
+                let slotted_page = SlottedPage::try_from(page)?;
+                let node: Node = slotted_page.get_value(page_index)?;
+                //todo: check if the node is an account leaf and has a storage root
+                let child_pointer = node.direct_child();
+                // todo: load the slotted page for the storage trie, could be within current page or
+                // a new page
+            }
+            None => (context.metadata.root_subtrie_page_id, 0, &original_path),
+        };
+
+        // back
+        let page_id = context.metadata.root_subtrie_page_id;
+        let page_index = 0;
+        let path = &original_path;
+
+        let page = self.get_page(context, page_id)?;
         let slotted_page = SlottedPage::try_from(page)?;
 
-        let path: Nibbles = storage_path.full_path();
-
-        match self.get_value_from_page(context, &path, &path, slotted_page, 0)? {
+        match self.get_value_from_page(context, &original_path, &path, slotted_page, page_index)? {
             Some(TrieValue::Storage(storage_value)) => Ok(Some(storage_value)),
             _ => Ok(None),
         }
@@ -2165,6 +2195,18 @@ mod tests {
             assert_eq!(account_cache_location.0, 257);
             assert_eq!(account_cache_location.1, 2); // 0 is the branch page, 1 is the first EOA
                                                      // account, 2 is the this contract account
+
+            // getting the storage slot should hit the cache
+            let storage_path = StoragePath::for_address_and_slot(address, test_cases[0].0);
+            let read_storage_slot =
+                storage_engine.get_storage(&context, storage_path.clone()).unwrap();
+            assert_eq!(
+                read_storage_slot,
+                Some(StorageValue::from_be_slice(
+                    b256!("0x0000000000000000000000000000000000000000000000000000000062617365")
+                        .as_slice()
+                ))
+            );
         }
     }
 
