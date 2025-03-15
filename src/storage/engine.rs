@@ -193,11 +193,10 @@ impl<P: PageManager> StorageEngine<P> {
 
         let cache_location = context.account_location_cache.get::<Nibbles>(&nibbles);
         // get page_index, slotted_page_id, path
-        let (page_id, page_index, path) = match cache_location {
+        let (slotted_page, page_index, path) = match cache_location {
             Some(cache_location) => {
                 // todo: some metrics here
                 let slot = storage_path.get_slot();
-                // (cache_location.0, cache_location.1, slot)
                 let page_id = cache_location.0;
                 let page_index = cache_location.1;
 
@@ -205,21 +204,27 @@ impl<P: PageManager> StorageEngine<P> {
                 let page = self.get_page(context, page_id)?;
                 let slotted_page = SlottedPage::try_from(page)?;
                 let node: Node = slotted_page.get_value(page_index)?;
-                //todo: check if the node is an account leaf and has a storage root
-                let child_pointer = node.direct_child();
-                // todo: load the slotted page for the storage trie, could be within current page or
-                // a new page
+                let child_pointer = node.direct_child().unwrap();
+                let child_location = child_pointer.location();
+                let (slotted_page, page_index) = if child_location.cell_index().is_some() {
+                    (slotted_page, child_location.cell_index().unwrap())
+                } else {
+                    let child_page_id = child_location.page_id().unwrap();
+                    let child_page = self.get_page(context, child_page_id)?;
+                    let child_slotted_page = SlottedPage::try_from(child_page)?;
+                    (child_slotted_page, 0)
+                };
+                (slotted_page, page_index, slot)
             }
-            None => (context.metadata.root_subtrie_page_id, 0, &original_path),
+            None => {
+                let page_id = context.metadata.root_subtrie_page_id;
+                let page_index = 0;
+
+                let page = self.get_page(context, page_id)?;
+                let slotted_page = SlottedPage::try_from(page)?;
+                (slotted_page, page_index, &original_path)
+            }
         };
-
-        // back
-        let page_id = context.metadata.root_subtrie_page_id;
-        let page_index = 0;
-        let path = &original_path;
-
-        let page = self.get_page(context, page_id)?;
-        let slotted_page = SlottedPage::try_from(page)?;
 
         match self.get_value_from_page(context, &original_path, &path, slotted_page, page_index)? {
             Some(TrieValue::Storage(storage_value)) => Ok(Some(storage_value)),
