@@ -28,6 +28,11 @@ impl AddressPath {
         let hash = keccak256(address);
         Self { path: Nibbles::unpack(hash) }
     }
+
+    /// Returns a reference to the nibbles of the address path.
+    pub fn to_nibbles(&self) -> &Nibbles {
+        &self.path
+    }
 }
 
 impl From<AddressPath> for Nibbles {

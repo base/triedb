@@ -177,10 +177,8 @@ impl<P: PageManager> StorageEngine<P> {
         let original_path: Nibbles = storage_path.full_path();
 
         // check the cache
-        let address_path = storage_path.get_address().clone();
-        let nibbles: Nibbles = address_path.into();
-
-        let cache_location = context.account_location_cache.get::<Nibbles>(&nibbles);
+        let nibbles = storage_path.get_address().to_nibbles();
+        let cache_location = context.account_location_cache.get::<Nibbles>(nibbles);
         // get page_index, slotted_page_id, path
         let (slotted_page, page_index, path) = match cache_location {
             Some(cache_location) => {
