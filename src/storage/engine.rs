@@ -194,9 +194,12 @@ impl<P: PageManager> StorageEngine<P> {
                 let page = self.get_page(context, page_id)?;
                 let slotted_page = SlottedPage::try_from(page)?;
                 let node: Node = slotted_page.get_value(page_index)?;
-                // node in the cache is an account leaf and has a storage root
-                let child_pointer = node.direct_child().unwrap();
-                let child_location = child_pointer.location();
+                let child_pointer = node.direct_child();
+                // only when the node is an account leaf and all storage slots are removed
+                if child_pointer.is_none() {
+                    return Ok(None);
+                }
+                let child_location = child_pointer.unwrap().location();
                 let (slotted_page, page_index) = if child_location.cell_index().is_some() {
                     (slotted_page, child_location.cell_index().unwrap())
                 } else {
