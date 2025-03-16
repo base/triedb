@@ -2970,6 +2970,8 @@ mod tests {
 
         assert_eq!(account.storage_root, expected_root);
 
+        context = TransactionContext::new(context.metadata.next());
+
         // Delete storage one at a time
         for (storage_key, _) in &test_cases {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
