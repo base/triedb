@@ -3,7 +3,6 @@ use crate::{
     page::{
         MmapPageManager, OrphanPageManager, PageError, PageId, PageKind, PageManager, RootPage,
     },
-    path::AddressPath,
     snapshot::SnapshotId,
     storage::engine::{self, StorageEngine},
     transaction::{Transaction, TransactionManager, RO, RW},

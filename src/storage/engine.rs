@@ -222,7 +222,7 @@ impl<P: PageManager> StorageEngine<P> {
             }
         };
 
-        match self.get_value_from_page(context, &original_path, &path, slotted_page, page_index)? {
+        match self.get_value_from_page(context, &original_path, path, slotted_page, page_index)? {
             Some(TrieValue::Storage(storage_value)) => Ok(Some(storage_value)),
             _ => Ok(None),
         }
@@ -3549,7 +3549,7 @@ mod tests {
                 changes.push((AddressPath::for_address(*address).into(), Some(account.clone().into())));
 
                 for (key, value) in storage {
-                    changes.push((StoragePath::for_address_and_slot(*address, *key).into(), Some(value.clone().into())));
+                    changes.push((StoragePath::for_address_and_slot(*address, *key).into(), Some((*value).into())));
                 }
             }
             storage_engine
@@ -3569,7 +3569,7 @@ mod tests {
                     let read_storage = storage_engine
                         .get_storage(&context, StoragePath::for_address_and_slot(address, key))
                         .unwrap();
-                    assert_eq!(read_storage, Some(value.clone()));
+                    assert_eq!(read_storage, Some(value));
                 }
             }
         }
