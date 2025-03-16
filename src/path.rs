@@ -81,3 +81,9 @@ impl From<StoragePath> for Nibbles {
         path.full_path()
     }
 }
+
+impl From<&StoragePath> for Nibbles {
+    fn from(path: &StoragePath) -> Self {
+        path.full_path()
+    }
+}

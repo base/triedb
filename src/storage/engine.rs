@@ -177,11 +177,8 @@ impl<P: PageManager> StorageEngine<P> {
         let original_path: Nibbles = storage_path.full_path();
 
         // check the cache
-        let address_path = storage_path.get_address().clone();
-        let nibbles: Nibbles = address_path.into();
-
-        let cache_location = context.account_location_cache.get::<Nibbles>(&nibbles);
-        // get page_index, slotted_page_id, path
+        let path: Nibbles = (&storage_path).into();
+        let cache_location = context.account_location_cache.get::<Nibbles>(&path);
         let (slotted_page, page_index, path) = match cache_location {
             Some(cache_location) => {
                 context.transaction_metrics.inc_cache_storage_read_hit();
@@ -470,8 +467,6 @@ impl<P: PageManager> StorageEngine<P> {
 
         // Case 3: Handle leaf node with child pointer (e.g., AccountLeaf with storage)
         if !node.is_branch() {
-            // TODO: cache the child pointer in the node
-            // what is the path so far?
             return self.handle_leaf_node_traversal(
                 context,
                 changes,
