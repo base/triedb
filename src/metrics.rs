@@ -109,19 +109,29 @@ impl TransactionMetrics {
         (cache_storage_read_hit, cache_storage_read_miss)
     }
 
+    #[cfg(test)]
     pub fn get_pages_read(&self) -> u32 {
         self.inner.borrow().pages_read
     }
 
+    #[cfg(test)]
     pub fn get_pages_split(&self) -> u32 {
         self.inner.borrow().pages_split
     }
 
+    #[cfg(test)]
     pub fn get_pages_allocated(&self) -> u32 {
         self.inner.borrow().pages_allocated
     }
 
+    #[cfg(test)]
     pub fn get_pages_reallocated(&self) -> u32 {
         self.inner.borrow().pages_reallocated
+    }
+
+    #[cfg(test)]
+    pub fn get_cache_storage_read(&self) -> (u32, u32) {
+        let metrics = self.inner.borrow();
+        (metrics.cache_storage_read_hit, metrics.cache_storage_read_miss)
     }
 }

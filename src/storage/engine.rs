@@ -2207,6 +2207,7 @@ mod tests {
                         .as_slice()
                 ))
             );
+            assert_eq!(context.transaction_metrics.get_cache_storage_read(), (1, 0));
         }
     }
 
