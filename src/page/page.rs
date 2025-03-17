@@ -9,10 +9,6 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 #[cfg(not(target_endian = "little"))]
 compile_error!("This code only supports little-endian platforms");
 
-pub const PAGE_SIZE: usize = 4096;
-pub const HEADER_SIZE: usize = 8;
-pub const PAGE_DATA_SIZE: usize = PAGE_SIZE - HEADER_SIZE;
-
 #[repr(C)]
 #[derive(FromBytes, IntoBytes, Immutable, KnownLayout)]
 struct PageHeader {
@@ -23,7 +19,7 @@ struct PageHeader {
 #[derive(FromBytes, IntoBytes, Immutable, KnownLayout)]
 struct PageData {
     header: PageHeader,
-    contents: [u8; PAGE_DATA_SIZE],
+    contents: [u8; Page::DATA_SIZE],
 }
 
 #[derive(Copy, Clone)]
@@ -43,14 +39,14 @@ pub struct PageMut<'p> {
 const _: () = {
     use std::mem::{align_of, offset_of, size_of};
 
-    assert!(size_of::<PageData>() == PAGE_SIZE);
-    assert!(align_of::<PageData>() == PAGE_SIZE);
+    assert!(size_of::<PageData>() == Page::SIZE);
+    assert!(align_of::<PageData>() == Page::SIZE);
 
-    assert!(size_of::<PageHeader>() == HEADER_SIZE);
-    assert!(align_of::<PageHeader>() == HEADER_SIZE);
+    assert!(size_of::<PageHeader>() == Page::HEADER_SIZE);
+    assert!(align_of::<PageHeader>() == Page::HEADER_SIZE);
 
     assert!(offset_of!(PageData, header) == 0);
-    assert!(offset_of!(PageData, contents) == HEADER_SIZE);
+    assert!(offset_of!(PageData, contents) == Page::HEADER_SIZE);
 };
 
 // Compile-time assertion to verify that `Page` and `PageMut` have the same layout and internal
@@ -76,12 +72,16 @@ fn fmt_page(name: &str, p: &Page<'_>, f: &mut fmt::Formatter<'_>) -> fmt::Result
 }
 
 impl<'p> Page<'p> {
+    pub const SIZE: usize = 4096;
+    pub const HEADER_SIZE: usize = 8;
+    pub const DATA_SIZE: usize = Self::SIZE - Self::HEADER_SIZE;
+
     /// Constructs a new immutable page for reading.
     ///
     /// # Panics
     ///
     /// If `data` is not aligned to the page size.
-    pub fn new(id: PageId, data: &'p [u8; PAGE_SIZE]) -> Self {
+    pub fn new(id: PageId, data: &'p [u8; Page::SIZE]) -> Self {
         let data = PageData::ref_from_bytes(data).expect("data must be properly aligned");
         Self { id, data }
     }
@@ -113,7 +113,7 @@ impl<'p> PageMut<'p> {
     /// # Panics
     ///
     /// If `data` is not aligned to the page size.
-    pub fn new(id: PageId, data: &'p mut [u8; PAGE_SIZE]) -> Self {
+    pub fn new(id: PageId, data: &'p mut [u8; Page::SIZE]) -> Self {
         let data = PageData::mut_from_bytes(data).expect("data must be properly aligned");
         Self { id, data }
     }
@@ -122,7 +122,7 @@ impl<'p> PageMut<'p> {
     pub fn with_snapshot(
         id: PageId,
         snapshot_id: SnapshotId,
-        data: &'p mut [u8; PAGE_SIZE],
+        data: &'p mut [u8; Page::SIZE],
     ) -> Self {
         let mut page = Self::new(id, data);
         page.set_snapshot_id(snapshot_id);
@@ -161,42 +161,42 @@ mod tests {
     use super::*;
 
     #[repr(align(4096))]
-    struct DataArray([u8; PAGE_SIZE]);
+    struct DataArray([u8; Page::SIZE]);
 
     #[test]
     fn test_ref_new() {
         let id = 42;
-        let data = DataArray([0; PAGE_SIZE]);
+        let data = DataArray([0; Page::SIZE]);
 
         let page = Page::new(id, &data.0);
 
         assert_eq!(page.id(), 42);
         assert_eq!(page.snapshot_id(), 0);
-        assert_eq!(page.contents(), [0u8; PAGE_DATA_SIZE]);
+        assert_eq!(page.contents(), [0u8; Page::DATA_SIZE]);
     }
 
     #[test]
     fn test_mut_new() {
         let id = 42;
-        let mut data = DataArray([0; PAGE_SIZE]);
+        let mut data = DataArray([0; Page::SIZE]);
 
         let page_mut = PageMut::new(id, &mut data.0);
 
         assert_eq!(page_mut.id(), 42);
         assert_eq!(page_mut.snapshot_id(), 0);
-        assert_eq!(page_mut.contents(), [0u8; PAGE_DATA_SIZE]);
+        assert_eq!(page_mut.contents(), [0u8; Page::DATA_SIZE]);
     }
 
     #[test]
     fn test_mut_with_snapshot() {
         let id = 42;
         let snapshot = 1337;
-        let mut data = DataArray([0; PAGE_SIZE]);
+        let mut data = DataArray([0; Page::SIZE]);
 
         let page_mut = PageMut::with_snapshot(id, snapshot, &mut data.0);
 
         assert_eq!(page_mut.id(), 42);
         assert_eq!(page_mut.snapshot_id(), 1337);
-        assert_eq!(page_mut.contents(), [0u8; PAGE_DATA_SIZE]);
+        assert_eq!(page_mut.contents(), [0u8; Page::DATA_SIZE]);
     }
 }

@@ -1,4 +1,4 @@
-use super::{Page, PageError, PageMut, PAGE_DATA_SIZE};
+use super::{Page, PageError, PageMut};
 use crate::storage::value::{Value, ValueRef};
 use std::{
     cmp::{max, Ordering},
@@ -42,7 +42,7 @@ impl SlottedPage<'_> {
 
         let offset = cell_pointer.offset();
         let length = cell_pointer.length();
-        let start_index = (PAGE_DATA_SIZE as u16 - offset) as usize;
+        let start_index = (Page::DATA_SIZE as u16 - offset) as usize;
         let data = &self.page.contents()[start_index..start_index + length as usize];
 
         V::from_bytes(data).map_err(|_| PageError::InvalidValue)
@@ -57,7 +57,7 @@ impl SlottedPage<'_> {
 
         let offset = cell_pointer.offset();
         let length = cell_pointer.length();
-        let start_index = (PAGE_DATA_SIZE as u16 - offset) as usize;
+        let start_index = (Page::DATA_SIZE as u16 - offset) as usize;
         let data = &self.page.contents()[start_index..start_index + length as usize];
 
         Ok(V::from_bytes(data).unwrap())
@@ -169,8 +169,8 @@ impl SlottedPageMut<'_> {
             Ordering::Equal => (),
         }
 
-        let start_index = (PAGE_DATA_SIZE as u16 - offset) as usize;
-        let end_index = (PAGE_DATA_SIZE as u16 - offset + length) as usize;
+        let start_index = (Page::DATA_SIZE as u16 - offset) as usize;
+        let end_index = (Page::DATA_SIZE as u16 - offset + length) as usize;
         let data = &mut self.page.contents_mut()[start_index..end_index];
         value.serialize_into(data).map_err(|_| PageError::InvalidValue)?;
         Ok(())
@@ -184,8 +184,8 @@ impl SlottedPageMut<'_> {
 
         let offset = cell_pointer.offset();
         let length = cell_pointer.length();
-        let start_index = (PAGE_DATA_SIZE as u16 - offset) as usize;
-        let end_index = (PAGE_DATA_SIZE as u16 - offset + length) as usize;
+        let start_index = (Page::DATA_SIZE as u16 - offset) as usize;
+        let end_index = (Page::DATA_SIZE as u16 - offset + length) as usize;
         let data = &mut self.page.contents_mut()[start_index..end_index];
         value.serialize_into(data).map_err(|_| PageError::InvalidValue)?;
         Ok(cell_index)
@@ -257,7 +257,7 @@ impl SlottedPageMut<'_> {
             additional_slot_length +
             new_num_cells as u16 * CELL_POINTER_SIZE as u16 +
             1) as usize >
-            PAGE_DATA_SIZE
+            Page::DATA_SIZE
         {
             return Ok(false);
         }
@@ -281,13 +281,13 @@ impl SlottedPageMut<'_> {
                 continue;
             }
 
-            let start_index = (PAGE_DATA_SIZE as u16 - offset) as usize;
+            let start_index = (Page::DATA_SIZE as u16 - offset) as usize;
             let end_index = start_index + len as usize;
 
             let new_offset = last_offset + len;
             self.set_cell_pointer(idx as u8, new_offset, len)?;
 
-            let new_start_index = (PAGE_DATA_SIZE as u16 - new_offset) as usize;
+            let new_start_index = (Page::DATA_SIZE as u16 - new_offset) as usize;
             self.page.contents_mut().copy_within(start_index..end_index, new_start_index);
 
             last_start = new_offset - len;
@@ -424,16 +424,14 @@ impl fmt::Debug for SlottedPageMut<'_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::page::PAGE_SIZE;
-
     use super::*;
 
     #[repr(align(4096))]
-    struct DataArray([u8; PAGE_SIZE]);
+    struct DataArray([u8; Page::SIZE]);
 
     #[test]
     fn test_insert_get_value() {
-        let mut data = DataArray([0; PAGE_SIZE]);
+        let mut data = DataArray([0; Page::SIZE]);
         let page = PageMut::with_snapshot(42, 123, &mut data.0);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
@@ -461,7 +459,7 @@ mod tests {
 
     #[test]
     fn test_insert_set_value() {
-        let mut data = DataArray([0; PAGE_SIZE]);
+        let mut data = DataArray([0; Page::SIZE]);
         let page = PageMut::with_snapshot(42, 123, &mut data.0);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
@@ -481,7 +479,7 @@ mod tests {
 
     #[test]
     fn test_set_value_same_length() {
-        let mut data = DataArray([0; PAGE_SIZE]);
+        let mut data = DataArray([0; Page::SIZE]);
         let page = PageMut::with_snapshot(42, 123, &mut data.0);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
@@ -511,7 +509,7 @@ mod tests {
 
     #[test]
     fn test_set_value_shrink() {
-        let mut data = DataArray([0; PAGE_SIZE]);
+        let mut data = DataArray([0; Page::SIZE]);
         let page = PageMut::with_snapshot(42, 123, &mut data.0);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
@@ -543,7 +541,7 @@ mod tests {
 
     #[test]
     fn test_set_value_shrink_with_neighbors() {
-        let mut data = DataArray([0; PAGE_SIZE]);
+        let mut data = DataArray([0; Page::SIZE]);
         let page = PageMut::with_snapshot(42, 123, &mut data.0);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
@@ -603,7 +601,7 @@ mod tests {
 
     #[test]
     fn test_set_value_grow() {
-        let mut data = DataArray([0; PAGE_SIZE]);
+        let mut data = DataArray([0; Page::SIZE]);
         let page = PageMut::with_snapshot(42, 123, &mut data.0);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
@@ -633,7 +631,7 @@ mod tests {
 
     #[test]
     fn test_set_value_grow_with_neighbors() {
-        let mut data = DataArray([0; PAGE_SIZE]);
+        let mut data = DataArray([0; Page::SIZE]);
         let page = PageMut::with_snapshot(42, 123, &mut data.0);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
@@ -693,7 +691,7 @@ mod tests {
 
     #[test]
     fn test_allocate_get_delete_cell_pointer() {
-        let mut data = DataArray([0; PAGE_SIZE]);
+        let mut data = DataArray([0; Page::SIZE]);
         let page = PageMut::with_snapshot(42, 123, &mut data.0);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
         let cell_index = subtrie_page.insert_value(&String::from("foo")).unwrap();
@@ -786,7 +784,7 @@ mod tests {
 
     #[test]
     fn test_allocate_reuse_deleted_space() {
-        let mut data = DataArray([0; PAGE_SIZE]);
+        let mut data = DataArray([0; Page::SIZE]);
         let page = PageMut::with_snapshot(42, 123, &mut data.0);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
@@ -815,7 +813,7 @@ mod tests {
 
     #[test]
     fn test_allocate_reuse_deleted_spaces() {
-        let mut data = DataArray([0; PAGE_SIZE]);
+        let mut data = DataArray([0; Page::SIZE]);
         let page = PageMut::with_snapshot(42, 123, &mut data.0);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
@@ -873,7 +871,7 @@ mod tests {
 
     #[test]
     fn test_defragment_page() {
-        let mut data = DataArray([0; PAGE_SIZE]);
+        let mut data = DataArray([0; Page::SIZE]);
         let page = PageMut::with_snapshot(42, 123, &mut data.0);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
@@ -919,7 +917,7 @@ mod tests {
 
     #[test]
     fn test_defragment_page_cells_out_of_order() {
-        let mut data = DataArray([0; PAGE_SIZE]);
+        let mut data = DataArray([0; Page::SIZE]);
         let page = PageMut::with_snapshot(42, 123, &mut data.0);
         let mut slotted_page = SlottedPageMut::try_from(page).unwrap();
 
