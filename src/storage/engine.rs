@@ -318,6 +318,9 @@ impl<P: PageManager> StorageEngine<P> {
             }
             changes = remaining_changes;
         }
+        // invalidate the cache
+        context.account_location_cache.clear();
+
         let pointer =
             self.set_values_in_page(context, changes, 0, context.metadata.root_subtrie_page_id)?;
         match pointer {
@@ -2209,6 +2212,68 @@ mod tests {
                 ))
             );
             assert_eq!(context.transaction_metrics.get_cache_storage_read(), (1, 0));
+        }
+        {
+            // Write into the storage slot should invalidate the cache
+            let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96066");
+            let address_path = AddressPath::for_address(address);
+            let account = create_test_account(234, 567);
+
+            storage_engine
+                .set_values(
+                    &mut context,
+                    vec![(address_path.clone().into(), Some(account.clone().into()))].as_mut(),
+                )
+                .unwrap();
+
+            let test_cases = vec![(
+                b256!("0x0000000000000000000000000000000000000000000000000000000000000000"),
+                b256!("0x0000000000000000000000000000000000000000000000000000000062617365"),
+            )];
+            storage_engine
+                .set_values(
+                    &mut context,
+                    test_cases
+                        .iter()
+                        .map(|(key, value)| {
+                            let storage_path = StoragePath::for_address_and_slot(address, *key);
+                            let storage_value = StorageValue::from_be_slice(value.as_slice());
+                            (storage_path.into(), Some(storage_value.into()))
+                        })
+                        .collect::<Vec<(Nibbles, Option<TrieValue>)>>()
+                        .as_mut(),
+                )
+                .unwrap();
+
+            context = TransactionContext::new(context.metadata.next());
+            storage_engine
+                .get_account(&context, AddressPath::for_address(address))
+                .unwrap()
+                .unwrap();
+
+            let test_cases = vec![(
+                b256!("0x0000000000000000000000000000000000000000000000000000000000000003"),
+                b256!("0x000000000000000000000000000000000000000000000000436f696e62617365"),
+            )];
+            storage_engine
+                .set_values(
+                    &mut context,
+                    test_cases
+                        .iter()
+                        .map(|(key, value)| {
+                            let storage_path = StoragePath::for_address_and_slot(address, *key);
+                            let storage_value = StorageValue::from_be_slice(value.as_slice());
+                            (storage_path.into(), Some(storage_value.into()))
+                        })
+                        .collect::<Vec<(Nibbles, Option<TrieValue>)>>()
+                        .as_mut(),
+                )
+                .unwrap();
+
+            // the cache should be invalidated
+            let account_cache_location =
+                context.account_location_cache.get::<Nibbles>(&address_path.into());
+            assert!(account_cache_location.is_none());
         }
     }
 
