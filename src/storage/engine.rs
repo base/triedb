@@ -7,7 +7,7 @@ use crate::{
         OrphanPageManager, Page, PageError, PageId, PageManager, RootPage, SlottedPage,
         CELL_POINTER_SIZE, PAGE_DATA_SIZE, RO, RW,
     },
-    path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH},
+    path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH, STORAGE_PATH_LENGTH},
     pointer::Pointer,
     snapshot::SnapshotId,
 };
@@ -319,7 +319,12 @@ impl<P: PageManager> StorageEngine<P> {
             changes = remaining_changes;
         }
         // invalidate the cache
-        context.account_location_cache.clear();
+        changes.iter().for_each(|(path, _)| {
+            if path.len() == STORAGE_PATH_LENGTH {
+                let address_path = AddressPath::new(path.slice(0..ADDRESS_PATH_LENGTH));
+                context.account_location_cache.remove::<Nibbles>(&address_path.into());
+            }
+        });
 
         let pointer =
             self.set_values_in_page(context, changes, 0, context.metadata.root_subtrie_page_id)?;

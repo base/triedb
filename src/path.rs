@@ -3,6 +3,7 @@ use alloy_trie::Nibbles;
 use proptest_derive::Arbitrary;
 
 pub const ADDRESS_PATH_LENGTH: usize = 64;
+pub const STORAGE_PATH_LENGTH: usize = ADDRESS_PATH_LENGTH * 2;
 
 /// A path to an `account` in the storage trie.
 /// This should contain exactly 64 nibbles, representing the keccak256 hash of an address.
