@@ -50,7 +50,7 @@ impl Metadata {
 pub struct TransactionContext {
     pub(crate) metadata: Metadata,
     pub(crate) transaction_metrics: TransactionMetrics,
-    pub(crate) account_location_cache: DashMap<Nibbles, (PageId, u8)>, // (page_id, cell_index)
+    pub(crate) contract_account_loc_cache: DashMap<Nibbles, (PageId, u8)>, // (page_id, cell_index)
 }
 
 impl TransactionContext {
@@ -58,7 +58,7 @@ impl TransactionContext {
         Self {
             metadata,
             transaction_metrics: Default::default(),
-            account_location_cache: Default::default(),
+            contract_account_loc_cache: Default::default(),
         }
     }
 }

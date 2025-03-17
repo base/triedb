@@ -178,7 +178,7 @@ impl<P: PageManager> StorageEngine<P> {
 
         // check the cache
         let nibbles = storage_path.get_address().to_nibbles();
-        let cache_location = context.account_location_cache.get::<Nibbles>(nibbles);
+        let cache_location = context.contract_account_loc_cache.get::<Nibbles>(nibbles);
         // get page_index, slotted_page_id, path
         let (slotted_page, page_index, path) = match cache_location {
             Some(cache_location) => {
@@ -251,7 +251,7 @@ impl<P: PageManager> StorageEngine<P> {
                     original_path.len() == ADDRESS_PATH_LENGTH
                 {
                     context
-                        .account_location_cache
+                        .contract_account_loc_cache
                         .insert(original_path.clone(), (slotted_page.page_id(), page_index));
                 }
             }
@@ -322,7 +322,7 @@ impl<P: PageManager> StorageEngine<P> {
         changes.iter().for_each(|(path, _)| {
             if path.len() == STORAGE_PATH_LENGTH {
                 let address_path = AddressPath::new(path.slice(0..ADDRESS_PATH_LENGTH));
-                context.account_location_cache.remove::<Nibbles>(&address_path.into());
+                context.contract_account_loc_cache.remove::<Nibbles>(&address_path.into());
             }
         });
 
@@ -2140,7 +2140,7 @@ mod tests {
                 storage_engine.get_account(&context, address_path.clone()).unwrap().unwrap();
             assert_eq!(read_account, account);
             let cached_location =
-                context.account_location_cache.get::<Nibbles>(&address_path.into());
+                context.contract_account_loc_cache.get::<Nibbles>(&address_path.into());
             assert!(cached_location.is_none());
         }
         {
@@ -2200,7 +2200,7 @@ mod tests {
 
             // the account should be cached
             let account_cache_location =
-                context.account_location_cache.get::<Nibbles>(&address_path.into()).unwrap();
+                context.contract_account_loc_cache.get::<Nibbles>(&address_path.into()).unwrap();
             assert_eq!(account_cache_location.0, 257);
             assert_eq!(account_cache_location.1, 2); // 0 is the branch page, 1 is the first EOA
                                                      // account, 2 is the this contract account
@@ -2289,7 +2289,7 @@ mod tests {
 
             // the cache should be invalidated
             let account_cache_location =
-                context.account_location_cache.get::<Nibbles>(&address_path.into());
+                context.contract_account_loc_cache.get::<Nibbles>(&address_path.into());
             assert!(account_cache_location.is_none());
         }
     }
