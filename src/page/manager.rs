@@ -1,4 +1,4 @@
-use super::page::{Page, RO, RW};
+use super::page::{Page, PageMut};
 use crate::snapshot::SnapshotId;
 use std::fmt::Debug;
 pub mod mmap;
@@ -25,17 +25,17 @@ pub enum PageError {
 /// Core trait that manages pages in trie db.
 pub trait PageManager: Debug {
     /// Retrieves a page from the given snapshot.
-    fn get<'p>(&self, snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'p, RO>, PageError>;
+    fn get<'p>(&self, snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'p>, PageError>;
 
     /// Retrieves a mutable page from the given snapshot.
     fn get_mut<'p>(
         &mut self,
         snapshot_id: SnapshotId,
         page_id: PageId,
-    ) -> Result<Page<'p, RW>, PageError>;
+    ) -> Result<PageMut<'p>, PageError>;
 
     /// Allocates a new page in the given snapshot.
-    fn allocate<'p>(&mut self, snapshot_id: SnapshotId) -> Result<Page<'p, RW>, PageError>;
+    fn allocate<'p>(&mut self, snapshot_id: SnapshotId) -> Result<PageMut<'p>, PageError>;
 
     /// Resizes the page manager to the given number of pages.
     fn resize(&mut self, new_page_count: PageId) -> Result<(), PageError>;
