@@ -376,7 +376,7 @@ impl<P: PageManager> StorageEngine<P> {
 
         // Case 1: The path does not match the node prefix, create a new branch node as the parent
         // of the current node
-        if common_prefix_length < node.prefix().len() {
+        if common_prefix_length < node.prefix().len() && value.is_some() {
             return self.handle_prefix_mismatch(
                 context,
                 changes,
@@ -405,7 +405,7 @@ impl<P: PageManager> StorageEngine<P> {
         }
 
         // Case 3: Handle leaf node with child pointer (e.g., AccountLeaf with storage)
-        if !node.is_branch() {
+        if node.is_account_leaf() {
             return self.handle_leaf_node_traversal(
                 context,
                 changes,
@@ -418,15 +418,32 @@ impl<P: PageManager> StorageEngine<P> {
         }
 
         // Case 4: Handle branch node traversal
-        assert!(node.is_branch(), "node must be a branch at this point");
-        self.handle_branch_node_traversal(
+        if node.is_branch() {
+            return self.handle_branch_node_traversal(
+                context,
+                changes,
+                path_offset,
+                slotted_page,
+                page_index,
+                &mut node,
+                common_prefix_length,
+            );
+        }
+
+        // Case 5: We are attempting to delete a non-existent value
+        //
+        // let's remove it from our list of changes as it is a no-op
+        assert!(
+            value.is_none() && common_prefix_length < node.prefix().len(),
+            "value must be a non-existent delete at this point"
+        );
+        let (changes_left, changes_right) = changes.split_at(shortest_common_prefix_idx);
+        self.set_values_in_cloned_page(
             context,
-            changes,
+            &[changes_left, &changes_right[1..]].concat(),
             path_offset,
             slotted_page,
             page_index,
-            &mut node,
-            common_prefix_length,
         )
     }
 
@@ -481,30 +498,6 @@ impl<P: PageManager> StorageEngine<P> {
         common_prefix: Nibbles,
         common_prefix_length: usize,
     ) -> Result<Option<Pointer>, Error> {
-        if changes.is_empty() {
-            // no changes to make. just return a pointer to ourself.
-            // this can be the case for example if all of our changes are deletes
-            // for values that do not exist.
-            let rlp_node = node.rlp_encode();
-            return Ok(Some(Pointer::new(
-                self.node_location(slotted_page.page_id(), page_index),
-                rlp_node,
-            )));
-        }
-
-        let (_, value) = changes.first().unwrap();
-        if value.is_none() {
-            // attempting to delete a value that doesn't exist. just skip it.
-            let (_, changes) = changes.split_first().unwrap();
-            return self.set_values_in_cloned_page(
-                context,
-                changes,
-                path_offset,
-                slotted_page,
-                page_index,
-            );
-        }
-
         // Ensure page has enough space for a new branch and leaf node
         // TODO: use a more accurate threshold
         if slotted_page.num_free_bytes() < 1000 {
@@ -551,18 +544,15 @@ impl<P: PageManager> StorageEngine<P> {
 
             slotted_page.delete_value(page_index)?;
 
-            if changes.len() == 1 {
-                return Ok(None);
-            }
-
-            // Recurse with remaining changes
-            return self.set_values_in_cloned_page(
-                context,
-                &changes[1..],
-                path_offset,
-                slotted_page,
-                page_index,
+            assert!(
+                changes.len() == 1,
+                "this path should never be reached. \
+                the node has been deleted from the slotted \
+                page and recursively trying to process anymore \
+                changes will result in an error"
             );
+
+            return Ok(None);
         }
 
         // Update the node with the new value
@@ -824,20 +814,28 @@ impl<P: PageManager> StorageEngine<P> {
                 None => {
                     // the child node does not exist, so we need to create a new leaf node with the
                     // remaining path.
-                    let ((path, value), matching_changes) = matching_changes.split_first().unwrap();
+
+                    // in this case, if the change(s) we want to make are deletes, they should be
+                    // ignored as the child node already doesn't exist.
+                    let mut index_of_first_non_delete_change = matching_changes.len();
+                    for (i, (_, value)) in matching_changes.iter().enumerate() {
+                        if value.is_some() {
+                            index_of_first_non_delete_change = i;
+                            break;
+                        }
+                    }
+
+                    let (_, matching_changes_without_leading_deletes) =
+                        matching_changes.split_at(index_of_first_non_delete_change);
+                    if matching_changes_without_leading_deletes.is_empty() {
+                        continue;
+                    }
+
+                    let ((path, value), matching_changes) =
+                        matching_changes_without_leading_deletes.split_first().unwrap();
                     let remaining_path: Nibbles =
                         path.slice(path_offset as usize + common_prefix_length + 1..);
 
-                    if value.is_none() {
-                        // attempting to delete a value that does not exist. just skip it.
-                        return self.set_values_in_cloned_page(
-                            context,
-                            matching_changes,
-                            path_offset,
-                            slotted_page,
-                            page_index,
-                        );
-                    }
                     let value = value.as_ref().unwrap();
 
                     // ensure that the page has enough space to insert a new leaf node.
@@ -850,8 +848,8 @@ impl<P: PageManager> StorageEngine<P> {
                     // 3. and add new cell pointer for the new leaf node (3 bytes)
                     // when adding the new child, split the page.
                     // FIXME: is it safe to split the page here if we've already modified the page?
-                    if slotted_page.num_free_bytes() <
-                        node_size_incr + new_node.size() + CELL_POINTER_SIZE
+                    if slotted_page.num_free_bytes()
+                        < node_size_incr + new_node.size() + CELL_POINTER_SIZE
                     {
                         self.split_page(context, slotted_page)?;
                         return Err(Error::PageSplit);
@@ -3380,7 +3378,7 @@ mod tests {
                 changes.push((AddressPath::for_address(*address).into(), Some(account.clone().into())));
 
                 for (key, value) in storage {
-                    changes.push((StoragePath::for_address_and_slot(*address, *key).into(), Some(value.clone().into())));
+                    changes.push((StoragePath::for_address_and_slot(*address, *key).into(), Some((*value).into())));
                 }
             }
             storage_engine
@@ -3400,7 +3398,7 @@ mod tests {
                     let read_storage = storage_engine
                         .get_storage(&context, StoragePath::for_address_and_slot(address, key))
                         .unwrap();
-                    assert_eq!(read_storage, Some(value.clone()));
+                    assert_eq!(read_storage, Some(value));
                 }
             }
         }
