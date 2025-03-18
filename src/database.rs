@@ -46,6 +46,9 @@ impl Metadata {
     }
 }
 
+/// A custom cache for contract account locations.
+pub struct ContractAccountLocationCache {}
+
 #[derive(Debug)]
 pub struct TransactionContext {
     pub(crate) metadata: Metadata,
