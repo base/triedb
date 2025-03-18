@@ -1,4 +1,4 @@
-use std::cmp::max;
+use std::cmp::{max, Ordering};
 
 use crate::storage::value::{Value, ValueRef};
 
@@ -124,18 +124,22 @@ impl SlottedPage<'_, RW> {
         let mut offset = cell_pointer.offset();
         let mut length = cell_pointer.length();
 
-        if value_length > length as usize {
-            // The value is larger than the current cell, so we need to allocate a new cell.
-            // Delete the current cell so that the calculation of the total occupied space is
-            // correct.
-            self.delete_value(index)?;
+        match value_length.cmp(&(length as usize)) {
+            Ordering::Greater => {
+                // The value is larger than the current cell, so we need to allocate a new cell.
+                // Delete the current cell so that the calculation of the total occupied space is
+                // correct.
+                self.delete_value(index)?;
 
-            let cell_pointer = self.allocate_cell_pointer(index, value_length as u16)?;
-            (offset, length) = (cell_pointer.offset(), cell_pointer.length());
-        } else if value_length < length as usize {
-            // the value is smaller than the current cell, so we can shrink the cell in place
-            length = value_length as u16;
-            self.set_cell_pointer(index, offset, length)?;
+                let cell_pointer = self.allocate_cell_pointer(index, value_length as u16)?;
+                (offset, length) = (cell_pointer.offset(), cell_pointer.length());
+            }
+            Ordering::Less => {
+                // the value is smaller than the current cell, so we can shrink the cell in place
+                length = value_length as u16;
+                self.set_cell_pointer(index, offset, length)?;
+            }
+            Ordering::Equal => (),
         }
 
         let start_index = (PAGE_DATA_SIZE as u16 - offset) as usize;
