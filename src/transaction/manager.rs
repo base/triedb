@@ -1,4 +1,4 @@
-use crate::snapshot::SnapshotId;
+use crate::{snapshot::SnapshotId, transaction::TransactionError};
 use std::fmt::Debug;
 
 #[derive(Debug)]
@@ -18,20 +18,20 @@ impl TransactionManager {
         Self { has_writer: false, open_txs: Vec::new() }
     }
 
-    pub fn begin_rw(&mut self, snapshot_id: SnapshotId) -> Result<SnapshotId, ()> {
+    pub fn begin_rw(&mut self, snapshot_id: SnapshotId) -> Result<SnapshotId, TransactionError> {
         // only allow one writable transaction at a time
         if self.has_writer {
-            return Err(());
+            return Err(TransactionError);
         }
         self.has_writer = true;
         self.add_tx_handle(snapshot_id - 1)
     }
 
-    pub fn begin_ro(&mut self, snapshot_id: SnapshotId) -> Result<SnapshotId, ()> {
+    pub fn begin_ro(&mut self, snapshot_id: SnapshotId) -> Result<SnapshotId, TransactionError> {
         self.add_tx_handle(snapshot_id)
     }
 
-    fn add_tx_handle(&mut self, snapshot_id: SnapshotId) -> Result<SnapshotId, ()> {
+    fn add_tx_handle(&mut self, snapshot_id: SnapshotId) -> Result<SnapshotId, TransactionError> {
         self.open_txs.push(snapshot_id);
         self.open_txs.sort_unstable();
         Ok(*self.open_txs.first().unwrap())
@@ -42,7 +42,7 @@ impl TransactionManager {
         &mut self,
         snapshot_id: SnapshotId,
         is_writer: bool,
-    ) -> Result<(), ()> {
+    ) -> Result<(), TransactionError> {
         let index: usize;
         if is_writer {
             index = self.open_txs.binary_search(&(snapshot_id - 1)).unwrap();
