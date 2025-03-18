@@ -14,15 +14,9 @@ impl Hasher for NibblesHasher {
         self.state
     }
 
+    #[inline]
     fn write(&mut self, bytes: &[u8]) {
-        let mut count = 0;
-        for &byte in bytes {
-            self.state = (self.state << 8) | (byte as u64);
-            count += 1;
-            if count >= 8 {
-                break;
-            }
-        }
+        self.state = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
     }
 }
 
@@ -46,11 +40,12 @@ mod tests {
     #[test]
     fn test_nibbles_map() {
         let mut map = HashMap::with_hasher(NibblesHasherBuilder);
-        let nibbles = Nibbles::from_vec(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 10, 11, 12, 13, 14, 15]);
-        map.insert(nibbles.clone(), "test1");
-        assert_eq!(map.get(&nibbles), Some(&"test1"));
+        let nibbles1 =
+            Nibbles::from_vec(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 10, 11, 12, 13, 14, 15]);
+        map.insert(nibbles1.clone(), "test1");
+        assert_eq!(map.get(&nibbles1), Some(&"test1"));
 
-        let nibbles2 = Nibbles::from_vec(vec![2, 3, 4, 5, 6, 7, 8, 9, 0, 10, 11, 12, 13, 14, 15]);
+        let nibbles2 = Nibbles::from_vec(vec![2, 3, 4, 5, 6, 7, 8, 9, 0]);
         map.insert(nibbles2.clone(), "test2");
         assert_eq!(map.get(&nibbles2), Some(&"test2"));
     }

@@ -30,6 +30,10 @@ bench = false
 name = "database_benchmarks"
 harness = false
 
+[[bench]]
+name = "nibblesmap_benchmarks"
+harness = false
+
 [profile.bench]
 debug = false
 opt-level = 3
