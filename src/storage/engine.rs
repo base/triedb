@@ -204,10 +204,13 @@ impl<P: PageManager> StorageEngine<P> {
             return Ok(Some(node.value()));
         }
 
-        let child_pointer =
-            if !node.is_branch() { node.direct_child() } else { node.child(remaining_path[0]) };
+        let child_pointer = if node.is_account_leaf() {
+            node.direct_child()
+        } else {
+            node.child(remaining_path[0])
+        };
 
-        let remaining_path = if !node.is_branch() {
+        let remaining_path = if node.is_account_leaf() {
             // if we are at an AccountLeaf, we need a "free hop" to the storage trie
             // so the remaining_path needs to contain the current nibble.
             path.slice(common_prefix_length..)
@@ -375,7 +378,8 @@ impl<P: PageManager> StorageEngine<P> {
         let common_prefix = path.slice(0..common_prefix_length);
 
         // Case 1: The path does not match the node prefix, create a new branch node as the parent
-        // of the current node
+        // of the current node except when deleting as we don't want to expand nodes into branches
+        // when removing values.
         if common_prefix_length < node.prefix().len() && value.is_some() {
             return self.handle_prefix_mismatch(
                 context,
@@ -1131,7 +1135,7 @@ impl<P: PageManager> StorageEngine<P> {
         };
 
         for branch_index in range {
-            let child_ptr = if !updated_node.is_branch() {
+            let child_ptr = if updated_node.is_account_leaf() {
                 updated_node.direct_child()
             } else {
                 updated_node.child(branch_index)
@@ -1347,7 +1351,7 @@ impl<P: PageManager> StorageEngine<P> {
 fn count_subtrie_nodes(page: &SlottedPage<'_, RW>, root_index: u8) -> Result<u8, Error> {
     let mut count = 1; // Count the root node
     let node: Node = page.get_value(root_index)?;
-    if !node.is_branch() {
+    if node.is_account_leaf() {
         return Ok(count);
     }
 
