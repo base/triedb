@@ -16,7 +16,11 @@ impl Hasher for NibblesHasher {
 
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
-        self.state = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+        let mut value: u64 = 0;
+        for (i, byte) in bytes.iter().enumerate() {
+            value |= (*byte as u64) << (4 * i);
+        }
+        self.state = value;
     }
 }
 

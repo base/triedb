@@ -21,13 +21,13 @@ fn bench_hashmaps(c: &mut Criterion) {
     let mut group = c.benchmark_group("HashMap Comparison");
 
     // Test with different sizes
-    for size in [100, 1000, 10000].iter() {
+    for size in [10, 100, 1000].iter() {
         let test_data = generate_test_nibbles(*size);
 
         // Benchmark insertion
         group.bench_function(format!("hashmap_default_hash_insert_{}", size), |b| {
             b.iter(|| {
-                let mut map = HashMap::new();
+                let mut map = HashMap::with_capacity(1000);
                 for (i, nibbles) in test_data.iter().enumerate() {
                     map.insert(nibbles.clone(), (i as u32, 0u8));
                 }
@@ -37,7 +37,8 @@ fn bench_hashmaps(c: &mut Criterion) {
 
         group.bench_function(format!("hashmap_nibbles_hash_insert_{}", size), |b| {
             b.iter(|| {
-                let mut map = NibblesMap::with_hasher(NibblesHasherBuilder::default());
+                let mut map =
+                    NibblesMap::with_capacity_and_hasher(1000, NibblesHasherBuilder::default());
                 for (i, nibbles) in test_data.iter().enumerate() {
                     map.insert(nibbles.clone(), (i as u32, 0u8));
                 }
@@ -46,8 +47,9 @@ fn bench_hashmaps(c: &mut Criterion) {
         });
 
         // Create pre-populated maps for lookup benchmarks
-        let mut default_map = HashMap::new();
-        let mut custom_map = NibblesMap::with_hasher(NibblesHasherBuilder::default());
+        let mut default_map = HashMap::with_capacity(1000);
+        let mut custom_map =
+            NibblesMap::with_capacity_and_hasher(1000, NibblesHasherBuilder::default());
         for (i, nibbles) in test_data.iter().enumerate() {
             default_map.insert(nibbles.clone(), (i as u32, 0u8));
             custom_map.insert(nibbles.clone(), (i as u32, 0u8));
