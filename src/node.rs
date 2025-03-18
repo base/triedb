@@ -26,6 +26,8 @@ const EMPTY_ROOT_RLP: [u8; 33] =
 
 /// A node in the trie.
 /// This may be an account leaf, a storage leaf, or a branch.
+// TODO (PROTO-957): Consider wrapping this large struct into a Box
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Arbitrary)]
 pub enum Node {
     AccountLeaf {
