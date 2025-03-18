@@ -24,7 +24,7 @@ fn run_ethereum_execution_spec_state_tests() {
                 && e.path().extension().unwrap() == "json"
         })
     {
-        let test_file = std::fs::File::open(&test_spec_entry.path()).unwrap();
+        let test_file = std::fs::File::open(test_spec_entry.path()).unwrap();
         let state_test_case: Value = serde_json::from_reader(test_file).unwrap();
         let test_cases = state_test_case.as_object().unwrap();
         for (test_case_name, test_case) in test_cases.iter() {
@@ -119,7 +119,7 @@ fn run_ethereum_execution_spec_state_tests() {
                     tx.set_account(AddressPath::for_address(alloy_address), Some(account)).unwrap();
 
                     let storage_set = &mut HashSet::new();
-                    if pre_accounts_info.get(&alloy_address).is_some() {
+                    if pre_accounts_info.contains_key(&alloy_address) {
                         *storage_set = pre_accounts_info.get(&alloy_address).unwrap().clone();
                     }
 
@@ -164,7 +164,7 @@ fn run_ethereum_execution_spec_state_tests() {
                     pre_accounts_info.remove(&alloy_address);
                 }
 
-                for (account_to_remove, _) in &pre_accounts_info {
+                for account_to_remove in pre_accounts_info.keys() {
                     tx.set_account(AddressPath::for_address(*account_to_remove), None).unwrap();
                 }
             }
@@ -225,5 +225,5 @@ fn get_state_root_and_account_storage_roots_with_alloy_trie(
         accounts.push((alloy_address, account));
     }
 
-    (state_root_unhashed(accounts.clone().into_iter()), account_storage_roots)
+    (state_root_unhashed(accounts.clone()), account_storage_roots)
 }

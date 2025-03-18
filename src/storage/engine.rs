@@ -438,13 +438,13 @@ impl<P: PageManager> StorageEngine<P> {
             "value must be a non-existent delete at this point"
         );
         let (changes_left, changes_right) = changes.split_at(shortest_common_prefix_idx);
-        return self.set_values_in_cloned_page(
+        self.set_values_in_cloned_page(
             context,
-            &[&changes_left, &changes_right[1..]].concat(),
+            &[changes_left, &changes_right[1..]].concat(),
             path_offset,
             slotted_page,
             page_index,
-        );
+        )
     }
 
     /// Handles the case when the trie is empty and we need to insert the first node
@@ -818,7 +818,7 @@ impl<P: PageManager> StorageEngine<P> {
                     // in this case, if the change(s) we want to make are deletes, they should be
                     // ignored as the child node already doesn't exist.
                     let mut index_of_first_non_delete_change = matching_changes.len();
-                    for (i, (_, value)) in matching_changes.into_iter().enumerate() {
+                    for (i, (_, value)) in matching_changes.iter().enumerate() {
                         if value.is_some() {
                             index_of_first_non_delete_change = i;
                             break;
@@ -3378,7 +3378,7 @@ mod tests {
                 changes.push((AddressPath::for_address(*address).into(), Some(account.clone().into())));
 
                 for (key, value) in storage {
-                    changes.push((StoragePath::for_address_and_slot(*address, *key).into(), Some(value.clone().into())));
+                    changes.push((StoragePath::for_address_and_slot(*address, *key).into(), Some((*value).into())));
                 }
             }
             storage_engine
@@ -3398,7 +3398,7 @@ mod tests {
                     let read_storage = storage_engine
                         .get_storage(&context, StoragePath::for_address_and_slot(address, key))
                         .unwrap();
-                    assert_eq!(read_storage, Some(value.clone()));
+                    assert_eq!(read_storage, Some(value));
                 }
             }
         }
