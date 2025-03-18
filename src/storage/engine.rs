@@ -550,8 +550,7 @@ impl<P: PageManager> StorageEngine<P> {
 
             assert!(
                 changes.len() == 1,
-                "this path should never be reached. \
-                the node has been deleted from the slotted \
+                "the node has been deleted from the slotted \
                 page and recursively trying to process anymore \
                 changes will result in an error"
             );
@@ -852,8 +851,8 @@ impl<P: PageManager> StorageEngine<P> {
                     // 3. and add new cell pointer for the new leaf node (3 bytes)
                     // when adding the new child, split the page.
                     // FIXME: is it safe to split the page here if we've already modified the page?
-                    if slotted_page.num_free_bytes()
-                        < node_size_incr + new_node.size() + CELL_POINTER_SIZE
+                    if slotted_page.num_free_bytes() <
+                        node_size_incr + new_node.size() + CELL_POINTER_SIZE
                     {
                         self.split_page(context, slotted_page)?;
                         return Err(Error::PageSplit);
