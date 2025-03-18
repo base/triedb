@@ -40,49 +40,24 @@ pub struct StorageEngine<P: PageManager> {
 struct Inner<P: PageManager> {
     page_manager: P,
     orphan_manager: OrphanPageManager,
-    status: Status,
-}
-
-#[derive(Debug)]
-enum Status {
-    Open,
-    Closed,
 }
 
 impl<P: PageManager> StorageEngine<P> {
     /// Creates a new [StorageEngine] with the given [PageManager] and [OrphanPageManager].
     pub fn new(page_manager: P, orphan_manager: OrphanPageManager) -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(Inner {
-                page_manager,
-                orphan_manager,
-                status: Status::Open,
-            })),
-        }
+        Self { inner: Arc::new(RwLock::new(Inner { page_manager, orphan_manager })) }
     }
 
     /// Unlocks any orphaned pages as of the given [SnapshotId] for reuse.
     pub(crate) fn unlock(&self, snapshot_id: SnapshotId) {
-        let mut inner = self.inner.write().unwrap();
-
-        if inner.is_closed() {
-            return;
-        }
-
-        inner.orphan_manager.unlock(snapshot_id);
+        self.inner.write().unwrap().orphan_manager.unlock(snapshot_id);
     }
 
     /// Allocates a new page from the underlying page manager.
     /// If there is an orphaned page available as of the given [SnapshotId],
     /// it is used to allocate a new page instead.
     fn allocate_page<'p>(&self, context: &mut TransactionContext) -> Result<Page<'p, RW>, Error> {
-        let mut inner = self.inner.write().unwrap();
-
-        if inner.is_closed() {
-            return Err(Error::EngineClosed);
-        }
-
-        inner.allocate_page(context)
+        self.inner.write().unwrap().allocate_page(context)
     }
 
     /// Retrieves a mutable clone of a [Page] from the underlying [PageManager].
@@ -94,11 +69,6 @@ impl<P: PageManager> StorageEngine<P> {
         page_id: PageId,
     ) -> Result<Page<'p, RW>, Error> {
         let mut inner = self.inner.write().unwrap();
-
-        if inner.is_closed() {
-            return Err(Error::EngineClosed);
-        }
-
         let original_page = inner.get_page_mut(context, page_id)?;
 
         // if the page already has the correct snapshot id, return it without cloning.
@@ -119,13 +89,7 @@ impl<P: PageManager> StorageEngine<P> {
         context: &TransactionContext,
         page_id: PageId,
     ) -> Result<Page<'p, RO>, Error> {
-        let inner = self.inner.read().unwrap();
-
-        if inner.is_closed() {
-            return Err(Error::EngineClosed);
-        }
-
-        inner.get_page(context, page_id)
+        self.inner.read().unwrap().get_page(context, page_id)
     }
 
     /// Retrieves a mutable [Page] from the underlying [PageManager].
@@ -135,13 +99,7 @@ impl<P: PageManager> StorageEngine<P> {
         context: &TransactionContext,
         page_id: PageId,
     ) -> Result<Page<'p, RW>, Error> {
-        let mut inner = self.inner.write().unwrap();
-
-        if inner.is_closed() {
-            return Err(Error::EngineClosed);
-        }
-
-        inner.get_page_mut(context, page_id)
+        self.inner.write().unwrap().get_page_mut(context, page_id)
     }
 
     /// Retrieves an [Account] from the storage engine, identified by the given [AddressPath].
@@ -1311,13 +1269,7 @@ impl<P: PageManager> StorageEngine<P> {
 
     /// Commits all outstanding data to disk.
     pub fn commit(&self, context: &TransactionContext) -> Result<(), Error> {
-        let mut inner = self.inner.write().unwrap();
-
-        if inner.is_closed() {
-            return Err(Error::EngineClosed);
-        }
-
-        inner.commit(context)
+        self.inner.write().unwrap().commit(context)
     }
 
     /// Rolls back all outstanding data to disk. Currently unimplemented.
@@ -1338,11 +1290,6 @@ impl<P: PageManager> StorageEngine<P> {
         assert!(grow_by > 1.0, "grow_by must be greater than 1.0");
 
         let mut inner = self.inner.write().unwrap();
-
-        if inner.is_closed() {
-            return Err(Error::EngineClosed);
-        }
-
         let current_page_count = inner.page_manager.size();
         let unallocated_page_count = current_page_count - context.metadata.max_page_number - 1;
         let unlocked_page_count = inner.orphan_manager.unlocked_page_count();
@@ -1364,13 +1311,7 @@ impl<P: PageManager> StorageEngine<P> {
 
     /// Resizes the storage engine to the given number of pages.
     pub(crate) fn resize(&mut self, new_page_count: PageId) -> Result<(), Error> {
-        let mut inner = self.inner.write().unwrap();
-
-        if inner.is_closed() {
-            return Err(Error::EngineClosed);
-        }
-
-        inner.resize(new_page_count)
+        self.inner.write().unwrap().resize(new_page_count)
     }
 
     /// Returns the total number of pages in the storage engine.
@@ -1379,13 +1320,9 @@ impl<P: PageManager> StorageEngine<P> {
         inner.page_manager.size()
     }
 
-    /// Closes the storage engine and commits all outstanding data to disk.
-    pub fn close(&self, context: &TransactionContext) -> Result<(), Error> {
+    /// Shrinks the storage to its minimum size and commits all outstanding data to disk.
+    pub fn shrink_and_commit(&self, context: &TransactionContext) -> Result<(), Error> {
         let mut inner = self.inner.write().unwrap();
-
-        if inner.is_closed() {
-            return Err(Error::EngineClosed);
-        }
 
         // there will always be a minimum of 256 pages (root pages + reserved orphan pages).
         let max_page_count = max(context.metadata.max_page_number + 1, 256);
@@ -1393,8 +1330,6 @@ impl<P: PageManager> StorageEngine<P> {
         inner.resize(max_page_count)?;
         // commit all outstanding data to disk.
         inner.commit(context)?;
-        // mark engine as closed, causing all operations on engine to return an error.
-        inner.status = Status::Closed;
 
         Ok(())
     }
@@ -1448,10 +1383,6 @@ fn count_subtrie_nodes(page: &SlottedPage<'_, RW>, root_index: u8) -> Result<u8,
 }
 
 impl<P: PageManager> Inner<P> {
-    fn is_closed(&self) -> bool {
-        matches!(self.status, Status::Closed)
-    }
-
     fn allocate_page<'p>(
         &mut self,
         context: &mut TransactionContext,

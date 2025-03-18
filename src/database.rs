@@ -10,11 +10,11 @@ use crate::{
 use alloy_primitives::B256;
 use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
 use dashmap::DashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Database<P: PageManager> {
-    pub(crate) inner: Arc<Inner<P>>,
+    pub(crate) inner: Inner<P>,
     metrics: DatabaseMetrics,
 }
 
@@ -128,23 +128,18 @@ impl Database<MmapPageManager> {
 
 impl<P: PageManager> Drop for Database<P> {
     fn drop(&mut self) {
-        if let Err(e) = self.close() {
-            if let Error::CloseError(engine::Error::EngineClosed) = e {
-                return;
-            }
-            panic!("Failed to close database: {:?}", e);
-        }
+        self.shrink_and_commit().expect("failed to close database")
     }
 }
 
 impl<P: PageManager> Database<P> {
     pub fn new(metadata: Metadata, storage_engine: StorageEngine<P>) -> Self {
         Self {
-            inner: Arc::new(Inner {
+            inner: Inner {
                 metadata: RwLock::new(metadata),
                 storage_engine: RwLock::new(storage_engine),
                 transaction_manager: RwLock::new(TransactionManager::new()),
-            }),
+            },
             metrics: DatabaseMetrics::default(),
         }
     }
@@ -181,11 +176,15 @@ impl<P: PageManager> Database<P> {
         Ok(())
     }
 
-    pub fn close(&mut self) -> Result<(), Error> {
+    pub fn close(mut self) -> Result<(), Error> {
+        self.shrink_and_commit()
+    }
+
+    fn shrink_and_commit(&mut self) -> Result<(), Error> {
         let metadata = self.inner.metadata.read().unwrap();
         let context = TransactionContext::new(metadata.clone());
         let storage_engine = self.inner.storage_engine.read().unwrap();
-        storage_engine.close(&context).map_err(Error::CloseError)?;
+        storage_engine.shrink_and_commit(&context).map_err(Error::CloseError)?;
         Ok(())
     }
 
