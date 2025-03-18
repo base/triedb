@@ -5,7 +5,7 @@ use std::{
 
 use alloy_trie::Nibbles;
 
-struct NibblesHasher {
+pub struct NibblesHasher {
     state: u64,
 }
 
@@ -26,7 +26,8 @@ impl Hasher for NibblesHasher {
     }
 }
 
-struct NibblesHasherBuilder;
+#[derive(Default)]
+pub struct NibblesHasherBuilder;
 
 impl BuildHasher for NibblesHasherBuilder {
     type Hasher = NibblesHasher;
