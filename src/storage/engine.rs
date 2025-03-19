@@ -376,7 +376,17 @@ impl<P: PageManager> StorageEngine<P> {
 
         // Case 1: The path does not match the node prefix, create a new branch node as the parent
         // of the current node
-        if common_prefix_length < node.prefix().len() && value.is_some() {
+        if common_prefix_length < node.prefix().len() {
+            if value.is_none() {
+                let (changes_left, changes_right) = changes.split_at(shortest_common_prefix_idx);
+                return self.set_values_in_cloned_page(
+                    context,
+                    &[changes_left, &changes_right[1..]].concat(),
+                    path_offset,
+                    slotted_page,
+                    page_index,
+                );
+            }
             return self.handle_prefix_mismatch(
                 context,
                 changes,
@@ -418,32 +428,15 @@ impl<P: PageManager> StorageEngine<P> {
         }
 
         // Case 4: Handle branch node traversal
-        if node.is_branch() {
-            return self.handle_branch_node_traversal(
-                context,
-                changes,
-                path_offset,
-                slotted_page,
-                page_index,
-                &mut node,
-                common_prefix_length,
-            );
-        }
-
-        // Case 5: We are attempting to delete a non-existent value
-        //
-        // let's remove it from our list of changes as it is a no-op
-        assert!(
-            value.is_none() && common_prefix_length < node.prefix().len(),
-            "value must be a non-existent delete at this point"
-        );
-        let (changes_left, changes_right) = changes.split_at(shortest_common_prefix_idx);
-        self.set_values_in_cloned_page(
+        assert!(node.is_branch(), "node must be branch at this point");
+        self.handle_branch_node_traversal(
             context,
-            &[changes_left, &changes_right[1..]].concat(),
+            changes,
             path_offset,
             slotted_page,
             page_index,
+            &mut node,
+            common_prefix_length,
         )
     }
 
@@ -3323,6 +3316,58 @@ mod tests {
             storage_engine.get_page(&context, context.metadata.root_subtrie_page_id).unwrap();
         let root_subtrie_contents_after = root_subtrie_page.contents().to_vec();
         assert_eq!(root_subtrie_contents_before, root_subtrie_contents_after);
+    }
+
+    #[test]
+    fn test_leaf_update_and_non_existent_delete_works() {
+        let (storage_engine, mut context) = create_test_engine(300);
+
+        // GIVEN: a trie with a single account
+        let address_nibbles_root = Nibbles::unpack(hex!(
+            "0xf80f21938e5248ec70b870ac1103d0dd01b7811550a7a5c971e1c3e85ea62492"
+        ));
+        let account = create_test_account(100, 1);
+        storage_engine
+            .set_values(
+                &mut context,
+                vec![(
+                    AddressPath::new(address_nibbles_root.clone()).into(),
+                    Some(account.clone().into()),
+                )]
+                .as_mut(),
+            )
+            .unwrap();
+        assert_eq!(context.metadata.root_subtrie_page_id, 256);
+        let root_subtrie_page =
+            storage_engine.get_page(&context, context.metadata.root_subtrie_page_id).unwrap();
+        let root_subtrie_contents_before = root_subtrie_page.contents().to_vec();
+
+        // WHEN: the same account is modified with a delete operation of a non existent value
+        let address_nibbles = Nibbles::unpack(hex!(
+            "0xf80f21938e5248ec70b870ac1103d0dd01b7811550a7ffffffffffffffffffff"
+        ));
+
+        let account2 = create_test_account(300, 1);
+        storage_engine
+            .set_values(
+                &mut context,
+                vec![
+                    (
+                        AddressPath::new(address_nibbles_root.clone()).into(),
+                        Some(account2.clone().into()),
+                    ),
+                    (AddressPath::new(address_nibbles).into(), None),
+                ]
+                .as_mut(),
+            )
+            .unwrap();
+
+        // THEN: the original account should be updated
+        let account3 = storage_engine
+            .get_account(&context, AddressPath::new(address_nibbles_root).into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(account2, account3);
     }
 
     fn address_path_for_idx(idx: u64) -> AddressPath {
