@@ -26,6 +26,8 @@ const EMPTY_ROOT_RLP: [u8; 33] =
 
 /// A node in the trie.
 /// This may be an account leaf, a storage leaf, or a branch.
+// TODO (PROTO-957): Consider wrapping this large struct into a Box
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Arbitrary)]
 pub enum Node {
     AccountLeaf {
@@ -131,14 +133,14 @@ impl Node {
         matches!(self, Self::Branch { .. } | Self::AccountLeaf { .. })
     }
 
-    /// Returns whether the [Node] is a branch.
-    pub fn is_branch(&self) -> bool {
-        matches!(self, Self::Branch { .. })
+    /// Returns whether the [Node] is an account leaf.
+    pub fn is_account_leaf(&self) -> bool {
+        matches!(self, Self::AccountLeaf { .. })
     }
 
     /// Returns whether the [Node] is a branch.
-    pub fn is_account_leaf(&self) -> bool {
-        matches!(self, Self::AccountLeaf { .. })
+    pub fn is_branch(&self) -> bool {
+        matches!(self, Self::Branch { .. })
     }
 
     /// Enumerates the children of the [Node].
