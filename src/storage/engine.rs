@@ -1129,10 +1129,6 @@ impl<P: PageManager> StorageEngine<P> {
 
             let mut root_node: Node = page.get_value(0)?;
 
-            if !root_node.has_children() {
-                println!("split with no kids: {:?}", root_node);
-            }
-
             // Find the child with the largest subtrie
             let (largest_child_index, largest_child_pointer) = root_node
                 .enumerate_children()
