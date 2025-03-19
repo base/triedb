@@ -453,7 +453,7 @@ impl<P: PageManager> StorageEngine<P> {
         if common_prefix_length < node.prefix().len() {
             if value.is_none() {
                 let (changes_left, changes_right) = changes.split_at(shortest_common_prefix_idx);
-                let changes_right = changes_right.split_first().unwrap().1;
+                let changes_right = &changes_right[1..];
                 if changes_right.is_empty() {
                     return self.set_values_in_cloned_page(
                         context,
