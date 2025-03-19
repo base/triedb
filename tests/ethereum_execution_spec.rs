@@ -142,7 +142,7 @@ fn run_ethereum_execution_spec_state_tests() {
                         storage_set.remove(&storage_key);
                     }
 
-                    // remove all storage that existed in the pre-state but is no longer exist
+                    // remove all storage that existed in the pre-state but no longer exists
                     // in the post state
                     for storage_key_to_remove in storage_set.iter() {
                         tx.set_storage_slot(
@@ -159,7 +159,7 @@ fn run_ethereum_execution_spec_state_tests() {
                     pre_accounts_info.remove(&alloy_address);
                 }
 
-                // remove all accounts that existed in the pre-state but no longer exist
+                // remove all accounts that existed in the pre-state but no longer exists
                 // in the post-state
                 for account_to_remove in pre_accounts_info.keys() {
                     tx.set_account(AddressPath::for_address(*account_to_remove), None).unwrap();
