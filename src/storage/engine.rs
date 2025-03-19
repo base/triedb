@@ -14,9 +14,9 @@ use crate::{
 };
 
 use alloy_primitives::StorageValue;
-use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
+use alloy_trie::{nybbles::common_prefix_length, Nibbles, EMPTY_ROOT_HASH};
 use std::{
-    cmp::max,
+    cmp::{max, Ordering},
     fmt::Debug,
     sync::{Arc, RwLock},
 };
@@ -439,13 +439,12 @@ impl<P: PageManager> StorageEngine<P> {
         }
 
         // Find the shortest common prefix between the node path and the changes
-        let shortest_common_prefix_idx =
-            self.find_shortest_common_prefix(changes, path_offset, &node);
+        let (shortest_common_prefix_idx, common_prefix_length) =
+            find_shortest_common_prefix(changes, path_offset, &node);
 
         let first_change = &changes[shortest_common_prefix_idx];
         let path = first_change.0.slice(path_offset as usize..);
         let value = first_change.1.as_ref();
-        let common_prefix_length = path.common_prefix_length(node.prefix());
         let common_prefix = path.slice(0..common_prefix_length);
 
         // Case 1: The path does not match the node prefix, create a new branch node as the parent
@@ -454,13 +453,26 @@ impl<P: PageManager> StorageEngine<P> {
         if common_prefix_length < node.prefix().len() {
             if value.is_none() {
                 let (changes_left, changes_right) = changes.split_at(shortest_common_prefix_idx);
-                return self.set_values_in_cloned_page(
-                    context,
-                    &[changes_left, &changes_right[1..]].concat(),
-                    path_offset,
-                    slotted_page,
-                    page_index,
-                );
+                let changes_right = &changes_right[1..];
+                if changes_right.is_empty() {
+                    return self.set_values_in_cloned_page(
+                        context,
+                        changes_left,
+                        path_offset,
+                        slotted_page,
+                        page_index,
+                    );
+                } else if changes_left.is_empty() {
+                    return self.set_values_in_cloned_page(
+                        context,
+                        changes_right,
+                        path_offset,
+                        slotted_page,
+                        page_index,
+                    );
+                } else {
+                    panic!("unexpected case - shortest_common_prefix_idx is not at either end of the changes array");
+                }
             }
             return self.handle_missing_parent_branch(
                 context,
@@ -530,28 +542,6 @@ impl<P: PageManager> StorageEngine<P> {
         assert_eq!(index, 0, "root node must be at index 0");
 
         Ok(Pointer::new(Location::for_page(slotted_page.page_id()), rlp_node))
-    }
-
-    /// Finds the index of the change with the shortest common prefix shared with the node
-    fn find_shortest_common_prefix(
-        &self,
-        changes: &[(Nibbles, Option<TrieValue>)],
-        path_offset: u8,
-        node: &Node,
-    ) -> usize {
-        let mut shortest_common_prefix_length = usize::MAX;
-        let mut shortest_common_prefix_idx = 0;
-
-        for (idx, (path, _)) in changes.iter().enumerate() {
-            let path = path.slice(path_offset as usize..);
-            let common_prefix_length = path.common_prefix_length(node.prefix());
-            if common_prefix_length < shortest_common_prefix_length {
-                shortest_common_prefix_length = common_prefix_length;
-                shortest_common_prefix_idx = idx;
-            }
-        }
-
-        shortest_common_prefix_idx
     }
 
     /// Handles the case when the path does not match the node prefix
@@ -1407,6 +1397,35 @@ impl<P: PageManager> StorageEngine<P> {
         inner.status = Status::Closed;
 
         Ok(())
+    }
+}
+
+/// Finds the index of the change with the shortest common prefix shared with the node
+/// Returns the index of the change and the length of the common prefix
+/// Requires that the changes list is sorted, otherwise the result is undefined.
+fn find_shortest_common_prefix<T>(
+    changes: &[(Nibbles, T)],
+    path_offset: u8,
+    node: &Node,
+) -> (usize, usize) {
+    let leftmost = changes.first().unwrap();
+    let leftmost_path = &leftmost.0[path_offset as usize..];
+    let rightmost = changes.last().unwrap();
+    let rightmost_path = &rightmost.0[path_offset as usize..];
+
+    debug_assert!(leftmost.0.cmp(&rightmost.0) <= Ordering::Equal, "changes must be sorted");
+    debug_assert!(
+        leftmost_path.cmp(rightmost_path) <= Ordering::Equal,
+        "changes must be sorted after slicing with path offset"
+    );
+
+    let leftmost_prefix_length = common_prefix_length(node.prefix(), leftmost_path);
+    let rightmost_prefix_length = common_prefix_length(node.prefix(), rightmost_path);
+
+    if leftmost_prefix_length <= rightmost_prefix_length {
+        (0, leftmost_prefix_length)
+    } else {
+        (changes.len() - 1, rightmost_prefix_length)
     }
 }
 
@@ -3611,7 +3630,7 @@ mod tests {
 
         // THEN: the updated account should be updated
         let account_in_database = storage_engine
-            .get_account(&context, AddressPath::new(address_nibbles_original_account).into())
+            .get_account(&context, AddressPath::new(address_nibbles_original_account))
             .unwrap()
             .unwrap();
         assert_eq!(account_in_database, updated_account);
@@ -3731,6 +3750,23 @@ mod tests {
                 assert_eq!(read_account.balance, last_revision.balance);
                 assert_eq!(read_account.code_hash, last_revision.code_hash);
             }
+        }
+
+        #[test]
+        fn fuzz_find_shortest_common_prefix(
+            mut changes in prop::collection::vec(
+                (any::<Nibbles>(), any::<bool>()),
+                1..10
+            ),
+            node in any::<Node>(),
+        ) {
+            changes.sort_by(|a, b| a.0.cmp(&b.0));
+            let (idx, shortest_common_prefix_length) = find_shortest_common_prefix(&changes, 0, &node);
+            assert!(idx == 0 || idx == changes.len() - 1, "the shortest common prefix must be found at either end of the changes list");
+
+            let shortest_from_full_iteration = changes.iter().map(|(path, _)| common_prefix_length(path, node.prefix())).min().unwrap();
+
+            assert_eq!(shortest_common_prefix_length, shortest_from_full_iteration);
         }
     }
 }
