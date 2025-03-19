@@ -251,8 +251,8 @@ impl<P: PageManager> StorageEngine<P> {
         if remaining_path.is_empty() {
             // cache the account location if it is a contract account
             if let TrieValue::Account(account) = node.value() {
-                if account.storage_root != EMPTY_ROOT_HASH
-                    && original_path.len() == ADDRESS_PATH_LENGTH
+                if account.storage_root != EMPTY_ROOT_HASH &&
+                    original_path.len() == ADDRESS_PATH_LENGTH
                 {
                     context
                         .contract_account_loc_cache
@@ -915,8 +915,8 @@ impl<P: PageManager> StorageEngine<P> {
                     // 3. and add new cell pointer for the new leaf node (3 bytes)
                     // when adding the new child, split the page.
                     // FIXME: is it safe to split the page here if we've already modified the page?
-                    if slotted_page.num_free_bytes()
-                        < node_size_incr + new_node.size() + CELL_POINTER_SIZE
+                    if slotted_page.num_free_bytes() <
+                        node_size_incr + new_node.size() + CELL_POINTER_SIZE
                     {
                         self.split_page(context, slotted_page)?;
                         return Err(Error::PageSplit);
