@@ -289,12 +289,12 @@ impl Value for Node {
             }
             Self::AccountLeaf { prefix, balance_rlp, nonce_rlp, storage_root, code_hash } => {
                 let packed_prefix_length = (prefix.len() + 1) / 2;
-                2 + packed_prefix_length
-                    + balance_rlp.len()
-                    + nonce_rlp.len()
-                    + storage_root.is_some() as usize * 37
-                    + (*code_hash != KECCAK_EMPTY) as usize * 32 // 2 bytes for flags and prefix
-                                                                 // length
+                2 + packed_prefix_length +
+                    balance_rlp.len() +
+                    nonce_rlp.len() +
+                    storage_root.is_some() as usize * 37 +
+                    (*code_hash != KECCAK_EMPTY) as usize * 32 // 2 bytes for flags and prefix
+                                                               // length
             }
             Self::Branch { prefix, children } => {
                 let (_, children_slot_size) = Self::children_slot_size(children);
@@ -328,19 +328,19 @@ impl Value for Node {
             Self::AccountLeaf { prefix, balance_rlp, nonce_rlp, code_hash, storage_root } => {
                 let prefix_length = prefix.len();
                 let packed_prefix_length = (prefix.len() + 1) / 2;
-                let total_size = 2
-                    + packed_prefix_length
-                    + balance_rlp.len()
-                    + nonce_rlp.len()
-                    + storage_root.is_some() as usize * 37
-                    + (*code_hash != KECCAK_EMPTY) as usize * 32;
+                let total_size = 2 +
+                    packed_prefix_length +
+                    balance_rlp.len() +
+                    nonce_rlp.len() +
+                    storage_root.is_some() as usize * 37 +
+                    (*code_hash != KECCAK_EMPTY) as usize * 32;
                 if buf.len() < total_size {
                     return Err(value::Error::InvalidEncoding);
                 }
 
-                let flags = 1
-                    | ((storage_root.is_some() as u8) << 7)
-                    | (((*code_hash != KECCAK_EMPTY) as u8) << 6);
+                let flags = 1 |
+                    ((storage_root.is_some() as u8) << 7) |
+                    (((*code_hash != KECCAK_EMPTY) as u8) << 6);
 
                 buf[0] = flags;
                 buf[1] = prefix_length as u8;

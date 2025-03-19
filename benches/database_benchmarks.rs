@@ -109,7 +109,7 @@ fn bench_storage_reads_single_account(c: &mut Criterion) {
         let storage_paths: Vec<StoragePath> = (0..BATCH_SIZE)
             .map(|i| {
                 let storage_key = StorageKey::from(U256::from(i));
-                
+
                 StoragePath::for_address_path_and_slot(single_address.clone(), storage_key)
             })
             .collect();
@@ -430,7 +430,7 @@ fn bench_storage_single_account_deletes(c: &mut Criterion) {
         let storage_paths: Vec<StoragePath> = (0..BATCH_SIZE)
             .map(|i| {
                 let storage_key = StorageKey::from(U256::from(i));
-                
+
                 StoragePath::for_address_path_and_slot(single_address.clone(), storage_key)
             })
             .collect();
