@@ -503,7 +503,7 @@ impl<P: PageManager> StorageEngine<P> {
         }
 
         // Case 4: Handle branch node traversal
-        assert!(node.is_branch(), "node must be branch at this point");
+        assert!(node.is_branch(), "node must be a branch at this point");
         self.handle_branch_node_traversal(
             context,
             changes,
