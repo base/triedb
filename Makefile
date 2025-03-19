@@ -2,7 +2,8 @@ BASELINE := main
 
 ### BEGIN Integration Test Variables ###
 ETHEREUM_EXECUTION_SPEC_VERSION=v4.1.0
-
+TESTS_FIXTURES_TAR_PATH=tests/fixtures_stable.tar.gz
+TESTS_FIXTURES_PATH=tests/fixtures
 ### END Integration Test Variables ###
 
 .PHONY: format
@@ -22,16 +23,22 @@ bench-compare:
 test:
 	@cargo test
 
+unit-tests:
+	@cargo test --lib
+
 integration-tests: download-ethereum-execution-spec-fixture
 	@cargo test --test '*' -- --nocapture
 
 download-ethereum-execution-spec-fixture:
 	@if [ ! -d "tests/fixtures" ]; then \
 		curl -L --output \
-		tests/fixtures_stable.tar.gz \
+		$(TESTS_FIXTURES_TAR_PATH) \
 		https://github.com/ethereum/execution-spec-tests/releases/download/$(ETHEREUM_EXECUTION_SPEC_VERSION)/fixtures_stable.tar.gz \
 		&& \
 		tar -xzf tests/fixtures_stable.tar.gz -C tests \
 		&& \
 		rm -rf tests/fixtures_stable.tar.gz; \
 	fi
+
+clean:
+	@rm -rf $(TESTS_FIXTURES_PATH)
