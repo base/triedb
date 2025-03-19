@@ -131,11 +131,6 @@ fn run_ethereum_execution_spec_state_tests() {
                         let storage_value: StorageValue =
                             B256::left_padding_from(&storage_value_bytes).into();
 
-                        // println!(
-                        //     "triedb adding storage post: {:?}, {:?}",
-                        //     alloy_address, storage_key
-                        // );
-
                         tx.set_storage_slot(
                             StoragePath::for_address_and_slot(alloy_address, storage_key),
                             Some(storage_value),
