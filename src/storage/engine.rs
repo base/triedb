@@ -392,7 +392,7 @@ impl<P: PageManager> StorageEngine<P> {
                     page_index,
                 );
             }
-            return self.handle_prefix_mismatch(
+            return self.handle_missing_parent_branch(
                 context,
                 changes,
                 path_offset,
@@ -485,7 +485,7 @@ impl<P: PageManager> StorageEngine<P> {
     }
 
     /// Handles the case when the path does not match the node prefix
-    fn handle_prefix_mismatch(
+    fn handle_missing_parent_branch(
         &self,
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
