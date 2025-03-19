@@ -4,11 +4,12 @@ use crate::{
         MmapPageManager, OrphanPageManager, PageError, PageId, PageKind, PageManager, RootPage,
     },
     snapshot::SnapshotId,
-    storage::{engine, engine::StorageEngine},
+    storage::engine::{self, StorageEngine},
     transaction::{Transaction, TransactionManager, RO, RW},
 };
 use alloy_primitives::B256;
-use alloy_trie::EMPTY_ROOT_HASH;
+use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
+use dashmap::DashMap;
 use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone)]
@@ -49,11 +50,16 @@ impl Metadata {
 pub struct TransactionContext {
     pub(crate) metadata: Metadata,
     pub(crate) transaction_metrics: TransactionMetrics,
+    pub(crate) contract_account_loc_cache: DashMap<Nibbles, (PageId, u8)>, // (page_id, cell_index)
 }
 
 impl TransactionContext {
     pub fn new(metadata: Metadata) -> Self {
-        Self { metadata, transaction_metrics: Default::default() }
+        Self {
+            metadata,
+            transaction_metrics: Default::default(),
+            contract_account_loc_cache: Default::default(),
+        }
     }
 }
 
@@ -187,6 +193,11 @@ impl<P: PageManager> Database<P> {
         self.metrics
             .ro_transaction_pages_read
             .record(context.transaction_metrics.take_pages_read() as f64);
+
+        let (cache_storage_read_hit, cache_storage_read_miss) =
+            context.transaction_metrics.take_cache_storage_read();
+        self.metrics.cache_storage_read_hit.increment(cache_storage_read_hit as u64);
+        self.metrics.cache_storage_read_miss.increment(cache_storage_read_miss as u64);
     }
 
     pub fn update_metrics_rw(&self, context: &TransactionContext) {

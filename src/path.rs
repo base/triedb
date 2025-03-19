@@ -2,6 +2,9 @@ use alloy_primitives::{keccak256, Address, StorageKey};
 use alloy_trie::Nibbles;
 use proptest_derive::Arbitrary;
 
+pub const ADDRESS_PATH_LENGTH: usize = 64;
+pub const STORAGE_PATH_LENGTH: usize = ADDRESS_PATH_LENGTH * 2;
+
 /// A path to an `account` in the storage trie.
 /// This should contain exactly 64 nibbles, representing the keccak256 hash of an address.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Arbitrary)]
@@ -16,7 +19,7 @@ impl AddressPath {
     ///
     /// This function will panic if the provided `Nibbles` slice is not 64 nibbles long.
     pub fn new(path: Nibbles) -> Self {
-        assert_eq!(path.len(), 64, "Address path must be 64 nibbles long");
+        assert_eq!(path.len(), ADDRESS_PATH_LENGTH, "Address path must be 64 nibbles long");
 
         Self { path }
     }
@@ -25,6 +28,11 @@ impl AddressPath {
     pub fn for_address(address: Address) -> Self {
         let hash = keccak256(address);
         Self { path: Nibbles::unpack(hash) }
+    }
+
+    /// Returns a reference to the nibbles of the address path.
+    pub fn to_nibbles(&self) -> &Nibbles {
+        &self.path
     }
 }
 
@@ -66,6 +74,15 @@ impl StoragePath {
     /// Returns the 64 nibble storage trie portion of the storage path.
     pub fn get_slot(&self) -> &Nibbles {
         &self.slot
+    }
+
+    /// Returns the [ADDRESS_PATH_LENGTH] nibble address portion of the storage path.
+    pub fn get_address(&self) -> &AddressPath {
+        &self.address
+    }
+
+    pub fn get_slot_offset(&self) -> usize {
+        self.address.path.len()
     }
 }
 

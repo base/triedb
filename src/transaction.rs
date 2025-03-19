@@ -69,6 +69,8 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
     pub fn get_storage_slot(&self, storage_path: StoragePath) -> Result<Option<StorageValue>, ()> {
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
         let storage_slot = storage_engine.get_storage(&self.context, storage_path).unwrap();
+
+        self.database.update_metrics_ro(&self.context);
         Ok(storage_slot)
     }
 }
