@@ -380,7 +380,17 @@ impl<P: PageManager> StorageEngine<P> {
         // Case 1: The path does not match the node prefix, create a new branch node as the parent
         // of the current node except when deleting as we don't want to expand nodes into branches
         // when removing values.
-        if common_prefix_length < node.prefix().len() && value.is_some() {
+        if common_prefix_length < node.prefix().len() {
+            if value.is_none() {
+                let (changes_left, changes_right) = changes.split_at(shortest_common_prefix_idx);
+                return self.set_values_in_cloned_page(
+                    context,
+                    &[changes_left, &changes_right[1..]].concat(),
+                    path_offset,
+                    slotted_page,
+                    page_index,
+                );
+            }
             return self.handle_prefix_mismatch(
                 context,
                 changes,
@@ -422,32 +432,15 @@ impl<P: PageManager> StorageEngine<P> {
         }
 
         // Case 4: Handle branch node traversal
-        if node.is_branch() {
-            return self.handle_branch_node_traversal(
-                context,
-                changes,
-                path_offset,
-                slotted_page,
-                page_index,
-                &mut node,
-                common_prefix_length,
-            );
-        }
-
-        // Case 5: We are attempting to delete a non-existent value
-        //
-        // let's remove it from our list of changes as it is a no-op
-        assert!(
-            value.is_none() && common_prefix_length < node.prefix().len(),
-            "value must be a non-existent delete at this point"
-        );
-        let (changes_left, changes_right) = changes.split_at(shortest_common_prefix_idx);
-        self.set_values_in_cloned_page(
+        assert!(node.is_branch(), "node must be a branch at this point");
+        self.handle_branch_node_traversal(
             context,
-            &[changes_left, &changes_right[1..]].concat(),
+            changes,
             path_offset,
             slotted_page,
             page_index,
+            &mut node,
+            common_prefix_length,
         )
     }
 
