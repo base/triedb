@@ -479,8 +479,6 @@ impl<P: PageManager> StorageEngine<P> {
 
         // Case 3: Handle leaf node with child pointer (e.g., AccountLeaf with storage)
         if !node.is_branch() {
-            // TODO: cache the child pointer in the node
-            // what is the path so far?
             return self.handle_leaf_node_traversal(
                 context,
                 changes,
