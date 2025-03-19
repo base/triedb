@@ -10,7 +10,7 @@ use crate::{
     path::{AddressPath, StoragePath},
     storage::engine::StorageEngine,
 };
-use alloy_primitives::StorageValue;
+use alloy_primitives::{StorageValue, B256};
 use alloy_trie::Nibbles;
 pub use manager::TransactionManager;
 use sealed::sealed;
@@ -70,6 +70,10 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
         let storage_slot = storage_engine.get_storage(&self.context, storage_path).unwrap();
         Ok(storage_slot)
+    }
+
+    pub fn state_root(&self) -> B256 {
+        self.context.metadata.state_root
     }
 }
 
