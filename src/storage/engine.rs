@@ -158,7 +158,7 @@ impl<P: PageManager> StorageEngine<P> {
         let slotted_page = SlottedPage::try_from(page)?;
         let path: Nibbles = address_path.into();
 
-        match self.get_value_from_page(context, &path, &path, slotted_page, 0)? {
+        match self.get_value_from_page_2(context, &path, 0, slotted_page, 0)? {
             Some(TrieValue::Account(account)) => Ok(Some(account)),
             _ => Ok(None),
         }
@@ -180,11 +180,12 @@ impl<P: PageManager> StorageEngine<P> {
         let nibbles = storage_path.get_address().to_nibbles();
         let cache_location = context.contract_account_loc_cache.get::<Nibbles>(nibbles);
         // get page_index, slotted_page_id, path
-        let (slotted_page, page_index, path) = match cache_location {
+        let (slotted_page, page_index, path_offset) = match cache_location {
             Some(cache_location) => {
                 context.transaction_metrics.inc_cache_storage_read_hit();
 
-                let slot = storage_path.get_slot();
+                // let slot = storage_path.get_slot();
+                let path_offset = storage_path.get_slot_offset();
                 let (page_id, page_index) = *cache_location;
 
                 // read the current account
@@ -205,21 +206,26 @@ impl<P: PageManager> StorageEngine<P> {
                     let child_slotted_page = SlottedPage::try_from(child_page)?;
                     (child_slotted_page, 0)
                 };
-                (slotted_page, page_index, slot)
+                (slotted_page, page_index, path_offset)
             }
             None => {
                 context.transaction_metrics.inc_cache_storage_read_miss();
 
                 let page_id = context.metadata.root_subtrie_page_id;
-                let page_index = 0;
 
                 let page = self.get_page(context, page_id)?;
                 let slotted_page = SlottedPage::try_from(page)?;
-                (slotted_page, page_index, &original_path)
+                (slotted_page, 0, 0)
             }
         };
 
-        match self.get_value_from_page(context, &original_path, path, slotted_page, page_index)? {
+        match self.get_value_from_page_2(
+            context,
+            &original_path,
+            path_offset,
+            slotted_page,
+            page_index,
+        )? {
             Some(TrieValue::Storage(storage_value)) => Ok(Some(storage_value)),
             _ => Ok(None),
         }
@@ -227,22 +233,24 @@ impl<P: PageManager> StorageEngine<P> {
 
     /// Retrieves a [TrieValue] from the given page or any of its descendants.
     /// Returns [None] if the path is not found.
-    fn get_value_from_page(
+    fn get_value_from_page_2(
         &self,
         context: &TransactionContext,
         original_path: &Nibbles,
-        path: &Nibbles,
+        path_offset: usize,
         slotted_page: SlottedPage<'_, RO>,
         page_index: u8,
     ) -> Result<Option<TrieValue>, Error> {
         let node: Node = slotted_page.get_value(page_index)?;
 
-        let common_prefix_length = path.common_prefix_length(node.prefix());
+        let common_prefix_length =
+            original_path.slice(path_offset..).common_prefix_length(node.prefix());
+        // let common_prefix_length = path.common_prefix_length(node.prefix());
         if common_prefix_length < node.prefix().len() {
             return Ok(None);
         }
 
-        let remaining_path = path.slice(common_prefix_length..);
+        let remaining_path = original_path.slice(path_offset + common_prefix_length..);
         if remaining_path.is_empty() {
             // cache the account location if it is a contract account
             if let TrieValue::Account(account) = node.value() {
@@ -261,22 +269,22 @@ impl<P: PageManager> StorageEngine<P> {
         let child_pointer =
             if !node.is_branch() { node.direct_child() } else { node.child(remaining_path[0]) };
 
-        let remaining_path = if !node.is_branch() {
+        let new_path_offset = if !node.is_branch() {
             // if we are at an AccountLeaf, we need a "free hop" to the storage trie
             // so the remaining_path needs to contain the current nibble.
-            path.slice(common_prefix_length..)
+            path_offset + common_prefix_length
         } else {
-            path.slice(common_prefix_length + 1..)
+            path_offset + common_prefix_length + 1
         };
 
         match child_pointer {
             Some(child_pointer) => {
                 let child_location = child_pointer.location();
                 if child_location.cell_index().is_some() {
-                    self.get_value_from_page(
+                    self.get_value_from_page_2(
                         context,
                         original_path,
-                        &remaining_path,
+                        new_path_offset,
                         slotted_page,
                         child_location.cell_index().unwrap(),
                     )
@@ -284,10 +292,10 @@ impl<P: PageManager> StorageEngine<P> {
                     let child_page_id = child_location.page_id().unwrap();
                     let child_page = self.get_page(context, child_page_id)?;
                     let child_slotted_page = SlottedPage::try_from(child_page)?;
-                    self.get_value_from_page(
+                    self.get_value_from_page_2(
                         context,
                         original_path,
-                        &remaining_path,
+                        new_path_offset,
                         child_slotted_page,
                         0,
                     )
@@ -296,6 +304,78 @@ impl<P: PageManager> StorageEngine<P> {
             None => Ok(None),
         }
     }
+
+    /// Retrieves a [TrieValue] from the given page or any of its descendants.
+    /// Returns [None] if the path is not found.
+    // fn get_value_from_page(
+    //     &self,
+    //     context: &TransactionContext,
+    //     original_path: &Nibbles,
+    //     path: &Nibbles,
+    //     slotted_page: SlottedPage<'_, RO>,
+    //     page_index: u8,
+    // ) -> Result<Option<TrieValue>, Error> {
+    //     let node: Node = slotted_page.get_value(page_index)?;
+
+    //     let common_prefix_length = path.common_prefix_length(node.prefix());
+    //     if common_prefix_length < node.prefix().len() {
+    //         return Ok(None);
+    //     }
+
+    //     let remaining_path = path.slice(common_prefix_length..);
+    //     if remaining_path.is_empty() {
+    //         // cache the account location if it is a contract account
+    //         if let TrieValue::Account(account) = node.value() {
+    //             if account.storage_root != EMPTY_ROOT_HASH &&
+    //                 original_path.len() == ADDRESS_PATH_LENGTH
+    //             {
+    //                 context
+    //                     .contract_account_loc_cache
+    //                     .insert(original_path.clone(), (slotted_page.page_id(), page_index));
+    //             }
+    //         }
+
+    //         return Ok(Some(node.value()));
+    //     }
+
+    //     let child_pointer =
+    //         if !node.is_branch() { node.direct_child() } else { node.child(remaining_path[0]) };
+
+    //     let remaining_path = if !node.is_branch() {
+    //         // if we are at an AccountLeaf, we need a "free hop" to the storage trie
+    //         // so the remaining_path needs to contain the current nibble.
+    //         path.slice(common_prefix_length..)
+    //     } else {
+    //         path.slice(common_prefix_length + 1..)
+    //     };
+
+    //     match child_pointer {
+    //         Some(child_pointer) => {
+    //             let child_location = child_pointer.location();
+    //             if child_location.cell_index().is_some() {
+    //                 self.get_value_from_page(
+    //                     context,
+    //                     original_path,
+    //                     &remaining_path,
+    //                     slotted_page,
+    //                     child_location.cell_index().unwrap(),
+    //                 )
+    //             } else {
+    //                 let child_page_id = child_location.page_id().unwrap();
+    //                 let child_page = self.get_page(context, child_page_id)?;
+    //                 let child_slotted_page = SlottedPage::try_from(child_page)?;
+    //                 self.get_value_from_page(
+    //                     context,
+    //                     original_path,
+    //                     &remaining_path,
+    //                     child_slotted_page,
+    //                     0,
+    //                 )
+    //             }
+    //         }
+    //         None => Ok(None),
+    //     }
+    // }
 
     pub fn set_values(
         &self,

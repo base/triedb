@@ -80,6 +80,10 @@ impl StoragePath {
     pub fn get_address(&self) -> &AddressPath {
         &self.address
     }
+
+    pub fn get_slot_offset(&self) -> usize {
+        self.address.path.len()
+    }
 }
 
 impl From<StoragePath> for Nibbles {
