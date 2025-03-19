@@ -12,7 +12,7 @@ use crate::{
     snapshot::SnapshotId,
 };
 
-use alloy_primitives::StorageValue;
+use alloy_primitives::{FixedBytes, StorageValue};
 use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
 use std::{
     cmp::max,
@@ -178,14 +178,12 @@ impl<P: PageManager> StorageEngine<P> {
 
         // check the cache
         let nibbles = storage_path.get_address().to_nibbles();
-        let cache_location = context.contract_account_loc_cache.get::<Nibbles>(nibbles);
+        let cache_location = context.contract_account_loc_cache.get(&nibbles);
         let (slotted_page, page_index, path_offset) = match cache_location {
-            Some(cache_location) => {
+            Some((page_id, page_index)) => {
                 context.transaction_metrics.inc_cache_storage_read_hit();
 
                 let path_offset = storage_path.get_slot_offset();
-                let (page_id, page_index) = *cache_location;
-
                 // read the current account
                 let page = self.get_page(context, page_id)?;
                 let slotted_page = SlottedPage::try_from(page)?;
@@ -255,7 +253,15 @@ impl<P: PageManager> StorageEngine<P> {
                 {
                     context
                         .contract_account_loc_cache
-                        .insert(original_path.clone(), (slotted_page.page_id(), page_index));
+                        .insert(original_path, (slotted_page.page_id(), page_index));
+
+                    // let mut packed = [0; 32];
+                    // original_path.pack_to(&mut packed);
+
+                    // context.cache.insert(
+                    //     FixedBytes::from_slice(&packed),
+                    //     (slotted_page.page_id(), page_index),
+                    // );
                 }
             }
 
@@ -325,7 +331,7 @@ impl<P: PageManager> StorageEngine<P> {
         changes.iter().for_each(|(path, _)| {
             if path.len() == STORAGE_PATH_LENGTH {
                 let address_path = AddressPath::new(path.slice(0..ADDRESS_PATH_LENGTH));
-                context.contract_account_loc_cache.remove::<Nibbles>(&address_path.into());
+                context.contract_account_loc_cache.remove(&address_path.to_nibbles());
             }
         });
 
@@ -2140,8 +2146,7 @@ mod tests {
             let read_account =
                 storage_engine.get_account(&context, address_path.clone()).unwrap().unwrap();
             assert_eq!(read_account, account);
-            let cached_location =
-                context.contract_account_loc_cache.get::<Nibbles>(&address_path.into());
+            let cached_location = context.contract_account_loc_cache.get(address_path.to_nibbles());
             assert!(cached_location.is_none());
         }
         {
@@ -2201,7 +2206,7 @@ mod tests {
 
             // the account should be cached
             let account_cache_location =
-                context.contract_account_loc_cache.get::<Nibbles>(&address_path.into()).unwrap();
+                context.contract_account_loc_cache.get(address_path.to_nibbles()).unwrap();
             assert_eq!(account_cache_location.0, 257);
             assert_eq!(account_cache_location.1, 2); // 0 is the branch page, 1 is the first EOA
                                                      // account, 2 is the this contract account
@@ -2290,7 +2295,7 @@ mod tests {
 
             // the cache should be invalidated
             let account_cache_location =
-                context.contract_account_loc_cache.get::<Nibbles>(&address_path.into());
+                context.contract_account_loc_cache.get(address_path.to_nibbles());
             assert!(account_cache_location.is_none());
         }
     }
