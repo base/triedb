@@ -170,6 +170,11 @@ impl<P: PageManager> Database<P> {
         Ok(Transaction::new(context, self, Some(storage_engine)))
     }
 
+    pub fn state_root(&self) -> B256 {
+        let metadata = self.inner.metadata.read().unwrap();
+        metadata.state_root
+    }
+
     pub(crate) fn resize(&self, new_page_count: PageId) -> Result<(), ()> {
         let mut storage_engine = self.inner.storage_engine.write().unwrap();
         storage_engine.resize(new_page_count).unwrap();
