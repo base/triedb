@@ -63,7 +63,6 @@ fn run_ethereum_execution_spec_state_tests() {
                 let mut storage_set = HashSet::new();
 
                 // add all the storage values for this account
-                let mut tmp_alloy_storage_pre_test: Vec<(StorageKey, StorageValue)> = Vec::new();
                 let storage_map = account_state["storage"].as_object().unwrap();
                 for (storage_key_kex_string, storage_json_value) in storage_map.iter() {
                     let storage_key_bytes: Bytes = storage_key_kex_string.parse().unwrap();
@@ -79,8 +78,6 @@ fn run_ethereum_execution_spec_state_tests() {
                         Some(storage_value),
                     )
                     .unwrap();
-
-                    tmp_alloy_storage_pre_test.push((storage_key, storage_value));
 
                     storage_set.insert(storage_key);
                 }
