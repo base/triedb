@@ -263,20 +263,14 @@ impl<P: PageManager> StorageEngine<P> {
             return Ok(Some(node.value()));
         }
 
-        let child_pointer = match node {
-            AccountLeaf { ref storage_root, .. } => storage_root.as_ref(),
-            Branch { ref children, .. } => children[remaining_path[0] as usize].as_ref(),
-            _ => unreachable!(),
-        };
-
-        let new_path_offset = match node {
-            AccountLeaf { .. } =>
-            // if we are at an AccountLeaf, we need a "free hop" to the storage trie
-            // so the remaining_path needs to contain the current nibble.
-            {
-                path_offset + common_prefix_length
+        let (child_pointer, new_path_offset) = match node {
+            AccountLeaf { ref storage_root, .. } => {
+                (storage_root.as_ref(), path_offset + common_prefix_length)
             }
-            Branch { .. } => path_offset + common_prefix_length + 1,
+            Branch { ref children, .. } => (
+                children[remaining_path[0] as usize].as_ref(),
+                path_offset + common_prefix_length + 1,
+            ),
             _ => unreachable!(),
         };
 
