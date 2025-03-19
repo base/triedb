@@ -185,8 +185,7 @@ impl<P: PageManager> StorageEngine<P> {
                 context.transaction_metrics.inc_cache_storage_read_hit();
 
                 let slot = storage_path.get_slot();
-                let page_id = cache_location.0;
-                let page_index = cache_location.1;
+                let (page_id, page_index) = *cache_location;
 
                 // read the current account
                 let page = self.get_page(context, page_id)?;
