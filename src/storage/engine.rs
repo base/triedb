@@ -10,6 +10,7 @@ use crate::{
     path::{AddressPath, StoragePath},
     pointer::Pointer,
     snapshot::SnapshotId,
+    storage::engine::Node::{AccountLeaf, Branch},
 };
 
 use alloy_primitives::StorageValue;
@@ -204,10 +205,10 @@ impl<P: PageManager> StorageEngine<P> {
             return Ok(Some(node.value()));
         }
 
-        let child_pointer = if node.is_account_leaf() {
-            node.direct_child()
-        } else {
-            node.child(remaining_path[0])
+        let child_pointer = match node {
+            AccountLeaf { ref storage_root, .. } => storage_root.as_ref(),
+            Branch { ref children, .. } => children[remaining_path[0] as usize].as_ref(),
+            _ => unreachable!(),
         };
 
         let remaining_path = if node.is_account_leaf() {
@@ -813,16 +814,15 @@ impl<P: PageManager> StorageEngine<P> {
 
                     // in this case, if the change(s) we want to make are deletes, they should be
                     // ignored as the child node already doesn't exist.
-                    let mut index_of_first_non_delete_change = matching_changes.len();
-                    for (i, (_, value)) in matching_changes.iter().enumerate() {
-                        if value.is_some() {
-                            index_of_first_non_delete_change = i;
-                            break;
-                        }
-                    }
+                    let index_of_first_non_delete_change =
+                        matching_changes.iter().position(|(_, value)| value.is_some());
 
-                    let (_, matching_changes_without_leading_deletes) =
-                        matching_changes.split_at(index_of_first_non_delete_change);
+                    let matching_changes_without_leading_deletes =
+                        match index_of_first_non_delete_change {
+                            Some(index) => matching_changes.split_at(index).1,
+                            None => &[],
+                        };
+
                     if matching_changes_without_leading_deletes.is_empty() {
                         continue;
                     }
