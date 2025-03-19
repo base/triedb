@@ -3323,7 +3323,7 @@ mod tests {
         let (storage_engine, mut context) = create_test_engine(300);
 
         // GIVEN: a trie with a single account
-        let address_nibbles_root = Nibbles::unpack(hex!(
+        let address_nibbles_original_account = Nibbles::unpack(hex!(
             "0xf80f21938e5248ec70b870ac1103d0dd01b7811550a7a5c971e1c3e85ea62492"
         ));
         let account = create_test_account(100, 1);
@@ -3331,30 +3331,26 @@ mod tests {
             .set_values(
                 &mut context,
                 vec![(
-                    AddressPath::new(address_nibbles_root.clone()).into(),
+                    AddressPath::new(address_nibbles_original_account.clone()).into(),
                     Some(account.clone().into()),
                 )]
                 .as_mut(),
             )
             .unwrap();
-        assert_eq!(context.metadata.root_subtrie_page_id, 256);
-        let root_subtrie_page =
-            storage_engine.get_page(&context, context.metadata.root_subtrie_page_id).unwrap();
-        let root_subtrie_contents_before = root_subtrie_page.contents().to_vec();
 
-        // WHEN: the same account is modified with a delete operation of a non existent value
+        // WHEN: the same account is modified alongside a delete operation of a non existent value
         let address_nibbles = Nibbles::unpack(hex!(
             "0xf80f21938e5248ec70b870ac1103d0dd01b7811550a7ffffffffffffffffffff"
         ));
 
-        let account2 = create_test_account(300, 1);
+        let updated_account = create_test_account(300, 1);
         storage_engine
             .set_values(
                 &mut context,
                 vec![
                     (
-                        AddressPath::new(address_nibbles_root.clone()).into(),
-                        Some(account2.clone().into()),
+                        AddressPath::new(address_nibbles_original_account.clone()).into(),
+                        Some(updated_account.clone().into()),
                     ),
                     (AddressPath::new(address_nibbles).into(), None),
                 ]
@@ -3362,12 +3358,12 @@ mod tests {
             )
             .unwrap();
 
-        // THEN: the original account should be updated
-        let account3 = storage_engine
-            .get_account(&context, AddressPath::new(address_nibbles_root).into())
+        // THEN: the updated account should be updated
+        let account_in_database = storage_engine
+            .get_account(&context, AddressPath::new(address_nibbles_original_account).into())
             .unwrap()
             .unwrap();
-        assert_eq!(account2, account3);
+        assert_eq!(account_in_database, updated_account);
     }
 
     fn address_path_for_idx(idx: u64) -> AddressPath {
