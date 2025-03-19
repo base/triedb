@@ -542,8 +542,9 @@ impl<P: PageManager> StorageEngine<P> {
 
             slotted_page.delete_value(page_index)?;
 
-            assert!(
-                changes.len() == 1,
+            assert_eq!(
+                changes.len(),
+                1,
                 "the node has been deleted from the slotted \
                 page and recursively trying to process anymore \
                 changes will result in an error"
@@ -819,7 +820,7 @@ impl<P: PageManager> StorageEngine<P> {
 
                     let matching_changes_without_leading_deletes =
                         match index_of_first_non_delete_change {
-                            Some(index) => matching_changes.split_at(index).1,
+                            Some(index) => &matching_changes[index..],
                             None => &[],
                         };
 
