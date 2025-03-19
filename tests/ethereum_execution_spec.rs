@@ -21,9 +21,7 @@ use walkdir::WalkDir;
 fn run_ethereum_execution_spec_state_tests() {
     for test_spec_entry in
         WalkDir::new("tests/fixtures/state_tests").into_iter().filter_map(Result::ok).filter(|e| {
-            !e.file_type().is_dir() &&
-                e.path().extension().is_some() &&
-                e.path().extension().unwrap() == "json"
+            e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "json")
         })
     {
         let test_file = std::fs::File::open(test_spec_entry.path()).unwrap();

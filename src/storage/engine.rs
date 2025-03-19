@@ -1414,7 +1414,7 @@ impl<P: PageManager> StorageEngine<P> {
 fn count_subtrie_nodes(page: &SlottedPage<'_, RW>, root_index: u8) -> Result<u8, Error> {
     let mut count = 1; // Count the root node
     let node: Node = page.get_value(root_index)?;
-    if !node.is_branch() {
+    if !node.has_children() {
         return Ok(count);
     }
 
