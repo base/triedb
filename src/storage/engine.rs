@@ -453,13 +453,26 @@ impl<P: PageManager> StorageEngine<P> {
         if common_prefix_length < node.prefix().len() {
             if value.is_none() {
                 let (changes_left, changes_right) = changes.split_at(shortest_common_prefix_idx);
-                return self.set_values_in_cloned_page(
-                    context,
-                    &[changes_left, &changes_right[1..]].concat(),
-                    path_offset,
-                    slotted_page,
-                    page_index,
-                );
+                let changes_right = changes_right.split_first().unwrap().1;
+                if changes_right.is_empty() {
+                    return self.set_values_in_cloned_page(
+                        context,
+                        changes_left,
+                        path_offset,
+                        slotted_page,
+                        page_index,
+                    );
+                } else if changes_left.is_empty() {
+                    return self.set_values_in_cloned_page(
+                        context,
+                        changes_right,
+                        path_offset,
+                        slotted_page,
+                        page_index,
+                    );
+                } else {
+                    panic!("unexpected case - shortest_common_prefix_idx is not at either end of the changes array");
+                }
             }
             return self.handle_missing_parent_branch(
                 context,
