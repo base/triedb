@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use alloy_primitives::Address;
 use alloy_trie::Nibbles;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use dashmap::DashMap;
 use rand::prelude::*;
 use triedb::{context::B512Map, path::AddressPath};
 
@@ -43,16 +42,6 @@ fn bench_hashmaps(c: &mut Criterion) {
             });
         });
 
-        group.bench_function(format!("dashmap_insert_{}", size), |b| {
-            b.iter(|| {
-                let map = DashMap::with_capacity(1000);
-                for (i, nibbles) in test_data.iter().enumerate() {
-                    map.insert(nibbles.clone(), (i as u32, 0u8));
-                }
-                black_box(map)
-            });
-        });
-
         group.bench_function(format!("b512map_fbhash_insert_{}", size), |b| {
             b.iter(|| {
                 let map = B512Map::with_capacity(1000);
@@ -65,26 +54,16 @@ fn bench_hashmaps(c: &mut Criterion) {
 
         // Create pre-populated maps for lookup benchmarks
         let mut default_map = HashMap::with_capacity(1000);
-        let dashmap = DashMap::with_capacity(1000);
         let b512_map = B512Map::with_capacity(1000);
         for (i, nibbles) in test_data.iter().enumerate() {
             default_map.insert(nibbles.clone(), (i as u32, 0u8));
             b512_map.insert(nibbles, (i as u32, 0u8));
-            dashmap.insert(nibbles.clone(), (i as u32, 0u8));
         }
 
         group.bench_function(format!("default_hashmap_lookup_{}", size), |b| {
             b.iter(|| {
                 for nibbles in test_data.iter() {
                     black_box(default_map.get(nibbles));
-                }
-            });
-        });
-
-        group.bench_function(format!("dashmap_lookup_{}", size), |b| {
-            b.iter(|| {
-                for nibbles in test_data.iter() {
-                    black_box(dashmap.get(nibbles));
                 }
             });
         });
