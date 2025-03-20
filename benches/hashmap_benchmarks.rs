@@ -34,19 +34,19 @@ fn bench_hashmaps(c: &mut Criterion) {
         group.bench_function(format!("default_hash_insert_{}", size), |b| {
             b.iter(|| {
                 let mut map = HashMap::with_capacity(1000);
-                for (i, nibbles) in test_data.iter().enumerate() {
+                test_data.iter().enumerate().for_each(|(i, nibbles)| {
                     map.insert(nibbles.clone(), (i as u32, 0u8));
-                }
+                });
                 black_box(map)
             });
         });
 
-        group.bench_function(format!("b512map_fbhash_insert_{}", size), |b| {
+        group.bench_function(format!("b512map_fbbhash_insert_{}", size), |b| {
             b.iter(|| {
                 let map = B512Map::with_capacity(1000);
-                for (i, nibbles) in test_data.iter().enumerate() {
+                test_data.iter().enumerate().for_each(|(i, nibbles)| {
                     map.insert(nibbles, (i as u32, 0u8));
-                }
+                });
                 black_box(map)
             });
         });
@@ -54,24 +54,24 @@ fn bench_hashmaps(c: &mut Criterion) {
         // Create pre-populated maps for lookup benchmarks
         let mut default_map = HashMap::with_capacity(1000);
         let b512_map = B512Map::with_capacity(1000);
-        for (i, nibbles) in test_data.iter().enumerate() {
+        test_data.iter().enumerate().for_each(|(i, nibbles)| {
             default_map.insert(nibbles.clone(), (i as u32, 0u8));
             b512_map.insert(nibbles, (i as u32, 0u8));
-        }
+        });
 
         group.bench_function(format!("default_hashmap_lookup_{}", size), |b| {
             b.iter(|| {
-                for nibbles in test_data.iter() {
+                test_data.iter().for_each(|nibbles| {
                     black_box(default_map.get(nibbles));
-                }
+                });
             });
         });
 
         group.bench_function(format!("b512map_lookup_{}", size), |b| {
             b.iter(|| {
-                for nibbles in test_data.iter() {
+                test_data.iter().for_each(|nibbles| {
                     black_box(b512_map.get(nibbles));
-                }
+                });
             });
         });
     }
