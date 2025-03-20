@@ -39,9 +39,9 @@ tests/fixtures: tests/fixtures_stable.tar.gz
 	@rm -rf tests/fixtures_stable.tar.gz
 
 tests/fixtures_stable.tar.gz:
-	@curl -L https://github.com/ethereum/execution-spec-tests/releases/download/$(ETHEREUM_EXECUTION_SPEC_VERSION)/fixtures_stable.tar.gz > $@.tar
-	@sha384sum -c <<< "$(ETHEREUM_EXECUTION_SPEC_VERSION_FILE_HASH) $@.tar"
-	@mv $@.tar $@
+	@curl -L https://github.com/ethereum/execution-spec-tests/releases/download/$(ETHEREUM_EXECUTION_SPEC_VERSION)/fixtures_stable.tar.gz > $@.tmp.tar
+	@sha384sum -c <<< "$(ETHEREUM_EXECUTION_SPEC_VERSION_FILE_HASH) $@.tmp.tar"
+	@mv $@.tmp.tar $@
 
 .PHONY: clean
 clean:
