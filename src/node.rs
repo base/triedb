@@ -133,6 +133,11 @@ impl Node {
         matches!(self, Self::Branch { .. } | Self::AccountLeaf { .. })
     }
 
+    /// Returns whether the [Node] is an account leaf.
+    pub fn is_account_leaf(&self) -> bool {
+        matches!(self, Self::AccountLeaf { .. })
+    }
+
     /// Returns whether the [Node] is a branch.
     pub fn is_branch(&self) -> bool {
         matches!(self, Self::Branch { .. })
