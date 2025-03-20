@@ -2,7 +2,11 @@ use crate::{
     account::Account,
     database::TransactionContext,
     location::Location,
-    node::{Node, TrieValue},
+    node::{
+        Node,
+        Node::{AccountLeaf, Branch},
+        TrieValue,
+    },
     page::{
         OrphanPageManager, Page, PageError, PageId, PageManager, RootPage, SlottedPage,
         CELL_POINTER_SIZE, PAGE_DATA_SIZE, RO, RW,
@@ -10,7 +14,6 @@ use crate::{
     path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH, STORAGE_PATH_LENGTH},
     pointer::Pointer,
     snapshot::SnapshotId,
-    storage::engine::Node::{AccountLeaf, Branch},
 };
 
 use alloy_primitives::StorageValue;
@@ -111,6 +114,16 @@ impl<P: PageManager> StorageEngine<P> {
         inner.orphan_manager.add_orphaned_page_id(context.metadata.snapshot_id, page_id);
         new_page.contents_mut().copy_from_slice(original_page.contents());
         Ok(new_page)
+    }
+
+    /// Retrieves a read-only [SlottedPage] from the underlying [PageManager].
+    pub(crate) fn get_slotted_page<'p>(
+        &self,
+        context: &TransactionContext,
+        page_id: PageId,
+    ) -> Result<SlottedPage<'p, RO>, Error> {
+        let page = self.get_page(context, page_id)?;
+        Ok(SlottedPage::try_from(page)?)
     }
 
     /// Retrieves a read-only [Page] from the underlying [PageManager].
@@ -431,7 +444,7 @@ impl<P: PageManager> StorageEngine<P> {
 
         if changes.is_empty() {
             // no changes to make. just return a pointer to ourself.
-            let rlp_node = node.rlp_encode();
+            let rlp_node = node.as_rlp_node();
             return Ok(Some(Pointer::new(
                 self.node_location(slotted_page.page_id(), page_index),
                 rlp_node,
@@ -536,7 +549,7 @@ impl<P: PageManager> StorageEngine<P> {
         slotted_page: &mut SlottedPage<'_, RW>,
     ) -> Result<Pointer, Error> {
         let new_node = Node::new_leaf(path.clone(), value);
-        let rlp_node = new_node.rlp_encode();
+        let rlp_node = new_node.as_rlp_node();
 
         let index = slotted_page.insert_value(&new_node)?;
         assert_eq!(index, 0, "root node must be at index 0");
@@ -569,7 +582,7 @@ impl<P: PageManager> StorageEngine<P> {
         // Update the prefix of the existing node and insert it into the page
         let node_branch_index = node.prefix()[common_prefix_length];
         node.set_prefix(node.prefix().slice(common_prefix_length + 1..));
-        let rlp_node = node.rlp_encode();
+        let rlp_node = node.as_rlp_node();
         let location = Location::for_cell(slotted_page.insert_value(node)?);
         new_parent_branch.set_child(node_branch_index, Pointer::new(location, rlp_node));
 
@@ -631,7 +644,7 @@ impl<P: PageManager> StorageEngine<P> {
             }
         }
 
-        let rlp_node = new_node.rlp_encode();
+        let rlp_node = new_node.as_rlp_node();
         slotted_page.set_value(page_index, &new_node)?;
 
         // Handle remaining changes
@@ -678,7 +691,7 @@ impl<P: PageManager> StorageEngine<P> {
 
                 self.update_node_child(node, slotted_page, page_index, new_child_pointer, 0)?;
 
-                let rlp_node = node.rlp_encode();
+                let rlp_node = node.as_rlp_node();
                 Ok(Some(Pointer::new(
                     self.node_location(slotted_page.page_id(), page_index),
                     rlp_node,
@@ -695,7 +708,7 @@ impl<P: PageManager> StorageEngine<P> {
 
                 self.update_node_child(node, slotted_page, page_index, new_child_pointer, 0)?;
 
-                let rlp_node = node.rlp_encode();
+                let rlp_node = node.as_rlp_node();
                 Ok(Some(Pointer::new(
                     self.node_location(slotted_page.page_id(), page_index),
                     rlp_node,
@@ -728,7 +741,7 @@ impl<P: PageManager> StorageEngine<P> {
     ) -> Result<Option<Pointer>, Error> {
         if changes.is_empty() {
             // there are no changes to make. just return a pointer to our current node.
-            let rlp_node = node.rlp_encode();
+            let rlp_node = node.as_rlp_node();
             return Ok(Some(Pointer::new(
                 self.node_location(slotted_page.page_id(), page_index),
                 rlp_node,
@@ -763,12 +776,12 @@ impl<P: PageManager> StorageEngine<P> {
             return Err(Error::PageSplit);
         }
 
-        let rlp_node = new_node.rlp_encode();
+        let rlp_node = new_node.as_rlp_node();
 
         // Insert the new node and update the parent
         let location = Location::for_cell(slotted_page.insert_value(&new_node)?);
         node.set_child(0, Pointer::new(location, rlp_node));
-        let rlp_node = node.rlp_encode();
+        let rlp_node = node.as_rlp_node();
         slotted_page.set_value(page_index, node)?;
 
         if changes.is_empty() {
@@ -912,7 +925,7 @@ impl<P: PageManager> StorageEngine<P> {
                         return Err(Error::PageSplit);
                     }
 
-                    let rlp_node = new_node.rlp_encode();
+                    let rlp_node = new_node.as_rlp_node();
                     let location = Location::for_cell(slotted_page.insert_value(&new_node)?);
                     node.set_child(child_index, Pointer::new(location, rlp_node));
                     slotted_page.set_value(page_index, node)?;
@@ -969,7 +982,7 @@ impl<P: PageManager> StorageEngine<P> {
             );
         } else {
             // Normal branch node with multiple children
-            let rlp_node = node.rlp_encode();
+            let rlp_node = node.as_rlp_node();
             return Ok(Some(Pointer::new(
                 self.node_location(slotted_page.page_id(), page_index),
                 rlp_node,
@@ -1009,7 +1022,7 @@ impl<P: PageManager> StorageEngine<P> {
         only_child_node.set_prefix(new_nibbles);
 
         // Get the RLP node for the merged child
-        let rlp_node = only_child_node.rlp_encode();
+        let rlp_node = only_child_node.as_rlp_node();
 
         let child_is_in_same_page = child_slotted_page.is_none();
 
@@ -1554,7 +1567,15 @@ impl From<PageError> for Error {
 mod tests {
     use std::collections::HashMap;
 
-    use crate::{account::Account, storage::engine::PageError};
+    use crate::{
+        account::Account,
+        storage::{
+            engine::PageError,
+            test_utils::test_utils::{
+                assert_metrics, create_test_account, create_test_engine, random_test_account,
+            },
+        },
+    };
     use alloy_primitives::{address, b256, hex, keccak256, Address, StorageKey, B256, U256};
     use alloy_trie::{
         nodes::RlpNode,
@@ -1565,58 +1586,6 @@ mod tests {
     use rand::{rngs::StdRng, seq::SliceRandom, Rng, RngCore, SeedableRng};
 
     use super::*;
-    use crate::{database::Metadata, page::MmapPageManager};
-
-    fn create_test_engine(page_count: u32) -> (StorageEngine<MmapPageManager>, TransactionContext) {
-        let manager = MmapPageManager::new_anon(page_count, 256).unwrap();
-        let orphan_manager = OrphanPageManager::new();
-        let metadata = Metadata {
-            snapshot_id: 1,
-            root_page_id: 0,
-            max_page_number: 255,
-            root_subtrie_page_id: 0,
-            state_root: EMPTY_ROOT_HASH,
-        };
-        let storage_engine = StorageEngine::new(manager, orphan_manager);
-        (storage_engine, TransactionContext::new(metadata))
-    }
-
-    fn random_test_account(rng: &mut StdRng) -> Account {
-        create_test_account(rng.next_u64(), rng.next_u64())
-    }
-
-    fn create_test_account(balance: u64, nonce: u64) -> Account {
-        Account::new(nonce, U256::from(balance), EMPTY_ROOT_HASH, KECCAK_EMPTY)
-    }
-
-    fn assert_metrics(
-        context: &TransactionContext,
-        pages_read: u32,
-        pages_allocated: u32,
-        pages_reallocated: u32,
-        pages_split: u32,
-    ) {
-        assert_eq!(
-            context.transaction_metrics.get_pages_read(),
-            pages_read,
-            "unexpected number of pages read"
-        );
-        assert_eq!(
-            context.transaction_metrics.get_pages_allocated(),
-            pages_allocated,
-            "unexpected number of pages allocated"
-        );
-        assert_eq!(
-            context.transaction_metrics.get_pages_reallocated(),
-            pages_reallocated,
-            "unexpected number of pages reallocated"
-        );
-        assert_eq!(
-            context.transaction_metrics.get_pages_split(),
-            pages_split,
-            "unexpected number of pages split"
-        );
-    }
 
     #[test]
     fn test_allocate_get_mut_clone() {

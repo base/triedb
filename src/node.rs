@@ -7,7 +7,7 @@ use alloy_rlp::{
 };
 use alloy_trie::{
     nodes::{ExtensionNodeRef, LeafNodeRef, RlpNode},
-    Nibbles, EMPTY_ROOT_HASH, KECCAK_EMPTY,
+    Nibbles, TrieMask, EMPTY_ROOT_HASH, KECCAK_EMPTY,
 };
 use arrayvec::ArrayVec;
 use proptest::prelude::{any, prop, Strategy};
@@ -239,10 +239,15 @@ impl Node {
         }
     }
 
-    /// Returns the RLP encoding of the [Node].
+    /// Returns the embedded RLP encoding of the [Node].
     /// This will typically be a 33 byte prefixed keccak256 hash.
-    pub fn rlp_encode(&self) -> RlpNode {
-        RlpNode::from_rlp(&encode_fixed_size(self))
+    pub fn as_rlp_node(&self) -> RlpNode {
+        RlpNode::from_rlp(&self.rlp_encode())
+    }
+
+    /// Returns the RLP encoding of the [Node].
+    pub fn rlp_encode(&self) -> ArrayVec<u8, 532> {
+        encode_fixed_size(self)
     }
 
     /// Returns the size of the [Node] if a new child were to be added.
@@ -286,11 +291,11 @@ impl Value for Node {
     fn size(&self) -> usize {
         match self {
             Self::StorageLeaf { prefix, value_rlp } => {
-                let packed_prefix_length = (prefix.len() + 1) / 2;
+                let packed_prefix_length = prefix.len().div_ceil(2);
                 2 + packed_prefix_length + value_rlp.len() // 2 bytes for type and prefix length
             }
             Self::AccountLeaf { prefix, balance_rlp, nonce_rlp, storage_root, code_hash } => {
-                let packed_prefix_length = (prefix.len() + 1) / 2;
+                let packed_prefix_length = prefix.len().div_ceil(2);
                 2 + packed_prefix_length +
                     balance_rlp.len() +
                     nonce_rlp.len() +
@@ -301,7 +306,7 @@ impl Value for Node {
             Self::Branch { prefix, children } => {
                 let (_, children_slot_size) = Self::children_slot_size(children);
 
-                let packed_prefix_length = (prefix.len() + 1) / 2;
+                let packed_prefix_length = prefix.len().div_ceil(2);
                 2 + packed_prefix_length + 2 + children_slot_size * 37 // 2 bytes for type and
                                                                        // prefix length, 2 for
                                                                        // bitmask, 37 for each child
@@ -314,7 +319,7 @@ impl Value for Node {
         match self {
             Self::StorageLeaf { prefix, value_rlp } => {
                 let prefix_length = prefix.len();
-                let packed_prefix_length = (prefix.len() + 1) / 2;
+                let packed_prefix_length = prefix.len().div_ceil(2);
                 let total_size = 2 + packed_prefix_length + value_rlp.len();
                 if buf.len() < total_size {
                     return Err(value::Error::InvalidEncoding);
@@ -329,7 +334,7 @@ impl Value for Node {
             }
             Self::AccountLeaf { prefix, balance_rlp, nonce_rlp, code_hash, storage_root } => {
                 let prefix_length = prefix.len();
-                let packed_prefix_length = (prefix.len() + 1) / 2;
+                let packed_prefix_length = prefix.len().div_ceil(2);
                 let total_size = 2 +
                     packed_prefix_length +
                     balance_rlp.len() +
@@ -369,7 +374,7 @@ impl Value for Node {
                 let (total_children, children_slot_size) = Self::children_slot_size(children);
 
                 let prefix_length = prefix.len();
-                let packed_prefix_length = (prefix_length + 1) / 2;
+                let packed_prefix_length = prefix_length.div_ceil(2);
                 let total_size = 2 + packed_prefix_length + 2 + children_slot_size * 37; // Type, prefix length, bitmask + children pointers
 
                 if buf.len() < total_size {
@@ -407,7 +412,7 @@ impl Value for Node {
         let flags = bytes[0];
         if flags == 0 {
             let prefix_length = bytes[1] as usize;
-            let packed_prefix_length = (prefix_length + 1) / 2;
+            let packed_prefix_length = prefix_length.div_ceil(2);
             let mut prefix = Nibbles::unpack(&bytes[2..2 + packed_prefix_length]);
             prefix.truncate(prefix_length);
 
@@ -428,7 +433,7 @@ impl Value for Node {
             let has_storage = flags & 0b10000000 != 0;
             let has_code = flags & 0b01000000 != 0;
             let prefix_length = bytes[1] as usize;
-            let packed_prefix_length = (prefix_length + 1) / 2;
+            let packed_prefix_length = prefix_length.div_ceil(2);
             let mut prefix = Nibbles::unpack(&bytes[2..2 + packed_prefix_length]);
             prefix.truncate(prefix_length);
 
@@ -481,7 +486,7 @@ impl Value for Node {
             Ok(Self::AccountLeaf { prefix, balance_rlp, nonce_rlp, code_hash, storage_root })
         } else if flags == 2 {
             let prefix_length = bytes[1] as usize;
-            let packed_prefix_length = (prefix_length + 1) / 2;
+            let packed_prefix_length = prefix_length.div_ceil(2);
             let mut prefix = Nibbles::unpack(&bytes[2..2 + packed_prefix_length]);
             prefix.truncate(prefix_length);
             let children_bitmask = u16::from_be_bytes(
@@ -581,7 +586,7 @@ impl Encodable for Node {
     }
 }
 
-fn encode_branch(children: &[Option<Pointer>], out: &mut dyn BufMut) -> usize {
+pub fn encode_branch(children: &[Option<Pointer>], out: &mut dyn BufMut) -> usize {
     // first encode the header
     let mut payload_length = 1;
     for child in children.iter() {
@@ -604,6 +609,28 @@ fn encode_branch(children: &[Option<Pointer>], out: &mut dyn BufMut) -> usize {
     out.put_u8(EMPTY_STRING_CODE);
 
     payload_length + length_of_length(payload_length)
+}
+
+pub fn tree_mask(children: &[Option<Pointer>]) -> TrieMask {
+    let mut mask = TrieMask::default();
+    for (i, child) in children.iter().enumerate() {
+        if child.is_some() {
+            mask.set_bit(i as u8);
+        }
+    }
+    mask
+}
+
+pub fn hash_mask(children: &[Option<Pointer>]) -> TrieMask {
+    let mut mask = TrieMask::default();
+    for (i, child) in children.iter().enumerate() {
+        if let Some(child) = child {
+            if child.rlp().as_hash().is_some() {
+                mask.set_bit(i as u8);
+            }
+        }
+    }
+    mask
 }
 
 fn arb_children() -> impl Strategy<Value = [Option<Pointer>; 16]> {
@@ -904,7 +931,7 @@ mod tests {
         let mut bytes = vec![];
         node.encode(&mut bytes);
         assert_eq!(bytes, hex!("0xf872a120761d5c42184a02cc64585ed2ff339fc39a907e82731d70313c83d2212b2da36bb84ef84c80888ac7230489e80000a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"));
-        let rlp_encoded = node.rlp_encode();
+        let rlp_encoded = node.as_rlp_node();
         // hash prefixed with 0xa0 (length 32)
         assert_eq!(
             rlp_encoded.as_slice(),
@@ -1058,7 +1085,7 @@ mod tests {
                 "0xf8518080808080a018e3b46e84b35270116303fb2a33c853861d45d99da2d87117c2136f7edbd0b980a0717aef38e7ba4a0ae477856a6e7f6ba8d4ee764c57908e6f22643a558db737ff808080808080808080"
             )
         );
-        let rlp_encoded = node.rlp_encode();
+        let rlp_encoded = node.as_rlp_node();
         // hash prefixed with 0xa0 (length 32)
         assert_eq!(
             rlp_encoded.as_slice(),
@@ -1076,7 +1103,7 @@ mod tests {
 
         #[test]
         fn fuzz_node_rlp_encode(node: Node) {
-            node.rlp_encode();
+            node.as_rlp_node();
         }
     }
 }
