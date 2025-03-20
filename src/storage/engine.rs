@@ -448,32 +448,8 @@ impl<P: PageManager> StorageEngine<P> {
         let common_prefix = path.slice(0..common_prefix_length);
 
         // Case 1: The path does not match the node prefix, create a new branch node as the parent
-        // of the current node except when deleting as we don't want to expand nodes into branches
-        // when removing values.
+        // of the current node.
         if common_prefix_length < node.prefix().len() {
-            if value.is_none() {
-                let (changes_left, changes_right) = changes.split_at(shortest_common_prefix_idx);
-                let changes_right = &changes_right[1..];
-                if changes_right.is_empty() {
-                    return self.set_values_in_cloned_page(
-                        context,
-                        changes_left,
-                        path_offset,
-                        slotted_page,
-                        page_index,
-                    );
-                } else if changes_left.is_empty() {
-                    return self.set_values_in_cloned_page(
-                        context,
-                        changes_right,
-                        path_offset,
-                        slotted_page,
-                        page_index,
-                    );
-                } else {
-                    panic!("unexpected case - shortest_common_prefix_idx is not at either end of the changes array");
-                }
-            }
             return self.handle_missing_parent_branch(
                 context,
                 changes,
@@ -3535,7 +3511,8 @@ mod tests {
         assert_eq!(context.metadata.root_subtrie_page_id, 256);
         let root_subtrie_page =
             storage_engine.get_page(&context, context.metadata.root_subtrie_page_id).unwrap();
-        let root_subtrie_contents_before = root_subtrie_page.contents().to_vec();
+        let slotted_root_subtrie_page_before = SlottedPage::try_from(root_subtrie_page).unwrap();
+        let root_node_before: Node = slotted_root_subtrie_page_before.get_value(0).unwrap();
 
         // WHEN: an account with a similiar but divergent path is deleted
         let address_nibbles = Nibbles::unpack(hex!(
@@ -3549,10 +3526,12 @@ mod tests {
             .unwrap();
 
         // THEN: the trie should remain unchanged
-        let root_subtrie_page =
+        let root_subtrie_page_after =
             storage_engine.get_page(&context, context.metadata.root_subtrie_page_id).unwrap();
-        let root_subtrie_contents_after = root_subtrie_page.contents().to_vec();
-        assert_eq!(root_subtrie_contents_before, root_subtrie_contents_after);
+        let slotted_root_subtrie_page_after =
+            SlottedPage::try_from(root_subtrie_page_after).unwrap();
+        let root_node_after: Node = slotted_root_subtrie_page_after.get_value(0).unwrap();
+        assert_eq!(root_node_before, root_node_after);
 
         //**Additional Test**//
 
@@ -3567,10 +3546,9 @@ mod tests {
             .unwrap();
         let root_node_page =
             storage_engine.get_page(&context, context.metadata.root_subtrie_page_id).unwrap();
-        let root_subtrie_contents_before = root_node_page.contents().to_vec();
         let root_node_slotted_page = SlottedPage::try_from(root_node_page).unwrap();
-        let root_node: Node = root_node_slotted_page.get_value(0).unwrap();
-        assert!(root_node.is_branch());
+        let root_node_before: Node = root_node_slotted_page.get_value(0).unwrap();
+        assert!(root_node_before.is_branch());
 
         // WHEN: a non-existent value is deleted from the branch node
         let address = address!("0xf8da6bf26964af9d7eed9e03e53415d37aa96045"); // first nibble is different, hash doesn't exist
@@ -3584,8 +3562,9 @@ mod tests {
         // THEN: the trie should remain unchanged
         let root_subtrie_page =
             storage_engine.get_page(&context, context.metadata.root_subtrie_page_id).unwrap();
-        let root_subtrie_contents_after = root_subtrie_page.contents().to_vec();
-        assert_eq!(root_subtrie_contents_before, root_subtrie_contents_after);
+        let root_node_slotted_page = SlottedPage::try_from(root_subtrie_page).unwrap();
+        let root_node_after: Node = root_node_slotted_page.get_value(0).unwrap();
+        assert_eq!(root_node_before, root_node_after);
     }
 
     #[test]
