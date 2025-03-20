@@ -255,14 +255,6 @@ impl<P: PageManager> StorageEngine<P> {
                     context
                         .contract_account_loc_cache
                         .insert(original_path, (slotted_page.page_id(), page_index));
-
-                    // let mut packed = [0; 32];
-                    // original_path.pack_to(&mut packed);
-
-                    // context.cache.insert(
-                    //     FixedBytes::from_slice(&packed),
-                    //     (slotted_page.page_id(), page_index),
-                    // );
                 }
             }
 

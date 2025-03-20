@@ -27,7 +27,6 @@ fn generate_test_nibbles(count: usize) -> Vec<Nibbles> {
 fn bench_hashmaps(c: &mut Criterion) {
     let mut group = c.benchmark_group("HashMap Comparison");
 
-    // Test with different sizes
     for size in [10, 100, 1000].iter() {
         let test_data = generate_test_nibbles(*size);
 
