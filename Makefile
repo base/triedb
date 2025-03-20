@@ -1,3 +1,5 @@
+SHELL := /bin/bash
+
 BASELINE := main
 
 ### BEGIN Integration Test Variables ###
