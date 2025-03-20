@@ -115,10 +115,8 @@ fn run_ethereum_execution_spec_state_tests() {
 
                     tx.set_account(AddressPath::for_address(alloy_address), Some(account)).unwrap();
 
-                    let storage_set = &mut HashSet::new();
-                    if pre_accounts_info.contains_key(&alloy_address) {
-                        *storage_set = pre_accounts_info.get(&alloy_address).unwrap().clone();
-                    }
+                    let mut storage_set =
+                        pre_accounts_info.get(&alloy_address).cloned().unwrap_or_default();
 
                     // add all the new storage values for this account
                     let storage_map = updated_account_state["storage"].as_object().unwrap();
