@@ -1,5 +1,5 @@
 use crate::{
-    context::AddressNibblesMap,
+    context::B512Map,
     metrics::{DatabaseMetrics, TransactionMetrics},
     page::{
         MmapPageManager, OrphanPageManager, PageError, PageId, PageKind, PageManager, RootPage,
@@ -8,16 +8,9 @@ use crate::{
     storage::engine::{self, StorageEngine},
     transaction::{Transaction, TransactionManager, RO, RW},
 };
-use alloy_primitives::{
-    map::{B256Map, FbBuildHasher},
-    B256,
-};
-use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
-use dashmap::DashMap;
-use std::{
-    ops::Add,
-    sync::{Arc, RwLock},
-};
+use alloy_primitives::B256;
+use alloy_trie::EMPTY_ROOT_HASH;
+use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone)]
 pub struct Database<P: PageManager> {
@@ -57,7 +50,7 @@ impl Metadata {
 pub struct TransactionContext {
     pub(crate) metadata: Metadata,
     pub(crate) transaction_metrics: TransactionMetrics,
-    pub(crate) contract_account_loc_cache: AddressNibblesMap,
+    pub(crate) contract_account_loc_cache: B512Map<(PageId, u8)>,
 }
 
 impl TransactionContext {
@@ -65,7 +58,7 @@ impl TransactionContext {
         Self {
             metadata,
             transaction_metrics: Default::default(),
-            contract_account_loc_cache: AddressNibblesMap::new(),
+            contract_account_loc_cache: B512Map::with_capacity(10),
         }
     }
 }
