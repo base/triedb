@@ -1,6 +1,6 @@
 use crate::{
     account::Account,
-    database::TransactionContext,
+    context::TransactionContext,
     location::Location,
     node::{Node, TrieValue},
     page::{
@@ -12,7 +12,7 @@ use crate::{
     snapshot::SnapshotId,
 };
 
-use alloy_primitives::{FixedBytes, StorageValue};
+use alloy_primitives::StorageValue;
 use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
 use std::{
     cmp::max,
@@ -178,7 +178,7 @@ impl<P: PageManager> StorageEngine<P> {
 
         // check the cache
         let nibbles = storage_path.get_address().to_nibbles();
-        let cache_location = context.contract_account_loc_cache.get(&nibbles);
+        let cache_location = context.contract_account_loc_cache.get(nibbles);
         let (slotted_page, page_index, path_offset) = match cache_location {
             Some((page_id, page_index)) => {
                 context.transaction_metrics.inc_cache_storage_read_hit();
@@ -331,7 +331,7 @@ impl<P: PageManager> StorageEngine<P> {
         changes.iter().for_each(|(path, _)| {
             if path.len() == STORAGE_PATH_LENGTH {
                 let address_path = AddressPath::new(path.slice(0..ADDRESS_PATH_LENGTH));
-                context.contract_account_loc_cache.remove(&address_path.to_nibbles());
+                context.contract_account_loc_cache.remove(address_path.to_nibbles());
             }
         });
 

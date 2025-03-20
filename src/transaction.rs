@@ -4,7 +4,8 @@ use std::{fmt::Debug, sync::RwLockReadGuard};
 
 use crate::{
     account::Account,
-    database::{Database, TransactionContext},
+    context::TransactionContext,
+    database::Database,
     node::TrieValue,
     page::PageManager,
     path::{AddressPath, StoragePath},

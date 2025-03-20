@@ -1,6 +1,6 @@
 use crate::{
-    context::B512Map,
-    metrics::{DatabaseMetrics, TransactionMetrics},
+    context::TransactionContext,
+    metrics::DatabaseMetrics,
     page::{
         MmapPageManager, OrphanPageManager, PageError, PageId, PageKind, PageManager, RootPage,
     },
@@ -42,23 +42,6 @@ impl Metadata {
             max_page_number: self.max_page_number,
             root_subtrie_page_id: self.root_subtrie_page_id,
             state_root: self.state_root,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct TransactionContext {
-    pub(crate) metadata: Metadata,
-    pub(crate) transaction_metrics: TransactionMetrics,
-    pub(crate) contract_account_loc_cache: B512Map<(PageId, u8)>,
-}
-
-impl TransactionContext {
-    pub fn new(metadata: Metadata) -> Self {
-        Self {
-            metadata,
-            transaction_metrics: Default::default(),
-            contract_account_loc_cache: B512Map::with_capacity(10),
         }
     }
 }
