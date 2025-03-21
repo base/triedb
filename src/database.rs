@@ -5,7 +5,7 @@ use crate::{
     },
     snapshot::SnapshotId,
     storage::engine::{self, StorageEngine},
-    transaction::{Transaction, TransactionManager, RO, RW},
+    transaction::{Transaction, TransactionError, TransactionManager, RO, RW},
 };
 use alloy_primitives::B256;
 use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
@@ -149,7 +149,7 @@ impl<P: PageManager> Database<P> {
         }
     }
 
-    pub fn begin_rw(&self) -> Result<Transaction<'_, RW, P>, ()> {
+    pub fn begin_rw(&self) -> Result<Transaction<'_, RW, P>, TransactionError> {
         let mut transaction_manager = self.inner.transaction_manager.write().unwrap();
         let storage_engine = self.inner.storage_engine.read().unwrap();
         let metadata = self.inner.metadata.read().unwrap().next();
@@ -161,7 +161,7 @@ impl<P: PageManager> Database<P> {
         Ok(Transaction::new(context, self, None))
     }
 
-    pub fn begin_ro(&self) -> Result<Transaction<'_, RO, P>, ()> {
+    pub fn begin_ro(&self) -> Result<Transaction<'_, RO, P>, TransactionError> {
         let mut transaction_manager = self.inner.transaction_manager.write().unwrap();
         let storage_engine = self.inner.storage_engine.read().unwrap();
         let metadata = self.inner.metadata.read().unwrap().clone();
@@ -175,7 +175,7 @@ impl<P: PageManager> Database<P> {
         metadata.state_root
     }
 
-    pub(crate) fn resize(&self, new_page_count: PageId) -> Result<(), ()> {
+    pub(crate) fn resize(&self, new_page_count: PageId) -> Result<(), TransactionError> {
         let mut storage_engine = self.inner.storage_engine.write().unwrap();
         storage_engine.resize(new_page_count).unwrap();
         Ok(())
