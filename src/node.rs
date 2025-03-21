@@ -184,7 +184,7 @@ impl Node {
     pub fn direct_child(&self) -> Option<&Pointer> {
         match self {
             Self::AccountLeaf { storage_root, .. } => storage_root.as_ref(),
-            _ => panic!("cannot get child of leaf node"),
+            _ => panic!("cannot get direct child of non-leaf node"),
         }
     }
 
