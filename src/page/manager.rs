@@ -1,6 +1,7 @@
 use super::page::{Page, RO, RW};
 use crate::snapshot::SnapshotId;
 use std::fmt::Debug;
+pub mod fmap;
 pub mod mmap;
 
 /// Type alias for page ids.
@@ -17,6 +18,7 @@ pub enum PageError {
     NoFreeCells,
     PageIsFull,
     IO(std::io::Error),
+    IO2(fmap::FmmapPageManager),
     InvalidValue,
     InvalidPageContents(PageId),
     // TODO: add more errors here for other cases.
