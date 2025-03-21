@@ -16,6 +16,8 @@ sealed = "0.6.0"
 pprof = { version = "0.14", features = ["criterion", "protobuf-codec"] }
 metrics-derive = "0.1.0"
 metrics = "0.24.1"
+dashmap = "6.1.0"
+zerocopy = { version = "0.8.24", features = ["derive"] }
 
 [dev-dependencies]
 criterion = "0.5"
