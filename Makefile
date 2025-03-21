@@ -1,3 +1,5 @@
+SHELL := /bin/bash
+
 BASELINE := main
 
 ### BEGIN Integration Test Variables ###
@@ -24,15 +26,15 @@ bench-compare:
 
 .PHONY: test
 test:
-	@cargo test
+	@cargo test $(cargo_flags)
 
 .PHONY: unit-tests
 unit-tests:
-	@cargo test --lib
+	cargo test --lib $(cargo_flags) -- $(test_flags)
 
 .PHONY: integration-tests
 integration-tests: tests/fixtures
-	@cargo test --test '*' -- --nocapture
+	@cargo test --test '*' $(cargo_flags) -- $(test_flags)
 
 tests/fixtures: tests/fixtures_stable.tar.gz
 	@tar -xzf $< -C $(@D)
