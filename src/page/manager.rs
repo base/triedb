@@ -1,6 +1,6 @@
 use super::page::{Page, RO, RW};
 use crate::snapshot::SnapshotId;
-use std::fmt::Debug;
+use std::{array::TryFromSliceError, fmt::Debug};
 pub mod fmap;
 pub mod mmap;
 
@@ -18,9 +18,10 @@ pub enum PageError {
     NoFreeCells,
     PageIsFull,
     IO(std::io::Error),
-    IO2(fmap::FmmapPageManager),
+    IO2(fmmap::error::Error),
     InvalidValue,
     InvalidPageContents(PageId),
+    TryFromSliceError(TryFromSliceError),
     // TODO: add more errors here for other cases.
 }
 
