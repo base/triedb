@@ -15,11 +15,7 @@ fn generate_test_nibbles(count: usize) -> Vec<Nibbles> {
     let mut nibbles = Vec::with_capacity(count);
     let mut rng = StdRng::seed_from_u64(42);
 
-    nibbles.extend((0..count).map(|_| {
-        let address = generate_random_address(&mut rng);
-        let nibbles = address.to_nibbles();
-        nibbles.clone()
-    }));
+    nibbles.extend((0..count).map(|_| generate_random_address(&mut rng).to_nibbles().clone()));
 
     nibbles
 }
