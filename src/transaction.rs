@@ -1,3 +1,4 @@
+mod error;
 mod manager;
 
 use std::{fmt::Debug, sync::RwLockReadGuard};
@@ -13,6 +14,7 @@ use crate::{
 };
 use alloy_primitives::{StorageValue, B256};
 use alloy_trie::Nibbles;
+pub use error::TransactionError;
 pub use manager::TransactionManager;
 use sealed::sealed;
 use std::collections::HashMap;
@@ -58,7 +60,10 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
         }
     }
 
-    pub fn get_account(&'tx self, address_path: AddressPath) -> Result<Option<Account>, ()> {
+    pub fn get_account(
+        &'tx self,
+        address_path: AddressPath,
+    ) -> Result<Option<Account>, TransactionError> {
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
         let account = storage_engine.get_account(&self.context, address_path).unwrap();
 
@@ -67,7 +72,10 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
         Ok(account)
     }
 
-    pub fn get_storage_slot(&self, storage_path: StoragePath) -> Result<Option<StorageValue>, ()> {
+    pub fn get_storage_slot(
+        &self,
+        storage_path: StoragePath,
+    ) -> Result<Option<StorageValue>, TransactionError> {
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
         let storage_slot = storage_engine.get_storage(&self.context, storage_path).unwrap();
 
@@ -85,7 +93,7 @@ impl<P: PageManager> Transaction<'_, RW, P> {
         &mut self,
         address_path: AddressPath,
         account: Option<Account>,
-    ) -> Result<(), ()> {
+    ) -> Result<(), TransactionError> {
         self.pending_changes.insert(address_path.into(), account.map(TrieValue::Account));
         Ok(())
     }
@@ -94,12 +102,12 @@ impl<P: PageManager> Transaction<'_, RW, P> {
         &mut self,
         storage_path: StoragePath,
         value: Option<StorageValue>,
-    ) -> Result<(), ()> {
+    ) -> Result<(), TransactionError> {
         self.pending_changes.insert(storage_path.full_path(), value.map(TrieValue::Storage));
         Ok(())
     }
 
-    pub fn commit(mut self) -> Result<(), ()> {
+    pub fn commit(mut self) -> Result<(), TransactionError> {
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
         let mut changes =
             self.pending_changes.drain().collect::<Vec<(Nibbles, Option<TrieValue>)>>();
@@ -134,7 +142,7 @@ impl<P: PageManager> Transaction<'_, RW, P> {
         Ok(())
     }
 
-    pub fn rollback(mut self) -> Result<(), ()> {
+    pub fn rollback(mut self) -> Result<(), TransactionError> {
         let mut transaction_manager = self.database.inner.transaction_manager.write().unwrap();
         let storage_engine = self.database.inner.storage_engine.read().unwrap();
         // TODO: this is temperorary until we actually implement rollback.
@@ -151,7 +159,7 @@ impl<P: PageManager> Transaction<'_, RW, P> {
 }
 
 impl<P: PageManager> Transaction<'_, RO, P> {
-    pub fn commit(mut self) -> Result<(), ()> {
+    pub fn commit(mut self) -> Result<(), TransactionError> {
         let mut transaction_manager = self.database.inner.transaction_manager.write().unwrap();
         transaction_manager.remove_transaction(self.context.metadata.snapshot_id, false)?;
 

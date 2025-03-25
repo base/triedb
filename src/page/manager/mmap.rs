@@ -1,10 +1,7 @@
 use std::fs::File;
 
 use crate::{
-    page::{
-        page::{RO, RW},
-        Page, PageError, PageId, PageManager, PAGE_SIZE,
-    },
+    page::{Page, PageError, PageId, PageManager, PageMut, PAGE_SIZE},
     snapshot::SnapshotId,
 };
 use memmap2::MmapMut;
@@ -74,13 +71,9 @@ impl MmapPageManager {
 
 impl PageManager for MmapPageManager {
     // Retrieves a page from the memory mapped file.
-    fn get<'p>(
-        &self,
-        _snapshot_id: SnapshotId,
-        page_id: PageId,
-    ) -> Result<Page<'p, RO>, PageError> {
+    fn get<'p>(&self, _snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'p>, PageError> {
         let page_data = self.page_data(page_id)?;
-        Ok(Page::new_ro(page_id, page_data))
+        Ok(Page::new(page_id, page_data))
     }
 
     // Retrieves a mutable page from the memory mapped file.
@@ -88,15 +81,15 @@ impl PageManager for MmapPageManager {
         &mut self,
         _snapshot_id: SnapshotId,
         page_id: PageId,
-    ) -> Result<Page<'p, RW>, PageError> {
+    ) -> Result<PageMut<'p>, PageError> {
         let page_data = self.page_data(page_id)?;
-        Ok(Page::new_rw(page_id, page_data))
+        Ok(PageMut::new(page_id, page_data))
     }
 
     // Allocates a new page in the memory mapped file.
-    fn allocate<'p>(&mut self, snapshot_id: SnapshotId) -> Result<Page<'p, RW>, PageError> {
+    fn allocate<'p>(&mut self, snapshot_id: SnapshotId) -> Result<PageMut<'p>, PageError> {
         let (page_id, page_data) = self.allocate_page_data()?;
-        Ok(Page::new_rw_with_snapshot(page_id, snapshot_id, page_data))
+        Ok(PageMut::with_snapshot(page_id, snapshot_id, page_data))
     }
 
     // Resizes the memory mapped file to the given number of pages.
@@ -146,12 +139,12 @@ mod tests {
             assert!(matches!(err, PageError::PageNotFound(page_id) if page_id == i));
 
             let page = manager.allocate(42).unwrap();
-            assert_eq!(page.page_id(), i);
+            assert_eq!(page.id(), i);
             assert_eq!(page.contents(), &mut [0; PAGE_DATA_SIZE]);
             assert_eq!(page.snapshot_id(), 42);
 
             let page = manager.get(42, i).unwrap();
-            assert_eq!(page.page_id(), i);
+            assert_eq!(page.id(), i);
             assert_eq!(page.contents(), &mut [0; PAGE_DATA_SIZE]);
             assert_eq!(page.snapshot_id(), 42);
         }
@@ -165,7 +158,7 @@ mod tests {
         let mut manager = MmapPageManager::new_anon(10, 0).unwrap();
 
         let mut page = manager.allocate(42).unwrap();
-        assert_eq!(page.page_id(), 0);
+        assert_eq!(page.id(), 0);
         assert_eq!(page.contents(), &mut [0; PAGE_DATA_SIZE]);
         assert_eq!(page.snapshot_id(), 42);
 
@@ -174,7 +167,7 @@ mod tests {
         manager.commit(42).unwrap();
 
         let old_page = manager.get(42, 0).unwrap();
-        assert_eq!(old_page.page_id(), 0);
+        assert_eq!(old_page.id(), 0);
         assert_eq!(old_page.contents()[0], 1);
         assert_eq!(old_page.snapshot_id(), 42);
 
@@ -182,12 +175,12 @@ mod tests {
         let page2 = manager.allocate(42).unwrap();
         let page3 = manager.allocate(42).unwrap();
 
-        assert_ne!(page1.page_id(), page2.page_id());
-        assert_ne!(page1.page_id(), page3.page_id());
-        assert_ne!(page2.page_id(), page3.page_id());
+        assert_ne!(page1.id(), page2.id());
+        assert_ne!(page1.id(), page3.id());
+        assert_ne!(page2.id(), page3.id());
 
-        let mut page1_mut = manager.get_mut(42, page1.page_id()).unwrap();
-        assert_eq!(page1_mut.page_id(), page1.page_id());
+        let mut page1_mut = manager.get_mut(42, page1.id()).unwrap();
+        assert_eq!(page1_mut.id(), page1.id());
         assert_eq!(page1_mut.contents()[0], 0);
 
         page1_mut.contents_mut()[0] = 2;
@@ -196,7 +189,7 @@ mod tests {
 
         manager.commit(42).unwrap();
 
-        let page1 = manager.get(42, page1.page_id()).unwrap();
+        let page1 = manager.get(42, page1.id()).unwrap();
         assert_eq!(page1.contents()[0], 2);
     }
 
@@ -216,7 +209,7 @@ mod tests {
         assert_eq!(manager.next_page_id, 0);
 
         let page = manager.allocate(42).unwrap();
-        assert_eq!(page.page_id(), 0);
+        assert_eq!(page.id(), 0);
         assert_eq!(page.contents(), &mut [0; PAGE_DATA_SIZE]);
         assert_eq!(page.snapshot_id(), 42);
         assert_eq!(manager.next_page_id, 1);
@@ -231,7 +224,7 @@ mod tests {
         assert_eq!(manager.next_page_id, 1);
 
         let page = manager.allocate(42).unwrap();
-        assert_eq!(page.page_id(), 1);
+        assert_eq!(page.id(), 1);
         assert_eq!(page.contents(), &mut [0; PAGE_DATA_SIZE]);
         assert_eq!(page.snapshot_id(), 42);
         assert_eq!(manager.next_page_id, 2);
@@ -264,7 +257,7 @@ mod tests {
         assert_eq!(metadata.len(), 10 * PAGE_SIZE as u64);
 
         let page = manager.allocate(42).unwrap();
-        assert_eq!(page.page_id(), 1);
+        assert_eq!(page.id(), 1);
         assert_eq!(page.contents(), &mut [0; PAGE_DATA_SIZE]);
         assert_eq!(page.snapshot_id(), 42);
         assert_eq!(manager.next_page_id, 2);
@@ -279,7 +272,7 @@ mod tests {
         // allocate 10 times
         for i in 0..10 {
             let result = manager.allocate(42).unwrap();
-            assert_eq!(result.page_id(), i);
+            assert_eq!(result.id(), i);
         }
         // attempt to allocate, expect error
         let err = manager.allocate(42).unwrap_err();
@@ -289,7 +282,7 @@ mod tests {
         // allocate 10 more times
         for i in 10..20 {
             let result = manager.allocate(42).unwrap();
-            assert_eq!(result.page_id(), i);
+            assert_eq!(result.id(), i);
         }
         // attempt to allocate, expect error
         let err = manager.allocate(42).unwrap_err();
