@@ -122,6 +122,13 @@ impl Database<MmapPageManager> {
         database.resize(max_page_count + 1000).unwrap();
         Ok(database)
     }
+
+    pub fn pretty_print(self) -> Result<(), Error> {
+        println!("testing!");
+        Ok(())
+
+    }
+    //TODO Kaley: expose a public print function
 }
 
 impl<P: PageManager> Drop for Database<P> {
@@ -359,9 +366,11 @@ mod tests {
 
     #[test]
     fn test_data_persistence() {
-        let tmp_dir = TempDir::new("test_db").unwrap();
-        let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
-        let mut db = Database::create(file_path.as_str()).unwrap();
+        //TODO KALEY: change back to tempdir
+        //let tmp_dir = TempDir::new("test_db").unwrap();
+        //let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
+        let file_path = "/Users/kaleychicoine/triedb/cli/test_db.db";
+        let mut db = Database::create(file_path).unwrap();
 
         let address1 = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
@@ -372,7 +381,7 @@ mod tests {
         tx.commit().unwrap();
         db.close().unwrap();
 
-        let mut db = Database::open(file_path.as_str()).unwrap();
+        let mut db = Database::open(file_path).unwrap();
         let tx = db.begin_ro().unwrap();
         let account = tx.get_account(AddressPath::for_address(address1)).unwrap().unwrap();
         assert_eq!(account, account1);
@@ -387,7 +396,7 @@ mod tests {
         tx.commit().unwrap();
         db.close().unwrap();
 
-        let db = Database::open(file_path.as_str()).unwrap();
+        let db = Database::open(file_path).unwrap();
         let tx = db.begin_ro().unwrap();
 
         let account = tx.get_account(AddressPath::for_address(address1)).unwrap().unwrap();
