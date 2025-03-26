@@ -215,8 +215,8 @@ impl<P: PageManager> StorageEngine<P> {
         if remaining_path.is_empty() {
             // cache the account location if it is a contract account
             if let TrieValue::Account(account) = node.value()? {
-                if account.storage_root != EMPTY_ROOT_HASH &&
-                    original_path.len() == ADDRESS_PATH_LENGTH
+                if account.storage_root != EMPTY_ROOT_HASH
+                    && original_path.len() == ADDRESS_PATH_LENGTH
                 {
                     context
                         .contract_account_loc_cache
@@ -355,7 +355,7 @@ impl<P: PageManager> StorageEngine<P> {
                     split_count += 1;
                     // FIXME: this is a temporary limit to prevent infinite loops.
                     if split_count > 20 {
-                        return Err(Error::PageError(PageError::PageSplitLimitReached))
+                        return Err(Error::PageError(PageError::PageSplitLimitReached));
                     }
                 }
                 Err(Error::PageError(PageError::PageIsFull)) => {
@@ -919,8 +919,8 @@ impl<P: PageManager> StorageEngine<P> {
                     // 3. and add new cell pointer for the new leaf node (3 bytes)
                     // when adding the new child, split the page.
                     // FIXME: is it safe to split the page here if we've already modified the page?
-                    if slotted_page.num_free_bytes() <
-                        node_size_incr + new_node.size() + CELL_POINTER_SIZE
+                    if slotted_page.num_free_bytes()
+                        < node_size_incr + new_node.size() + CELL_POINTER_SIZE
                     {
                         self.split_page(context, slotted_page)?;
                         return Err(Error::PageSplit);
@@ -3346,7 +3346,8 @@ mod tests {
         let child_1: Node = Node::new_leaf(
             Nibbles::from_nibbles(&child_1_full_path[2..]),
             &TrieValue::Account(test_account.clone()),
-        ).expect("can create node");
+        )
+        .expect("can create node");
 
         let mut child_2_full_path = [0u8; 64];
         child_2_full_path[0] = 5; // root branch nibble
@@ -3357,7 +3358,8 @@ mod tests {
         let child_2: Node = Node::new_leaf(
             Nibbles::from_nibbles(&child_2_full_path[2..]),
             &TrieValue::Account(test_account.clone()),
-        ).expect("can create node");
+        )
+        .expect("can create node");
 
         // child 1 is the root of page2
         slotted_page2.insert_value(&child_1).unwrap();
@@ -3368,12 +3370,18 @@ mod tests {
         let child_2_location = Location::from(slotted_page3.id());
 
         let mut new_branch_node: Node = Node::new_branch(Nibbles::new()).expect("can create node");
-        new_branch_node.set_child(0, Pointer::new(child_1_location, RlpNode::default())).expect("can set child");
-        new_branch_node.set_child(15, Pointer::new(child_2_location, RlpNode::default())).expect("can set child");
+        new_branch_node
+            .set_child(0, Pointer::new(child_1_location, RlpNode::default()))
+            .expect("can set child");
+        new_branch_node
+            .set_child(15, Pointer::new(child_2_location, RlpNode::default()))
+            .expect("can set child");
         let new_branch_node_index = slotted_page1.insert_value(&new_branch_node).unwrap();
         let new_branch_node_location = Location::from(new_branch_node_index as u32);
 
-        root_node.set_child(5, Pointer::new(new_branch_node_location, RlpNode::default())).expect("can set child");
+        root_node
+            .set_child(5, Pointer::new(new_branch_node_location, RlpNode::default()))
+            .expect("can set child");
         slotted_page1.set_value(0, &root_node).unwrap();
 
         storage_engine.commit(&context).unwrap();
@@ -3444,7 +3452,8 @@ mod tests {
         let child_1: Node = Node::new_leaf(
             Nibbles::from_nibbles(&child_1_full_path[1..]),
             &TrieValue::Account(test_account.clone()),
-        ).expect("can create node");
+        )
+        .expect("can create node");
 
         let mut child_2_full_path = [0u8; 64];
         child_2_full_path[0] = 15; // root branch nibble
@@ -3454,7 +3463,8 @@ mod tests {
         let child_2: Node = Node::new_leaf(
             Nibbles::from_nibbles(&child_2_full_path[1..]),
             &TrieValue::Account(test_account.clone()),
-        ).expect("can create node");
+        )
+        .expect("can create node");
 
         // child 1 is the root of page2
         slotted_page2.insert_value(&child_1).unwrap();
@@ -3466,8 +3476,12 @@ mod tests {
 
         // next we create and update our root node
         let mut root_node = Node::new_branch(Nibbles::new()).expect("can create node");
-        root_node.set_child(0, Pointer::new(child_1_location, RlpNode::default())).expect("can set child");
-        root_node.set_child(15, Pointer::new(child_2_location, RlpNode::default())).expect("can set child");
+        root_node
+            .set_child(0, Pointer::new(child_1_location, RlpNode::default()))
+            .expect("can set child");
+        root_node
+            .set_child(15, Pointer::new(child_2_location, RlpNode::default()))
+            .expect("can set child");
 
         let root_node_page = storage_engine.allocate_page(&mut context).unwrap();
         context.metadata.root_subtrie_page_id = root_node_page.id();

@@ -96,10 +96,10 @@ impl SlottedPage<'_> {
             .map(|cp| cp.length())
             .sum::<u16>();
 
-        self.page.contents().len() -
-            total_occupied_space as usize -
-            CELL_POINTER_SIZE * num_cells as usize -
-            1
+        self.page.contents().len()
+            - total_occupied_space as usize
+            - CELL_POINTER_SIZE * num_cells as usize
+            - 1
     }
 
     fn num_dead_bytes(&self, num_cells: u8) -> usize {
@@ -253,11 +253,11 @@ impl SlottedPageMut<'_> {
             .sum::<u16>();
 
         let new_num_cells = max(num_cells, index + 1);
-        if (total_occupied_space +
-            additional_slot_length +
-            new_num_cells as u16 * CELL_POINTER_SIZE as u16 +
-            1) as usize >
-            PAGE_DATA_SIZE
+        if (total_occupied_space
+            + additional_slot_length
+            + new_num_cells as u16 * CELL_POINTER_SIZE as u16
+            + 1) as usize
+            > PAGE_DATA_SIZE
         {
             return Ok(false);
         }
@@ -418,7 +418,7 @@ impl<'p> TryFrom<PageMut<'p>> for SlottedPageMut<'p> {
 
 impl fmt::Debug for SlottedPageMut<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_slotted_page("SlottedPageMut", &*self, f)
+        fmt_slotted_page("SlottedPageMut", self, f)
     }
 }
 
