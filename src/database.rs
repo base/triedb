@@ -124,11 +124,10 @@ impl Database<MmapPageManager> {
     }
 
     pub fn pretty_print(self) -> Result<(), Error> {
-        println!("testing!");
+        let storage_engine = self.inner.storage_engine.read().unwrap();
+        storage_engine.pretty_print_page();
         Ok(())
-
     }
-    //TODO Kaley: expose a public print function
 }
 
 impl<P: PageManager> Drop for Database<P> {
