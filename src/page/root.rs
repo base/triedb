@@ -250,8 +250,8 @@ impl<'p> RootPageMut<'p> {
 
                     // Write the next_page page's id into the last slot of the current page,
                     // signaling that the list continues at the written page number.
-                    page_contents[current_orphan_page_id_start_index
-                        ..current_orphan_page_id_start_index + 4]
+                    page_contents[current_orphan_page_id_start_index..
+                        current_orphan_page_id_start_index + 4]
                         .copy_from_slice(&next_page.id().to_le_bytes());
                 } else {
                     // the last slot is populated with a page id. we need to continue adding
