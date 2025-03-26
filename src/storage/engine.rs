@@ -1610,7 +1610,7 @@ mod tests {
 
     #[test]
     fn test_shared_page_mutability() {
-        let (storage_engine, context) = create_test_engine(10);
+        let (storage_engine, context) = create_test_engine(300);
 
         let page1 = storage_engine.get_page(&context, 1).unwrap();
         assert_eq!(page1.contents()[0], 0);

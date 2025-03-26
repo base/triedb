@@ -1,10 +1,10 @@
-use std::fs::File;
+use std::{fs::File, path::Path};
 
 use crate::{
     page::{Page, PageError, PageId, PageManager, PageMut, PAGE_SIZE},
     snapshot::SnapshotId,
 };
-use memmap2::MmapMut;
+use memmap2::{MmapMut, RemapOptions};
 
 // Manages pages in a memory mapped file.
 #[derive(Debug)]
@@ -15,7 +15,7 @@ pub struct MmapPageManager {
 }
 
 impl MmapPageManager {
-    pub fn open(file_path: &str) -> Result<Self, PageError> {
+    pub fn open(file_path: impl AsRef<Path>) -> Result<Self, PageError> {
         let file = File::options()
             .read(true)
             .write(true)
@@ -23,25 +23,30 @@ impl MmapPageManager {
             .truncate(false)
             .open(file_path)
             .map_err(PageError::IO)?;
-        let file_len = file.metadata().map_err(PageError::IO)?.len();
+        // SAFETY: we assume that we have full ownership of the file, even though in practice
+        // there's no way to guarantee it
         let mmap = unsafe { MmapMut::map_mut(&file).map_err(PageError::IO)? };
-        let manager = MmapPageManager::new(mmap, file, (file_len / PAGE_SIZE as u64) as PageId);
-        Ok(manager)
+        Ok(Self::new(mmap, Some(file), None))
     }
 
-    // Creates a new MmapPageManager with the given memory mapped file.
-    pub fn new(mmap: MmapMut, file: File, next_page_id: PageId) -> Self {
-        if next_page_id > (mmap.len() / PAGE_SIZE) as u32 {
-            panic!("next_page_id is greater than the number of pages in the memory mapped file");
+    /// Creates a new `MmapPageManager` with the given memory mapped file.
+    pub fn new(mmap: MmapMut, file: Option<File>, next_page_id: Option<PageId>) -> Self {
+        let max_pages = (mmap.len() / PAGE_SIZE).try_into().expect("memory map too large");
+        let next_page_id = next_page_id.unwrap_or(max_pages);
+        if next_page_id > max_pages {
+            panic!("`next_page_id` is greater than the number of pages in the memory map");
         }
-        Self { mmap, file: Some(file), next_page_id }
+
+        Self { mmap, file, next_page_id }
     }
 
-    // Creates a new MmapPageManager with an anonymous memory mapped file.
+    /// Creates a new `MmapPageManager` with an anonymous memory map.
     #[cfg(test)]
     pub(crate) fn new_anon(capacity: PageId, next_page_id: PageId) -> Result<Self, PageError> {
-        let mmap = MmapMut::map_anon(capacity as usize * PAGE_SIZE).map_err(PageError::IO)?;
-        Ok(Self { mmap, file: None, next_page_id })
+        let mmap = memmap2::MmapMut::map_anon(capacity as usize * PAGE_SIZE)
+            .map_err(PageError::IO)?
+            .into();
+        Ok(Self::new(mmap, None, Some(next_page_id)))
     }
 
     // Returns a mutable reference to the data of the page with the given id.
@@ -96,22 +101,24 @@ impl PageManager for MmapPageManager {
     // If the file size is reduced, the file is truncated and the next page is is lowered to match
     // the new file size.
     fn resize(&mut self, new_page_count: PageId) -> Result<(), PageError> {
-        let old_len = self.mmap.len() as u64;
-        let file_len = new_page_count as u64 * PAGE_SIZE as u64;
-        if let Some(file) = &self.file {
-            if old_len > 0 {
-                self.mmap.flush().map_err(PageError::IO)?;
+        // SAFETY: This is currently unsafe, but so was the previous implementation
+        unsafe {
+            let old_len = self.mmap.len();
+            let new_len = (new_page_count as usize) * PAGE_SIZE;
+
+            self.mmap.flush().map_err(PageError::IO)?;
+
+            if let Some(ref file) = self.file {
+                file.set_len(new_len as u64).map_err(PageError::IO)?;
             }
-            file.set_len(file_len).map_err(PageError::IO)?;
-            let mmap =
-                unsafe { MmapMut::map_mut(self.file.as_ref().unwrap()) }.map_err(PageError::IO)?;
-            self.mmap = mmap;
-        } else {
-            self.mmap = MmapMut::map_anon(file_len as usize).map_err(PageError::IO)?;
+
+            self.mmap.remap(new_len, RemapOptions::new().may_move(true)).map_err(PageError::IO)?;
+
+            if new_len < old_len {
+                self.next_page_id = new_page_count;
+            }
         }
-        if file_len < old_len {
-            self.next_page_id = new_page_count;
-        }
+
         Ok(())
     }
 
