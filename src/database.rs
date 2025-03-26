@@ -1,8 +1,6 @@
 use crate::{
     metrics::{DatabaseMetrics, TransactionMetrics},
-    page::{
-        MmapPageManager, OrphanPageManager, PageError, PageId, PageKind, PageManager, RootPage,
-    },
+    page::{MmapPageManager, OrphanPageManager, PageError, PageId, PageManager, RootPage},
     snapshot::SnapshotId,
     storage::engine::{self, StorageEngine},
     transaction::{Transaction, TransactionError, TransactionManager, RO, RW},
@@ -77,7 +75,7 @@ impl Database<MmapPageManager> {
         page_manager.resize(1000).map_err(Error::PageError)?;
         for i in 0..256 {
             let page = page_manager.allocate(0).map_err(Error::PageError)?;
-            assert_eq!(page.page_id(), i);
+            assert_eq!(page.id(), i);
         }
 
         let orphan_manager = OrphanPageManager::new();
@@ -220,10 +218,10 @@ impl<P: PageManager> Database<P> {
     }
 }
 
-impl<'p, P: PageKind> From<RootPage<'p, P>> for Metadata {
-    fn from(root_page: RootPage<'p, P>) -> Self {
+impl<'p> From<RootPage<'p>> for Metadata {
+    fn from(root_page: RootPage<'p>) -> Self {
         Self {
-            root_page_id: root_page.page_id(),
+            root_page_id: root_page.id(),
             root_subtrie_page_id: root_page.root_subtrie_page_id(),
             max_page_number: root_page.max_page_number(),
             snapshot_id: root_page.snapshot_id(),

@@ -6,6 +6,6 @@ mod slotted_page;
 
 pub use manager::{mmap::MmapPageManager, PageError, PageId, PageManager};
 pub use orphan::OrphanPageManager;
-pub use page::{Page, PageKind, PAGE_DATA_SIZE, PAGE_SIZE, RO, RW};
-pub use root::RootPage;
-pub use slotted_page::{SlottedPage, CELL_POINTER_SIZE};
+pub use page::{Page, PageMut, PAGE_DATA_SIZE, PAGE_SIZE};
+pub use root::{RootPage, RootPageMut};
+pub use slotted_page::{SlottedPage, SlottedPageMut, CELL_POINTER_SIZE};
