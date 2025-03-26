@@ -24,6 +24,8 @@ use crate::{
 const EMPTY_ROOT_RLP: [u8; 33] =
     hex!("0xa056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");
 
+const MAX_PREFIX_LENGTH: usize = 64;
+
 /// A node in the trie.
 /// This may be an account leaf, a storage leaf, or a branch.
 // TODO (PROTO-957): Consider wrapping this large struct into a Box
@@ -51,6 +53,13 @@ pub enum Node {
     },
 }
 
+#[derive(Debug)]
+pub enum NodeError {
+    ChildrenUnsupported,
+    MaxPrefixLengthExceeded,
+    NoValue,
+}
+
 fn arb_u64_rlp() -> impl Strategy<Value = ArrayVec<u8, 9>> {
     any::<u64>().prop_map(|u| encode_fixed_size(&u)).boxed()
 }
@@ -65,18 +74,21 @@ impl Node {
     /// # Panics
     ///
     /// This function will panic if the provided prefix is greater than 64 nibbles long.
-    pub fn new_leaf(prefix: Nibbles, value: &TrieValue) -> Self {
-        assert!(prefix.len() <= 64, "account and storage leaf prefix's must be at most 64 nibbles");
+    pub fn new_leaf(prefix: Nibbles, value: &TrieValue) -> Result<Self, NodeError> {
+        if prefix.len() > MAX_PREFIX_LENGTH {
+            return Err(NodeError::MaxPrefixLengthExceeded);
+        }
+
         match value {
-            TrieValue::Account(account) => Node::new_account_leaf(
+            TrieValue::Account(account) => Ok(Node::new_account_leaf(
                 prefix,
                 encode_fixed_size(&account.balance),
                 encode_fixed_size(&account.nonce),
                 account.code_hash,
                 None,
-            ),
+            )),
             TrieValue::Storage(storage) => {
-                Node::new_storage_leaf(prefix, encode_fixed_size(storage))
+                Ok(Node::new_storage_leaf(prefix, encode_fixed_size(storage)))
             }
         }
     }
@@ -100,9 +112,12 @@ impl Node {
     /// # Panics
     ///
     /// This function will panic if the provided prefix is greater than 64 nibbles long.
-    pub fn new_branch(prefix: Nibbles) -> Self {
-        assert!(prefix.len() <= 64, "branch prefix's must be at most 64 nibbles");
-        Self::Branch { prefix, children: [const { None }; 16] }
+    pub fn new_branch(prefix: Nibbles) -> Result<Self, NodeError> {
+        if prefix.len() > MAX_PREFIX_LENGTH {
+            return Err(NodeError::MaxPrefixLengthExceeded);
+        }
+
+        Ok(Self::Branch { prefix, children: [const { None }; 16] })
     }
 
     /// Returns the prefix of the [Node].
@@ -119,13 +134,18 @@ impl Node {
     /// # Panics
     ///
     /// This function will panic if the provided prefix is greater than 64 nibbles long.
-    pub fn set_prefix(&mut self, new_prefix: Nibbles) {
-        assert!(new_prefix.len() <= 64, "prefix's must be at most 64 nibbles");
+    pub fn set_prefix(&mut self, new_prefix: Nibbles) -> Result<(), NodeError> {
+        if new_prefix.len() > MAX_PREFIX_LENGTH {
+            return Err(NodeError::MaxPrefixLengthExceeded);
+        }
+
         match self {
             Self::StorageLeaf { prefix, .. } => *prefix = new_prefix,
             Self::AccountLeaf { prefix, .. } => *prefix = new_prefix,
             Self::Branch { prefix, .. } => *prefix = new_prefix,
         }
+
+        Ok(())
     }
 
     /// Returns whether the [Node] type supports children.
@@ -148,19 +168,27 @@ impl Node {
     /// # Panics
     ///
     /// This function will panic if the [Node] type does not support children.
-    pub fn enumerate_children(&self) -> Vec<(u8, &Pointer)> {
+    pub fn enumerate_children(&self) -> Result<Vec<(u8, &Pointer)>, NodeError> {
         match self {
-            Self::AccountLeaf { storage_root, .. } => [storage_root]
-                .iter()
-                .enumerate()
-                .filter_map(|(i, child)| child.as_ref().map(|p| (i as u8, p)))
-                .collect(),
-            Self::Branch { children, .. } => children
-                .iter()
-                .enumerate()
-                .filter_map(|(i, child)| child.as_ref().map(|p| (i as u8, p)))
-                .collect(),
-            _ => panic!("cannot enumerate children of non-branch node"),
+            Self::AccountLeaf { storage_root, .. } => {
+                let children = [storage_root]
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, child)| child.as_ref().map(|p| (i as u8, p)))
+                    .collect();
+
+                Ok(children)
+            }
+            Self::Branch { children, .. } => {
+                let children = children
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, child)| child.as_ref().map(|p| (i as u8, p)))
+                    .collect();
+
+                Ok(children)
+            }
+            _ => Err(NodeError::ChildrenUnsupported),
         }
     }
 
@@ -169,10 +197,10 @@ impl Node {
     /// # Panics
     ///
     /// This function will panic if the [Node] is not a branch.
-    pub fn child(&self, index: u8) -> Option<&Pointer> {
+    pub fn child(&self, index: u8) -> Result<Option<&Pointer>, NodeError> {
         match self {
-            Self::Branch { children, .. } => children[index as usize].as_ref(),
-            _ => panic!("cannot get child of leaf node"),
+            Self::Branch { children, .. } => Ok(children[index as usize].as_ref()),
+            _ => Err(NodeError::ChildrenUnsupported),
         }
     }
 
@@ -181,10 +209,10 @@ impl Node {
     /// # Panics
     ///
     /// This function will panic if the [Node] is not an account leaf.
-    pub fn direct_child(&self) -> Option<&Pointer> {
+    pub fn direct_child(&self) -> Result<Option<&Pointer>, NodeError> {
         match self {
-            Self::AccountLeaf { storage_root, .. } => storage_root.as_ref(),
-            _ => panic!("cannot get direct child of non-leaf node"),
+            Self::AccountLeaf { storage_root, .. } => Ok(storage_root.as_ref()),
+            _ => Err(NodeError::ChildrenUnsupported),
         }
     }
 
@@ -193,11 +221,17 @@ impl Node {
     /// # Panics
     ///
     /// This function will panic if the [Node] type does not support children.
-    pub fn set_child(&mut self, index: u8, child: Pointer) {
+    pub fn set_child(&mut self, index: u8, child: Pointer) -> Result<(), NodeError> {
         match self {
-            Self::AccountLeaf { storage_root, .. } => *storage_root = Some(child),
-            Self::Branch { children, .. } => children[index as usize] = Some(child),
-            _ => panic!("cannot set child of non-branch node"),
+            Self::AccountLeaf { storage_root, .. } => {
+                *storage_root = Some(child);
+                Ok(())
+            }
+            Self::Branch { children, .. } => {
+                children[index as usize] = Some(child);
+                Ok(())
+            }
+            _ => Err(NodeError::ChildrenUnsupported),
         }
     }
 
@@ -206,11 +240,17 @@ impl Node {
     /// # Panics
     ///
     /// This function will panic if the [Node] type does not support children.
-    pub fn remove_child(&mut self, index: u8) {
+    pub fn remove_child(&mut self, index: u8) -> Result<(), NodeError> {
         match self {
-            Self::AccountLeaf { storage_root, .. } => *storage_root = None,
-            Self::Branch { children, .. } => children[index as usize] = None,
-            _ => panic!("cannot set child of non-branch node"),
+            Self::AccountLeaf { storage_root, .. } => {
+                *storage_root = None;
+                Ok(())
+            }
+            Self::Branch { children, .. } => {
+                children[index as usize] = None;
+                Ok(())
+            }
+            _ => Err(NodeError::ChildrenUnsupported),
         }
     }
 
@@ -219,13 +259,13 @@ impl Node {
     /// # Panics
     ///
     /// This function will panic if the [Node] is not a leaf.
-    pub fn value(&self) -> TrieValue {
+    pub fn value(&self) -> Result<TrieValue, NodeError> {
         match self {
             Self::StorageLeaf { value_rlp, .. } => {
-                TrieValue::Storage(decode_exact(value_rlp).expect("invalid storage rlp"))
+                Ok(TrieValue::Storage(decode_exact(value_rlp).expect("invalid storage rlp")))
             }
             Self::AccountLeaf { balance_rlp, nonce_rlp, code_hash, storage_root, .. } => {
-                TrieValue::Account(Account {
+                Ok(TrieValue::Account(Account {
                     balance: decode_exact(balance_rlp).expect("invalid balance rlp"),
                     nonce: decode_exact(nonce_rlp).expect("invalid nonce rlp"),
                     storage_root: storage_root
@@ -233,9 +273,9 @@ impl Node {
                         .and_then(|p| p.rlp().as_hash())
                         .unwrap_or(EMPTY_ROOT_HASH),
                     code_hash: *code_hash,
-                })
+                }))
             }
-            _ => panic!("cannot get value of non-leaf node"),
+            _ => Err(NodeError::NoValue),
         }
     }
 
@@ -291,12 +331,12 @@ impl Value for Node {
             }
             Self::AccountLeaf { prefix, balance_rlp, nonce_rlp, storage_root, code_hash } => {
                 let packed_prefix_length = (prefix.len() + 1) / 2;
-                2 + packed_prefix_length +
-                    balance_rlp.len() +
-                    nonce_rlp.len() +
-                    storage_root.is_some() as usize * 37 +
-                    (*code_hash != KECCAK_EMPTY) as usize * 32 // 2 bytes for flags and prefix
-                                                               // length
+                2 + packed_prefix_length
+                    + balance_rlp.len()
+                    + nonce_rlp.len()
+                    + storage_root.is_some() as usize * 37
+                    + (*code_hash != KECCAK_EMPTY) as usize * 32 // 2 bytes for flags and prefix
+                                                                 // length
             }
             Self::Branch { prefix, children } => {
                 let (_, children_slot_size) = Self::children_slot_size(children);
@@ -330,19 +370,19 @@ impl Value for Node {
             Self::AccountLeaf { prefix, balance_rlp, nonce_rlp, code_hash, storage_root } => {
                 let prefix_length = prefix.len();
                 let packed_prefix_length = (prefix.len() + 1) / 2;
-                let total_size = 2 +
-                    packed_prefix_length +
-                    balance_rlp.len() +
-                    nonce_rlp.len() +
-                    storage_root.is_some() as usize * 37 +
-                    (*code_hash != KECCAK_EMPTY) as usize * 32;
+                let total_size = 2
+                    + packed_prefix_length
+                    + balance_rlp.len()
+                    + nonce_rlp.len()
+                    + storage_root.is_some() as usize * 37
+                    + (*code_hash != KECCAK_EMPTY) as usize * 32;
                 if buf.len() < total_size {
                     return Err(value::Error::InvalidEncoding);
                 }
 
-                let flags = 1 |
-                    ((storage_root.is_some() as u8) << 7) |
-                    (((*code_hash != KECCAK_EMPTY) as u8) << 6);
+                let flags = 1
+                    | ((storage_root.is_some() as u8) << 7)
+                    | (((*code_hash != KECCAK_EMPTY) as u8) << 6);
 
                 buf[0] = flags;
                 buf[1] = prefix_length as u8;
@@ -648,49 +688,49 @@ mod tests {
     #[test]
     fn test_size_branch() {
         // 2 children, reserve 2 children slots
-        let mut node = Node::new_branch(Nibbles::new());
-        node.set_child(0, Pointer::new(42.into(), RlpNode::from_rlp(&encode(10u8))));
-        node.set_child(11, Pointer::new(11.into(), RlpNode::from_rlp(&encode("foo"))));
+        let mut node = Node::new_branch(Nibbles::new()).expect("can create node");
+        node.set_child(0, Pointer::new(42.into(), RlpNode::from_rlp(&encode(10u8)))).expect("should set child");
+        node.set_child(11, Pointer::new(11.into(), RlpNode::from_rlp(&encode("foo")))).expect("should set child");
         let size = node.size();
         assert_eq!(size, 2 + 2 + 37 * 2); // 2 bytes for type and prefix length, 2 for bitmask, 37 for each 2 children pointers
 
         // 3 children, reserve 4 children slots
-        let mut node = Node::new_branch(Nibbles::new());
+        let mut node = Node::new_branch(Nibbles::new()).expect("can create node");
         for i in 0..3 {
-            node.set_child(i, Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i))));
+            node.set_child(i, Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i)))).expect("should set child");
         }
 
         let size = node.size();
         assert_eq!(size, 2 + 2 + 37 * 4); // 2 bytes for type and prefix length, 2 for bitmask, 37 for each 4 children pointers
 
         // 4 children, reserve 4 children slots
-        let mut node = Node::new_branch(Nibbles::new());
+        let mut node = Node::new_branch(Nibbles::new()).expect("can create node");
         for i in 10..14 {
-            node.set_child(i, Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i))));
+            node.set_child(i, Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i)))).expect("should set child");
         }
         let size = node.size();
         assert_eq!(size, 2 + 2 + 37 * 4); // 2 bytes for type and prefix length, 2 for bitmask, 37 for each 4 children pointers
 
         // 5 children, reserve 8 children slots
-        let mut node = Node::new_branch(Nibbles::new());
+        let mut node = Node::new_branch(Nibbles::new()).expect("can create node");
         for i in 11..16 {
-            node.set_child(i, Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i))));
+            node.set_child(i, Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i)))).expect("should set child");
         }
         let size = node.size();
         assert_eq!(size, 2 + 2 + 37 * 8); // 2 bytes for type and prefix length, 2 for bitmask, 37 for each 8 children pointers
 
         // 8 children, reserve 8 children slots
-        let mut node = Node::new_branch(Nibbles::new());
+        let mut node = Node::new_branch(Nibbles::new()).expect("can create node");
         for i in 5..13 {
-            node.set_child(i, Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i))));
+            node.set_child(i, Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i)))).expect("should set child");
         }
         let size = node.size();
         assert_eq!(size, 2 + 2 + 37 * 8); // 2 bytes for type and prefix length, 2 for bitmask, 37 for each 8 children pointers
 
         // 9 children, reserve 16 children slots
-        let mut node = Node::new_branch(Nibbles::new());
+        let mut node = Node::new_branch(Nibbles::new()).expect("can create node");
         for i in 3..12 {
-            node.set_child(i, Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i))));
+            node.set_child(i, Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i)))).expect("should set child");
         }
         let size = node.size();
         assert_eq!(size, 2 + 2 + 37 * 16); // 2 bytes for type and prefix length, 2 for bitmask, 37
@@ -702,25 +742,29 @@ mod tests {
         let node = Node::new_leaf(
             Nibbles::from_nibbles([0xa, 0xb]),
             &TrieValue::Storage(StorageValue::from_be_slice(&[4, 5, 6])),
-        );
+        )
+        .expect("can create node");
         let bytes = node.serialize().unwrap();
         assert_eq!(bytes, hex!("0x0002ab83040506"));
 
         let node = Node::new_leaf(
             Nibbles::from_nibbles([0xa, 0xb, 0xc]),
             &TrieValue::Storage(StorageValue::from_be_slice(&[4, 5, 6, 7])),
-        );
+        )
+        .expect("can create node");
         let bytes = node.serialize().unwrap();
         assert_eq!(bytes, hex!("0x0003abc08404050607"));
 
         let node = Node::new_leaf(
             Nibbles::new(),
             &TrieValue::Storage(StorageValue::from_be_slice(&[255, 255, 255, 255])),
-        );
+        )
+        .expect("can create node");
         let bytes = node.serialize().unwrap();
         assert_eq!(bytes, hex!("0x000084ffffffff"));
 
-        let node = Node::new_leaf(Nibbles::new(), &TrieValue::Storage(StorageValue::from(0)));
+        let node = Node::new_leaf(Nibbles::new(), &TrieValue::Storage(StorageValue::from(0)))
+            .expect("can create node");
         let bytes = node.serialize().unwrap();
         assert_eq!(bytes, hex!("0x000080"));
 
@@ -729,7 +773,8 @@ mod tests {
                 "0x000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f"
             )),
             &TrieValue::Storage(StorageValue::from(U256::MAX)),
-        );
+        )
+        .expect("can create node");
         let bytes = node.serialize().unwrap();
         assert_eq!(bytes, hex!("0x00200123456789abcdef0123456789abcdefa0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"));
     }
@@ -744,7 +789,8 @@ mod tests {
                 EMPTY_ROOT_HASH,
                 KECCAK_EMPTY,
             )),
-        );
+        )
+        .expect("can create node");
         let bytes = node.serialize().unwrap();
         assert_eq!(bytes, hex!("0x0102ab8083040506"));
 
@@ -756,7 +802,8 @@ mod tests {
                 EMPTY_ROOT_HASH,
                 KECCAK_EMPTY,
             )),
-        );
+        )
+        .expect("can create node");
         let bytes = node.serialize().unwrap();
         assert_eq!(bytes, hex!("0x0103abc0808404050607"));
 
@@ -768,7 +815,8 @@ mod tests {
                 EMPTY_ROOT_HASH,
                 b256!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
             )),
-        );
+        )
+        .expect("can create node");
         let bytes = node.serialize().unwrap();
         assert_eq!(bytes, hex!("0x410080840f0f0f0fdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"));
 
@@ -780,7 +828,8 @@ mod tests {
                 EMPTY_ROOT_HASH,
                 b256!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
             )),
-        );
+        )
+        .expect("can create node");
         node.set_child(
             0,
             Pointer::new(
@@ -789,18 +838,18 @@ mod tests {
                     "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
                 )),
             ),
-        );
+        ).expect("should set child");
         let bytes = node.serialize().unwrap();
         assert_eq!(bytes, hex!("0xc10080840f0f0f0fdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef0000002aa01234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"));
     }
 
     #[test]
     fn test_branch_node_serialize() {
-        let mut node: Node = Node::new_branch(Nibbles::new());
+        let mut node: Node = Node::new_branch(Nibbles::new()).expect("can create node");
         let hash1 = b256!("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
         let hash2 = b256!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
-        node.set_child(0, Pointer::new(42.into(), RlpNode::word_rlp(&hash1)));
-        node.set_child(11, Pointer::new(43.into(), RlpNode::word_rlp(&hash2)));
+        node.set_child(0, Pointer::new(42.into(), RlpNode::word_rlp(&hash1))).expect("should set child");
+        node.set_child(11, Pointer::new(43.into(), RlpNode::word_rlp(&hash2))).expect("should set child");
         let bytes = node.serialize().unwrap();
         assert_eq!(bytes.len(), 2 + 2 + 37 * 2);
         // branch, no prefix
@@ -816,13 +865,14 @@ mod tests {
         // children 12-15
         assert_eq!(bytes, expected);
 
-        let mut node: Node = Node::new_branch(Nibbles::from_nibbles([0xa, 0xb, 0xc, 0xd, 0xe]));
+        let mut node: Node = Node::new_branch(Nibbles::from_nibbles([0xa, 0xb, 0xc, 0xd, 0xe]))
+            .expect("can create node");
         let hash1 = b256!("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
         let hash2 = b256!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
         let hash3 = b256!("0x1111111111111111111111111111111111111111111111111111111111111111");
-        node.set_child(2, Pointer::new(100.into(), RlpNode::word_rlp(&hash1)));
-        node.set_child(3, Pointer::new(200.into(), RlpNode::word_rlp(&hash2)));
-        node.set_child(15, Pointer::new(210.into(), RlpNode::word_rlp(&hash3)));
+        node.set_child(2, Pointer::new(100.into(), RlpNode::word_rlp(&hash1))).expect("should set child");
+        node.set_child(3, Pointer::new(200.into(), RlpNode::word_rlp(&hash2))).expect("should set child");
+        node.set_child(15, Pointer::new(210.into(), RlpNode::word_rlp(&hash3))).expect("should set child");
         let bytes = node.serialize().unwrap();
         assert_eq!(bytes.len(), 2 + 3 + 2 + 37 * 4);
         // branch, length, prefix
@@ -842,11 +892,12 @@ mod tests {
         expected.extend([0; 37]);
         assert_eq!(bytes, expected);
 
-        let mut node: Node = Node::new_branch(Nibbles::from_nibbles([0x0, 0x0]));
+        let mut node: Node =
+            Node::new_branch(Nibbles::from_nibbles([0x0, 0x0])).expect("can create node");
         let v1 = encode(1u8);
         let v2 = encode("hello world");
-        node.set_child(1, Pointer::new(99999.into(), RlpNode::from_rlp(&v1)));
-        node.set_child(2, Pointer::new(8675309.into(), RlpNode::from_rlp(&v2)));
+        node.set_child(1, Pointer::new(99999.into(), RlpNode::from_rlp(&v1))).expect("should set child");
+        node.set_child(2, Pointer::new(8675309.into(), RlpNode::from_rlp(&v2))).expect("should set child");
         let bytes = node.serialize().unwrap();
 
         // branch, length, prefix
@@ -869,7 +920,8 @@ mod tests {
         let node = Node::new_leaf(
             Nibbles::new(),
             &TrieValue::Account(Account::new(0, U256::from(1), B256::ZERO, B256::ZERO)),
-        );
+        )
+        .expect("can create node");
         let mut bytes = vec![];
         node.encode(&mut bytes);
         assert_eq!(bytes, hex!("0xf84920b846f8448001a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a00000000000000000000000000000000000000000000000000000000000000000"));
@@ -877,7 +929,8 @@ mod tests {
         let node = Node::new_leaf(
             Nibbles::from_nibbles([0xa, 0xb]),
             &TrieValue::Account(Account::new(1, U256::from(100), B256::ZERO, B256::ZERO)),
-        );
+        )
+        .expect("can create node");
         let mut bytes = vec![];
         node.encode(&mut bytes);
         assert_eq!(bytes, hex!("0xf84b8220abb846f8440164a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a00000000000000000000000000000000000000000000000000000000000000000"));
@@ -885,7 +938,8 @@ mod tests {
         let node = Node::new_leaf(
             Nibbles::from_nibbles([0xa, 0xb, 0xc, 0xd, 0xe]),
             &TrieValue::Account(Account::new(999, U256::from(123456789), B256::ZERO, B256::ZERO)),
-        );
+        )
+        .expect("can create node");
         let mut bytes = vec![];
         node.encode(&mut bytes);
         assert_eq!(bytes, hex!("0xf852833abcdeb84cf84a8203e784075bcd15a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a00000000000000000000000000000000000000000000000000000000000000000"));
@@ -900,7 +954,8 @@ mod tests {
                 EMPTY_ROOT_HASH,
                 KECCAK_EMPTY,
             )),
-        );
+        )
+        .expect("can create node");
         let mut bytes = vec![];
         node.encode(&mut bytes);
         assert_eq!(bytes, hex!("0xf872a120761d5c42184a02cc64585ed2ff339fc39a907e82731d70313c83d2212b2da36bb84ef84c80888ac7230489e80000a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"));
@@ -914,7 +969,7 @@ mod tests {
 
     #[test]
     fn test_branch_node_encode() {
-        let mut node = Node::new_branch(Nibbles::new());
+        let mut node = Node::new_branch(Nibbles::new()).expect("can create node");
         node.set_child(
             0,
             Pointer::new(
@@ -923,7 +978,7 @@ mod tests {
                     "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
                 )),
             ),
-        );
+        ).expect("should set child");
         node.set_child(
             15,
             Pointer::new(
@@ -932,12 +987,12 @@ mod tests {
                     "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
                 )),
             ),
-        );
+        ).expect("should set child");
         let mut bytes = vec![];
         node.encode(&mut bytes);
         assert_eq!(bytes, hex!("0xf851a01234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef8080808080808080808080808080a0deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef80"));
 
-        let mut node = Node::new_branch(Nibbles::new());
+        let mut node = Node::new_branch(Nibbles::new()).expect("can create node");
         node.set_child(
             3,
             Pointer::new(
@@ -946,7 +1001,7 @@ mod tests {
                     "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
                 )),
             ),
-        );
+        ).expect("should set child");
         node.set_child(
             7,
             Pointer::new(
@@ -955,7 +1010,7 @@ mod tests {
                     "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
                 )),
             ),
-        );
+        ).expect("should set child");
         node.set_child(
             13,
             Pointer::new(
@@ -964,12 +1019,13 @@ mod tests {
                     "0xf00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f"
                 )),
             ),
-        );
+        ).expect("should set child");
         let mut bytes = vec![];
         node.encode(&mut bytes);
         assert_eq!(bytes, hex!("0xf871808080a01234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef808080a0deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef8080808080a0f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f808080"));
 
-        let mut node = Node::new_branch(Nibbles::from_nibbles([0x1, 0x2]));
+        let mut node =
+            Node::new_branch(Nibbles::from_nibbles([0x1, 0x2])).expect("can create node");
         node.set_child(
             0,
             Pointer::new(
@@ -978,7 +1034,7 @@ mod tests {
                     "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
                 )),
             ),
-        );
+        ).expect("should set child");
         node.set_child(
             15,
             Pointer::new(
@@ -987,7 +1043,7 @@ mod tests {
                     "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
                 )),
             ),
-        );
+        ).expect("should set child");
         let mut bytes = vec![];
         node.encode(&mut bytes);
         assert_eq!(
@@ -995,7 +1051,8 @@ mod tests {
             hex!("0xe4820012a07bd949f8cd65627b2b00e38e837d3d6136a9fd1599e3677a4b5a730e2176f67d")
         );
 
-        let mut node = Node::new_branch(Nibbles::from_nibbles([0x7, 0x7, 0x7, 0x7, 0x7, 0x7, 0x7]));
+        let mut node = Node::new_branch(Nibbles::from_nibbles([0x7, 0x7, 0x7, 0x7, 0x7, 0x7, 0x7]))
+            .expect("can create node");
         node.set_child(
             3,
             Pointer::new(
@@ -1004,7 +1061,7 @@ mod tests {
                     "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
                 )),
             ),
-        );
+        ).expect("should set child");
         node.set_child(
             7,
             Pointer::new(
@@ -1013,7 +1070,7 @@ mod tests {
                     "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
                 )),
             ),
-        );
+        ).expect("should set child");
         node.set_child(
             13,
             Pointer::new(
@@ -1022,7 +1079,7 @@ mod tests {
                     "0xf00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f"
                 )),
             ),
-        );
+        ).expect("should set child");
         let encoded = encode(&node);
         node.encode(&mut bytes);
         assert_eq!(
@@ -1032,7 +1089,7 @@ mod tests {
             )
         );
 
-        let mut node = Node::new_branch(Nibbles::new());
+        let mut node = Node::new_branch(Nibbles::new()).expect("can create node");
         node.set_child(
             5,
             Pointer::new(
@@ -1041,7 +1098,7 @@ mod tests {
                     "0x18e3b46e84b35270116303fb2a33c853861d45d99da2d87117c2136f7edbd0b9"
                 )),
             ),
-        );
+        ).expect("should set child");
         node.set_child(
             7,
             Pointer::new(
@@ -1050,7 +1107,7 @@ mod tests {
                     "0x717aef38e7ba4a0ae477856a6e7f6ba8d4ee764c57908e6f22643a558db737ff"
                 )),
             ),
-        );
+        ).expect("should set child");
         let encoded = encode(&node);
         assert_eq!(
             encoded,

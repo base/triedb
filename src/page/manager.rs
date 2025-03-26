@@ -16,6 +16,7 @@ pub enum PageError {
     InvalidCellPointer,
     NoFreeCells,
     PageIsFull,
+    PageSplitLimitReached,
     IO(std::io::Error),
     InvalidValue,
     InvalidPageContents(PageId),

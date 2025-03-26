@@ -25,16 +25,16 @@ impl MmapPageManager {
             .map_err(PageError::IO)?;
         let file_len = file.metadata().map_err(PageError::IO)?.len();
         let mmap = unsafe { MmapMut::map_mut(&file).map_err(PageError::IO)? };
-        let manager = MmapPageManager::new(mmap, file, (file_len / PAGE_SIZE as u64) as PageId);
+        let manager = MmapPageManager::new(mmap, file, (file_len / PAGE_SIZE as u64) as PageId)?;
         Ok(manager)
     }
 
     // Creates a new MmapPageManager with the given memory mapped file.
-    pub fn new(mmap: MmapMut, file: File, next_page_id: PageId) -> Self {
+    pub fn new(mmap: MmapMut, file: File, next_page_id: PageId) -> Result<Self, PageError> {
         if next_page_id > (mmap.len() / PAGE_SIZE) as u32 {
-            panic!("next_page_id is greater than the number of pages in the memory mapped file");
+            return Err(PageError::OutOfBounds(next_page_id));
         }
-        Self { mmap, file: Some(file), next_page_id }
+        Ok(Self { mmap, file: Some(file), next_page_id })
     }
 
     // Creates a new MmapPageManager with an anonymous memory mapped file.
