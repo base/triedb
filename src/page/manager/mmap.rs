@@ -4,7 +4,7 @@ use crate::{
     page::{Page, PageError, PageId, PageManager, PageMut, PAGE_SIZE},
     snapshot::SnapshotId,
 };
-use memmap2::{MmapMut, RemapOptions};
+use memmap2::MmapMut;
 
 // Manages pages in a memory mapped file.
 #[derive(Debug)]
@@ -112,7 +112,20 @@ impl PageManager for MmapPageManager {
                 file.set_len(new_len as u64).map_err(PageError::IO)?;
             }
 
-            self.mmap.remap(new_len, RemapOptions::new().may_move(true)).map_err(PageError::IO)?;
+            #[cfg(target_os = "linux")]
+            {
+                self.mmap
+                    .remap(new_len, memmap2::RemapOptions::new().may_move(true))
+                    .map_err(PageError::IO)?;
+            }
+
+            #[cfg(not(target_os = "linux"))]
+            {
+                self.mmap = match self.file {
+                    Some(ref file) => MmapMut::map_mut(file).map_err(PageError::IO)?,
+                    None => memmap2::MmapMut::map_anon(new_len).map_err(PageError::IO)?,
+                };
+            }
 
             if new_len < old_len {
                 self.next_page_id = new_page_count;
