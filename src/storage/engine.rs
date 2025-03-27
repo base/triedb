@@ -191,68 +191,144 @@ impl<P: PageManager> StorageEngine<P> {
 
    //return type may be string, or thing to print
     pub fn pretty_print_page(
-        &self
-        // context: &TransactionContext,
-        // storage_path: StoragePath,
+        &self,
+        //metadata: Metadata
+        context: &TransactionContext,
+        //storage_path: StoragePath,
     ) -> Result<Option<StorageValue>, Error> {
-        println!("success");
-        Ok(None) 
-       /*  if context.metadata.root_subtrie_page_id == 0 {
+
+       if context.metadata.root_subtrie_page_id == 0 {
             return Ok(None);
         }
-        let original_path: Nibbles = storage_path.full_path();
+
+        let page_id = context.metadata.root_subtrie_page_id;
+        let page = self.get_page(context, page_id)?;
+        let slotted_page = SlottedPage::try_from(page)?;
+        let node: Node = slotted_page.get_value(0)?;
+        let child_pointers = node.enumerate_children();
+        for (_, child) in child_pointers {
+            if child.location().cell_index().is_none() {
+                //new page
+                println!("new page");
+            } else {
+                println!("{:?}", child.location());
+            }
+        }
+        Ok(None)
+        //let original_path: Nibbles = storage_path.full_path();
 
         // check the cache
-        let nibbles = storage_path.get_address().to_nibbles();
-        let cache_location = context.contract_account_loc_cache.get::<Nibbles>(nibbles);
-        let (slotted_page, page_index, path_offset) = match cache_location {
-            Some(cache_location) => {
-                context.transaction_metrics.inc_cache_storage_read_hit();
+        //let nibbles = storage_path.get_address().to_nibbles();
+        // let cache_location = context.contract_account_loc_cache.get::<Nibbles>(nibbles);
+        // let (slotted_page, page_index, path_offset) = match cache_location {
+        //     Some(cache_location) => {
+        //         //context.transaction_metrics.inc_cache_storage_read_hit();
 
-                let path_offset = storage_path.get_slot_offset();
-                let (page_id, page_index) = *cache_location;
+        //         let path_offset = storage_path.get_slot_offset();
+        //         let (page_id, page_index) = *cache_location;
 
-                // read the current account
-                let page = self.get_page(context, page_id)?;
-                let slotted_page = SlottedPage::try_from(page)?;
-                let node: Node = slotted_page.get_value(page_index)?;
-                //KALEY TODO check if node is branch or AcctLeaf first
-                let child_pointer = node.enumerate_children();
-                // only when the node is an account leaf and all storage slots are removed
-                if child_pointer.is_none() {
-                    return Ok(None);
+        //         // read the current account
+        //         let page = self.get_page(context, page_id)?;
+        //         let slotted_page = SlottedPage::try_from(page)?;
+        //         let node: Node = slotted_page.get_value(page_index)?;
+        //         //KALEY TODO check if node is branch or AcctLeaf first
+        //         let child_pointer = node.enumerate_children();
+        //         // only when the node is an account leaf and all storage slots are removed
+        //         if child_pointer.is_none() {
+        //             return Ok(None);
+        //         }
+        //         let child_location = child_pointer.unwrap().location();
+        //         let (slotted_page, page_index) = if child_location.cell_index().is_some() {
+        //             (slotted_page, child_location.cell_index().unwrap())
+        //         } else {
+        //             let child_page_id = child_location.page_id().unwrap();
+        //             let child_page = self.get_page(context, child_page_id)?;
+        //             let child_slotted_page = SlottedPage::try_from(child_page)?;
+        //             (child_slotted_page, 0)
+        //         };
+        //         (slotted_page, page_index, path_offset)
+        //     }
+        //     None => {
+        //         context.transaction_metrics.inc_cache_storage_read_miss();
+
+        //         let page_id = context.metadata.root_subtrie_page_id;
+        //         let page = self.get_page(context, page_id)?;
+        //         let slotted_page = SlottedPage::try_from(page)?;
+        //         (slotted_page, 0, 0)
+        //     }
+        // };
+
+        // match self.get_value_from_page(
+        //     context,
+        //     &original_path,
+        //     path_offset,
+        //     slotted_page,
+        //     page_index,
+        // )? {
+        //     Some(TrieValue::Storage(storage_value)) => Ok(Some(storage_value)),
+        //     _ => Ok(None),
+        // }
+    }
+
+    fn traverse_page(
+        &self,
+        context: &TransactionContext,
+        //original_path: &Nibbles,
+        //path_offset: usize,
+        slotted_page: SlottedPage<'_>,
+        cell_index: u8,
+    ) -> Result<Option<TrieValue>, Error> {
+        let node: Node = slotted_page.get_value(cell_index)?;
+
+        // let common_prefix_length =
+        //     original_path.slice(path_offset..).common_prefix_length(node.prefix());
+        // if common_prefix_length < node.prefix().len() {
+        //     return Ok(None);
+        // }
+
+        //let remaining_path = original_path.slice(path_offset + common_prefix_length..);
+        // if remaining_path.is_empty() {
+        //     // cache the account location if it is a contract account
+        //     if let TrieValue::Account(account) = node.value() {
+        //         if account.storage_root != EMPTY_ROOT_HASH &&
+        //             original_path.len() == ADDRESS_PATH_LENGTH
+        //         {
+        //             context
+        //                 .contract_account_loc_cache
+        //                 .insert(original_path.clone(), (slotted_page.id(), page_index));
+        //         }
+        //     }
+
+        //     return Ok(Some(node.value()));
+        // }
+
+        let child_pointers = node.enumerate_children();
+
+        for child_pointer in child_pointers {
+            let _ret = match child_pointer {
+                Some(child_pointer) => {
+                    let child_location = child_pointer.location();
+                    if child_location.cell_index().is_some() {
+                        self.traverse_page(
+                            context,
+                            slotted_page,
+                            child_location.cell_index().unwrap(),
+                        )
+                    } else {
+                        let child_page_id = child_location.page_id().unwrap();
+                        let child_page = self.get_page(context, child_page_id)?;
+                        let child_slotted_page = SlottedPage::try_from(child_page)?;
+                        self.traverse_page(
+                            context,
+                            child_slotted_page,
+                            0,
+                        )
+                    }
                 }
-                let child_location = child_pointer.unwrap().location();
-                let (slotted_page, page_index) = if child_location.cell_index().is_some() {
-                    (slotted_page, child_location.cell_index().unwrap())
-                } else {
-                    let child_page_id = child_location.page_id().unwrap();
-                    let child_page = self.get_page(context, child_page_id)?;
-                    let child_slotted_page = SlottedPage::try_from(child_page)?;
-                    (child_slotted_page, 0)
-                };
-                (slotted_page, page_index, path_offset)
+                None => Ok(None),
             }
-            None => {
-                context.transaction_metrics.inc_cache_storage_read_miss();
-
-                let page_id = context.metadata.root_subtrie_page_id;
-                let page = self.get_page(context, page_id)?;
-                let slotted_page = SlottedPage::try_from(page)?;
-                (slotted_page, 0, 0)
-            }
-        };
-
-        match self.get_value_from_page(
-            context,
-            &original_path,
-            path_offset,
-            slotted_page,
-            page_index,
-        )? {
-            Some(TrieValue::Storage(storage_value)) => Ok(Some(storage_value)),
-            _ => Ok(None),
-        }*/
+        }
+        Ok(None)
     }
 
     /// Retrieves a [TrieValue] from the given page or any of its descendants.

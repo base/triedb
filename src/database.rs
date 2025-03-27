@@ -124,8 +124,11 @@ impl Database<MmapPageManager> {
     }
 
     pub fn pretty_print(self) -> Result<(), Error> {
+        let metadata = self.inner.metadata.read().unwrap().clone();
+
+        let context = TransactionContext::new(metadata);
         let storage_engine = self.inner.storage_engine.read().unwrap();
-        storage_engine.pretty_print_page();
+        storage_engine.pretty_print_page(&context);
         Ok(())
     }
 }
