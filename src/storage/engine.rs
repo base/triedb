@@ -2,7 +2,7 @@ use crate::{
     account::Account,
     context::TransactionContext,
     location::Location,
-    node::{Node, TrieValue},
+    node::{Node, NodeError, TrieValue},
     page::{
         OrphanPageManager, Page, PageError, PageId, PageManager, PageMut, RootPageMut, SlottedPage,
         SlottedPageMut, CELL_POINTER_SIZE, PAGE_DATA_SIZE,
@@ -153,7 +153,7 @@ impl<P: PageManager> StorageEngine<P> {
                 let page = self.get_page(context, page_id)?;
                 let slotted_page = SlottedPage::try_from(page)?;
                 let node: Node = slotted_page.get_value(page_index)?;
-                let child_pointer = node.direct_child();
+                let child_pointer = node.direct_child()?;
                 // only when the node is an account leaf and all storage slots are removed
                 if child_pointer.is_none() {
                     return Ok(None);
@@ -212,7 +212,7 @@ impl<P: PageManager> StorageEngine<P> {
         let remaining_path = original_path.slice(path_offset + common_prefix_length..);
         if remaining_path.is_empty() {
             // cache the account location if it is a contract account
-            if let TrieValue::Account(account) = node.value() {
+            if let TrieValue::Account(account) = node.value()? {
                 if account.storage_root != EMPTY_ROOT_HASH &&
                     original_path.len() == ADDRESS_PATH_LENGTH
                 {
@@ -222,7 +222,7 @@ impl<P: PageManager> StorageEngine<P> {
                 }
             }
 
-            return Ok(Some(node.value()));
+            return Ok(Some(node.value()?));
         }
 
         let (child_pointer, new_path_offset) = match node {
@@ -353,11 +353,11 @@ impl<P: PageManager> StorageEngine<P> {
                     split_count += 1;
                     // FIXME: this is a temporary limit to prevent infinite loops.
                     if split_count > 20 {
-                        panic!("Page split limit reached!");
+                        return Err(Error::PageError(PageError::PageSplitLimitReached));
                     }
                 }
                 Err(Error::PageError(PageError::PageIsFull)) => {
-                    panic!("Page is full!");
+                    return Err(Error::PageError(PageError::PageIsFull));
                 }
                 Err(e) => return Err(e),
             }
@@ -432,7 +432,9 @@ impl<P: PageManager> StorageEngine<P> {
                         page_index,
                     );
                 } else {
-                    panic!("unexpected case - shortest_common_prefix_idx is not at either end of the changes array");
+                    unreachable!(
+                        "shortest_common_prefix_idx is not at either end of the changes array"
+                    );
                 }
             }
             return self.handle_missing_parent_branch(
@@ -497,7 +499,7 @@ impl<P: PageManager> StorageEngine<P> {
         value: &TrieValue,
         slotted_page: &mut SlottedPageMut<'_>,
     ) -> Result<Pointer, Error> {
-        let new_node = Node::new_leaf(path.clone(), value);
+        let new_node = Node::new_leaf(path.clone(), value)?;
         let rlp_node = new_node.rlp_encode();
 
         let index = slotted_page.insert_value(&new_node)?;
@@ -526,14 +528,14 @@ impl<P: PageManager> StorageEngine<P> {
         }
 
         // Create a new branch node with the common prefix
-        let mut new_parent_branch = Node::new_branch(common_prefix);
+        let mut new_parent_branch = Node::new_branch(common_prefix)?;
 
         // Update the prefix of the existing node and insert it into the page
         let node_branch_index = node.prefix()[common_prefix_length];
-        node.set_prefix(node.prefix().slice(common_prefix_length + 1..));
+        node.set_prefix(node.prefix().slice(common_prefix_length + 1..))?;
         let rlp_node = node.rlp_encode();
         let location = Location::for_cell(slotted_page.insert_value(node)?);
-        new_parent_branch.set_child(node_branch_index, Pointer::new(location, rlp_node));
+        new_parent_branch.set_child(node_branch_index, Pointer::new(location, rlp_node))?;
 
         // Set the new branch as the current node
         slotted_page.set_value(page_index, &new_parent_branch)?;
@@ -576,7 +578,7 @@ impl<P: PageManager> StorageEngine<P> {
         let (_, remaining_changes) = changes.split_first().unwrap();
 
         // skip if the value is the same as the current value
-        if &node.value() == value.unwrap() {
+        if &node.value()? == value.unwrap() {
             if remaining_changes.is_empty() {
                 return Ok(PointerChange::None);
             }
@@ -591,10 +593,10 @@ impl<P: PageManager> StorageEngine<P> {
         }
 
         // Update the node with the new value
-        let mut new_node = Node::new_leaf(path, value.unwrap());
+        let mut new_node = Node::new_leaf(path, value.unwrap())?;
         if node.has_children() {
-            if let Some(child_pointer) = node.direct_child() {
-                new_node.set_child(0, child_pointer.clone());
+            if let Some(child_pointer) = node.direct_child()? {
+                new_node.set_child(0, child_pointer.clone())?;
             }
         }
 
@@ -656,7 +658,7 @@ impl<P: PageManager> StorageEngine<P> {
         node: &mut Node,
         common_prefix_length: usize,
     ) -> Result<PointerChange, Error> {
-        let child_pointer = node.direct_child();
+        let child_pointer = node.direct_child()?;
 
         if let Some(child_pointer) = child_pointer {
             let child_pointer_change =
@@ -750,7 +752,7 @@ impl<P: PageManager> StorageEngine<P> {
 
         let node_size_incr = node.size_incr_with_new_child();
         let remaining_path = path.slice(path_offset as usize + common_prefix_length..);
-        let new_node = Node::new_leaf(remaining_path, value.as_ref().unwrap());
+        let new_node = Node::new_leaf(remaining_path, value.as_ref().unwrap())?;
 
         // if the page doesn't have enough space to
         // 1. insert the new leaf node
@@ -766,7 +768,7 @@ impl<P: PageManager> StorageEngine<P> {
 
         // Insert the new node and update the parent
         let location = Location::for_cell(slotted_page.insert_value(&new_node)?);
-        node.set_child(0, Pointer::new(location, rlp_node));
+        node.set_child(0, Pointer::new(location, rlp_node))?;
         slotted_page.set_value(page_index, node)?;
 
         if remaining_changes.is_empty() {
@@ -797,9 +799,9 @@ impl<P: PageManager> StorageEngine<P> {
         child_index: u8,
     ) -> Result<(), Error> {
         if let Some(new_child_pointer) = new_child_pointer {
-            node.set_child(child_index, new_child_pointer);
+            node.set_child(child_index, new_child_pointer)?;
         } else {
-            node.remove_child(child_index);
+            node.remove_child(child_index)?;
         }
 
         slotted_page.set_value(page_index, node)?;
@@ -832,7 +834,7 @@ impl<P: PageManager> StorageEngine<P> {
             }
 
             // Get the child pointer for this index
-            let child_pointer = node.child(child_index);
+            let child_pointer = node.child(child_index)?;
 
             match child_pointer {
                 Some(child_pointer) => {
@@ -909,7 +911,7 @@ impl<P: PageManager> StorageEngine<P> {
 
                     // ensure that the page has enough space to insert a new leaf node.
                     let node_size_incr = node.size_incr_with_new_child();
-                    let new_node = Node::new_leaf(remaining_path, value);
+                    let new_node = Node::new_leaf(remaining_path, value)?;
 
                     // if the page doesn't have enough space to
                     // 1. insert the new leaf node
@@ -926,7 +928,7 @@ impl<P: PageManager> StorageEngine<P> {
 
                     let rlp_node = new_node.rlp_encode();
                     let location = Location::for_cell(slotted_page.insert_value(&new_node)?);
-                    node.set_child(child_index, Pointer::new(location, rlp_node));
+                    node.set_child(child_index, Pointer::new(location, rlp_node))?;
                     slotted_page.set_value(page_index, node)?;
 
                     // If there are more matching changes, recurse
@@ -977,7 +979,7 @@ impl<P: PageManager> StorageEngine<P> {
         page_index: u8,
         node: &Node,
     ) -> Result<PointerChange, Error> {
-        let children = node.enumerate_children();
+        let children = node.enumerate_children()?;
         if children.is_empty() {
             // Delete empty branch node
             slotted_page.delete_value(page_index)?;
@@ -1032,7 +1034,7 @@ impl<P: PageManager> StorageEngine<P> {
         let mut new_nibbles = node.prefix().clone();
         new_nibbles.push(only_child_index);
         new_nibbles = new_nibbles.join(only_child_node.prefix());
-        only_child_node.set_prefix(new_nibbles);
+        only_child_node.set_prefix(new_nibbles)?;
 
         // Get the RLP node for the merged child
         let rlp_node = only_child_node.rlp_encode();
@@ -1139,7 +1141,7 @@ impl<P: PageManager> StorageEngine<P> {
 
             // Find the child with the largest subtrie
             let (largest_child_index, largest_child_pointer) = root_node
-                .enumerate_children()
+                .enumerate_children()?
                 .into_iter()
                 .max_by_key(|(_, ptr)| {
                     // If pointer points to a cell in current page, count nodes in that subtrie
@@ -1165,7 +1167,7 @@ impl<P: PageManager> StorageEngine<P> {
                         Location::for_page(child_slotted_page.id()),
                         largest_child_pointer.rlp().clone(),
                     ),
-                );
+                )?;
                 page.set_value(0, &root_node)?;
             }
         }
@@ -1192,7 +1194,7 @@ impl<P: PageManager> StorageEngine<P> {
         let node: Node = slotted_page.get_value(cell_index)?;
 
         if node.has_children() {
-            let children = node.enumerate_children();
+            let children = node.enumerate_children()?;
 
             for (_, child_ptr) in children {
                 if let Some(cell_index) = child_ptr.location().cell_index() {
@@ -1243,7 +1245,7 @@ impl<P: PageManager> StorageEngine<P> {
         let node: Node = slotted_page.get_value(cell_index)?;
 
         if node.has_children() {
-            let children = node.enumerate_children();
+            let children = node.enumerate_children()?;
 
             for (_, child_ptr) in children {
                 if let Some(cell_index) = child_ptr.location().cell_index() {
@@ -1383,7 +1385,7 @@ fn count_subtrie_nodes(page: &SlottedPage<'_>, root_index: u8) -> Result<u8, Err
     }
 
     // Count child nodes that are in this page
-    for (_, child_ptr) in node.enumerate_children() {
+    for (_, child_ptr) in node.enumerate_children()? {
         if let Some(child_index) = child_ptr.location().cell_index() {
             count += count_subtrie_nodes(page, child_index)?;
         }
@@ -1424,9 +1426,9 @@ fn move_subtrie_nodes(
 
     for branch_index in range {
         let child_ptr = if updated_node.is_account_leaf() {
-            updated_node.direct_child()
+            updated_node.direct_child()?
         } else {
-            updated_node.child(branch_index)
+            updated_node.child(branch_index)?
         };
         if let Some(child_ptr) = child_ptr {
             if let Some(child_index) = child_ptr.location().cell_index() {
@@ -1434,7 +1436,7 @@ fn move_subtrie_nodes(
                 let new_location = move_subtrie_nodes(source_page, child_index, target_page)?;
                 // update the pointer in the parent node
                 updated_node
-                    .set_child(branch_index, Pointer::new(new_location, child_ptr.rlp().clone()));
+                    .set_child(branch_index, Pointer::new(new_location, child_ptr.rlp().clone()))?;
             }
         }
     }
@@ -1531,7 +1533,9 @@ impl<P: PageManager> Inner<P> {
 
 #[derive(Debug)]
 pub enum Error {
+    NodeError(NodeError),
     PageError(PageError),
+    InvalidCommonPrefixIndex,
     InvalidSnapshotId,
     EngineClosed,
     PageSplit,
@@ -1541,6 +1545,12 @@ pub enum Error {
 impl From<PageError> for Error {
     fn from(error: PageError) -> Self {
         Error::PageError(error)
+    }
+}
+
+impl From<NodeError> for Error {
+    fn from(error: NodeError) -> Self {
+        Error::NodeError(error)
     }
 }
 
@@ -2731,7 +2741,7 @@ mod tests {
                     // Get the node to find child pages
                     if let Ok(node) = slotted_page.get_value::<Node>(0) {
                         // Add child pages to our list
-                        for (_, child_ptr) in node.enumerate_children() {
+                        for (_, child_ptr) in node.enumerate_children().expect("can get children") {
                             if let Some(child_page_id) = child_ptr.location().page_id() {
                                 if !page_ids.contains(&child_page_id) {
                                     page_ids.push(child_page_id);
@@ -3335,7 +3345,8 @@ mod tests {
         let child_1: Node = Node::new_leaf(
             Nibbles::from_nibbles(&child_1_full_path[2..]),
             &TrieValue::Account(test_account.clone()),
-        );
+        )
+        .expect("can create node");
 
         let mut child_2_full_path = [0u8; 64];
         child_2_full_path[0] = 5; // root branch nibble
@@ -3346,7 +3357,8 @@ mod tests {
         let child_2: Node = Node::new_leaf(
             Nibbles::from_nibbles(&child_2_full_path[2..]),
             &TrieValue::Account(test_account.clone()),
-        );
+        )
+        .expect("can create node");
 
         // child 1 is the root of page2
         slotted_page2.insert_value(&child_1).unwrap();
@@ -3356,13 +3368,19 @@ mod tests {
         slotted_page3.insert_value(&child_2).unwrap();
         let child_2_location = Location::from(slotted_page3.id());
 
-        let mut new_branch_node: Node = Node::new_branch(Nibbles::new());
-        new_branch_node.set_child(0, Pointer::new(child_1_location, RlpNode::default()));
-        new_branch_node.set_child(15, Pointer::new(child_2_location, RlpNode::default()));
+        let mut new_branch_node: Node = Node::new_branch(Nibbles::new()).expect("can create node");
+        new_branch_node
+            .set_child(0, Pointer::new(child_1_location, RlpNode::default()))
+            .expect("can set child");
+        new_branch_node
+            .set_child(15, Pointer::new(child_2_location, RlpNode::default()))
+            .expect("can set child");
         let new_branch_node_index = slotted_page1.insert_value(&new_branch_node).unwrap();
         let new_branch_node_location = Location::from(new_branch_node_index as u32);
 
-        root_node.set_child(5, Pointer::new(new_branch_node_location, RlpNode::default()));
+        root_node
+            .set_child(5, Pointer::new(new_branch_node_location, RlpNode::default()))
+            .expect("can set child");
         slotted_page1.set_value(0, &root_node).unwrap();
 
         storage_engine.commit(&context).unwrap();
@@ -3389,7 +3407,7 @@ mod tests {
         // index 5
         let root_node: Node = slotted_page.get_value(0).unwrap();
         assert!(root_node.is_branch());
-        let child_2_pointer = root_node.child(5).unwrap();
+        let child_2_pointer = root_node.child(5).expect("can get child").unwrap();
         assert!(child_2_pointer.location().page_id().is_some());
         assert_eq!(child_2_pointer.location().page_id().unwrap(), slotted_page3.id());
 
@@ -3433,7 +3451,8 @@ mod tests {
         let child_1: Node = Node::new_leaf(
             Nibbles::from_nibbles(&child_1_full_path[1..]),
             &TrieValue::Account(test_account.clone()),
-        );
+        )
+        .expect("can create node");
 
         let mut child_2_full_path = [0u8; 64];
         child_2_full_path[0] = 15; // root branch nibble
@@ -3443,7 +3462,8 @@ mod tests {
         let child_2: Node = Node::new_leaf(
             Nibbles::from_nibbles(&child_2_full_path[1..]),
             &TrieValue::Account(test_account.clone()),
-        );
+        )
+        .expect("can create node");
 
         // child 1 is the root of page2
         slotted_page2.insert_value(&child_1).unwrap();
@@ -3454,9 +3474,13 @@ mod tests {
         let child_2_location = Location::from(slotted_page3.id());
 
         // next we create and update our root node
-        let mut root_node = Node::new_branch(Nibbles::new());
-        root_node.set_child(0, Pointer::new(child_1_location, RlpNode::default()));
-        root_node.set_child(15, Pointer::new(child_2_location, RlpNode::default()));
+        let mut root_node = Node::new_branch(Nibbles::new()).expect("can create node");
+        root_node
+            .set_child(0, Pointer::new(child_1_location, RlpNode::default()))
+            .expect("can set child");
+        root_node
+            .set_child(15, Pointer::new(child_2_location, RlpNode::default()))
+            .expect("can set child");
 
         let root_node_page = storage_engine.allocate_page(&mut context).unwrap();
         context.metadata.root_subtrie_page_id = root_node_page.id();

@@ -418,7 +418,7 @@ impl<'p> TryFrom<PageMut<'p>> for SlottedPageMut<'p> {
 
 impl fmt::Debug for SlottedPageMut<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_slotted_page("SlottedPageMut", &*self, f)
+        fmt_slotted_page("SlottedPageMut", self, f)
     }
 }
 
