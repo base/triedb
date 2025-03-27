@@ -29,11 +29,18 @@ impl<P: PageManager> StorageEngine<P> {
 
 #[cfg(test)]
 mod tests {
+    use alloy_primitives::address;
+
+    use crate::storage::test_common::{create_test_account, create_test_engine};
+
     use super::*;
 
     #[test]
     fn test_get_nonexistent_account_with_proof() {
         let (storage_engine, context) = create_test_engine(2000);
+        let address = address!("0x0000000000000000000000000000000000000001");
+        let path = AddressPath::for_address(address);
+        let account = create_test_account(1, 1);
 
         todo!()
     }

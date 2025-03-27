@@ -1552,7 +1552,9 @@ mod tests {
         account::Account,
         storage::{
             engine::PageError,
-            test_common::{create_test_account, create_test_engine},
+            test_common::test_common::{
+                create_test_account, create_test_engine, random_test_account,
+            },
         },
     };
     use alloy_primitives::{address, b256, hex, keccak256, Address, StorageKey, B256, U256};
@@ -1564,7 +1566,6 @@ mod tests {
     use rand::{rngs::StdRng, seq::SliceRandom, Rng, RngCore, SeedableRng};
 
     use super::*;
-    use crate::{database::Metadata, page::MmapPageManager};
 
     fn assert_metrics(
         context: &TransactionContext,
