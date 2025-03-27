@@ -1548,7 +1548,13 @@ impl From<PageError> for Error {
 mod tests {
     use std::collections::HashMap;
 
-    use crate::{account::Account, storage::engine::PageError};
+    use crate::{
+        account::Account,
+        storage::{
+            engine::PageError,
+            test_common::{create_test_account, create_test_engine},
+        },
+    };
     use alloy_primitives::{address, b256, hex, keccak256, Address, StorageKey, B256, U256};
     use alloy_trie::{
         root::{storage_root_unhashed, storage_root_unsorted},
@@ -1559,28 +1565,6 @@ mod tests {
 
     use super::*;
     use crate::{database::Metadata, page::MmapPageManager};
-
-    fn create_test_engine(page_count: u32) -> (StorageEngine<MmapPageManager>, TransactionContext) {
-        let manager = MmapPageManager::new_anon(page_count, 256).unwrap();
-        let orphan_manager = OrphanPageManager::new();
-        let metadata = Metadata {
-            snapshot_id: 1,
-            root_page_id: 0,
-            max_page_number: 255,
-            root_subtrie_page_id: 0,
-            state_root: EMPTY_ROOT_HASH,
-        };
-        let storage_engine = StorageEngine::new(manager, orphan_manager);
-        (storage_engine, TransactionContext::new(metadata))
-    }
-
-    fn random_test_account(rng: &mut StdRng) -> Account {
-        create_test_account(rng.next_u64(), rng.next_u64())
-    }
-
-    fn create_test_account(balance: u64, nonce: u64) -> Account {
-        Account::new(nonce, U256::from(balance), EMPTY_ROOT_HASH, KECCAK_EMPTY)
-    }
 
     fn assert_metrics(
         context: &TransactionContext,
