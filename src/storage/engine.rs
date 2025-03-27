@@ -434,7 +434,7 @@ impl<P: PageManager> StorageEngine<P> {
                         page_index,
                     );
                 } else {
-                    return Err(Error::InvalidCommonPrefixIndex);
+                    unreachable!("shortest_common_prefix_idx is not at either end of the changes array");
                 }
             }
             return self.handle_missing_parent_branch(
