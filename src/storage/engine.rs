@@ -432,7 +432,9 @@ impl<P: PageManager> StorageEngine<P> {
                         page_index,
                     );
                 } else {
-                    unreachable!("shortest_common_prefix_idx is not at either end of the changes array");
+                    unreachable!(
+                        "shortest_common_prefix_idx is not at either end of the changes array"
+                    );
                 }
             }
             return self.handle_missing_parent_branch(
