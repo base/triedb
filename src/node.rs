@@ -286,11 +286,11 @@ impl Value for Node {
     fn size(&self) -> usize {
         match self {
             Self::StorageLeaf { prefix, value_rlp } => {
-                let packed_prefix_length = (prefix.len() + 1) / 2;
+                let packed_prefix_length = prefix.len().div_ceil(2);
                 2 + packed_prefix_length + value_rlp.len() // 2 bytes for type and prefix length
             }
             Self::AccountLeaf { prefix, balance_rlp, nonce_rlp, storage_root, code_hash } => {
-                let packed_prefix_length = (prefix.len() + 1) / 2;
+                let packed_prefix_length = prefix.len().div_ceil(2);
                 2 + packed_prefix_length +
                     balance_rlp.len() +
                     nonce_rlp.len() +
@@ -301,7 +301,7 @@ impl Value for Node {
             Self::Branch { prefix, children } => {
                 let (_, children_slot_size) = Self::children_slot_size(children);
 
-                let packed_prefix_length = (prefix.len() + 1) / 2;
+                let packed_prefix_length = prefix.len().div_ceil(2);
                 2 + packed_prefix_length + 2 + children_slot_size * 37 // 2 bytes for type and
                                                                        // prefix length, 2 for
                                                                        // bitmask, 37 for each child
@@ -314,7 +314,7 @@ impl Value for Node {
         match self {
             Self::StorageLeaf { prefix, value_rlp } => {
                 let prefix_length = prefix.len();
-                let packed_prefix_length = (prefix.len() + 1) / 2;
+                let packed_prefix_length = prefix.len().div_ceil(2);
                 let total_size = 2 + packed_prefix_length + value_rlp.len();
                 if buf.len() < total_size {
                     return Err(value::Error::InvalidEncoding);
@@ -329,7 +329,7 @@ impl Value for Node {
             }
             Self::AccountLeaf { prefix, balance_rlp, nonce_rlp, code_hash, storage_root } => {
                 let prefix_length = prefix.len();
-                let packed_prefix_length = (prefix.len() + 1) / 2;
+                let packed_prefix_length = prefix.len().div_ceil(2);
                 let total_size = 2 +
                     packed_prefix_length +
                     balance_rlp.len() +
@@ -369,7 +369,7 @@ impl Value for Node {
                 let (total_children, children_slot_size) = Self::children_slot_size(children);
 
                 let prefix_length = prefix.len();
-                let packed_prefix_length = (prefix_length + 1) / 2;
+                let packed_prefix_length = prefix_length.div_ceil(2);
                 let total_size = 2 + packed_prefix_length + 2 + children_slot_size * 37; // Type, prefix length, bitmask + children pointers
 
                 if buf.len() < total_size {
@@ -407,7 +407,7 @@ impl Value for Node {
         let flags = bytes[0];
         if flags == 0 {
             let prefix_length = bytes[1] as usize;
-            let packed_prefix_length = (prefix_length + 1) / 2;
+            let packed_prefix_length = prefix_length.div_ceil(2);
             let mut prefix = Nibbles::unpack(&bytes[2..2 + packed_prefix_length]);
             prefix.truncate(prefix_length);
 
@@ -428,7 +428,7 @@ impl Value for Node {
             let has_storage = flags & 0b10000000 != 0;
             let has_code = flags & 0b01000000 != 0;
             let prefix_length = bytes[1] as usize;
-            let packed_prefix_length = (prefix_length + 1) / 2;
+            let packed_prefix_length = prefix_length.div_ceil(2);
             let mut prefix = Nibbles::unpack(&bytes[2..2 + packed_prefix_length]);
             prefix.truncate(prefix_length);
 
@@ -481,7 +481,7 @@ impl Value for Node {
             Ok(Self::AccountLeaf { prefix, balance_rlp, nonce_rlp, code_hash, storage_root })
         } else if flags == 2 {
             let prefix_length = bytes[1] as usize;
-            let packed_prefix_length = (prefix_length + 1) / 2;
+            let packed_prefix_length = prefix_length.div_ceil(2);
             let mut prefix = Nibbles::unpack(&bytes[2..2 + packed_prefix_length]);
             prefix.truncate(prefix_length);
             let children_bitmask = u16::from_be_bytes(
