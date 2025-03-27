@@ -109,7 +109,7 @@ impl<'p> Deref for PageMut<'p> {
 
 impl fmt::Debug for PageMut<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_page("PageMut", &*self, f)
+        fmt_page("PageMut", self, f)
     }
 }
 

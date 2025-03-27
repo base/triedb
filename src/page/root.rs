@@ -291,7 +291,7 @@ impl<'p> RootPageMut<'p> {
 
 impl fmt::Debug for RootPageMut<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_root_page("RootPageMut", &*self, f)
+        fmt_root_page("RootPageMut", self, f)
     }
 }
 

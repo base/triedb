@@ -1,13 +1,13 @@
 use crate::{
-    metrics::{DatabaseMetrics, TransactionMetrics},
+    context::TransactionContext,
+    metrics::DatabaseMetrics,
     page::{MmapPageManager, OrphanPageManager, PageError, PageId, PageManager, RootPage},
     snapshot::SnapshotId,
     storage::engine::{self, StorageEngine},
     transaction::{Transaction, TransactionError, TransactionManager, RO, RW},
 };
 use alloy_primitives::B256;
-use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
-use dashmap::DashMap;
+use alloy_trie::EMPTY_ROOT_HASH;
 use std::sync::RwLock;
 
 #[derive(Debug)]
@@ -40,23 +40,6 @@ impl Metadata {
             max_page_number: self.max_page_number,
             root_subtrie_page_id: self.root_subtrie_page_id,
             state_root: self.state_root,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct TransactionContext {
-    pub(crate) metadata: Metadata,
-    pub(crate) transaction_metrics: TransactionMetrics,
-    pub(crate) contract_account_loc_cache: DashMap<Nibbles, (PageId, u8)>, // (page_id, cell_index)
-}
-
-impl TransactionContext {
-    pub fn new(metadata: Metadata) -> Self {
-        Self {
-            metadata,
-            transaction_metrics: Default::default(),
-            contract_account_loc_cache: Default::default(),
         }
     }
 }
@@ -320,7 +303,7 @@ mod tests {
         // will create a database with N pages (see 'create' for N).
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
-        let mut db = Database::create(file_path.as_str()).unwrap();
+        let db = Database::create(file_path.as_str()).unwrap();
         let create_size = db.size();
 
         assert_eq!(create_size, 1000);
