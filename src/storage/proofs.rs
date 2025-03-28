@@ -83,11 +83,12 @@ impl<P: PageManager> StorageEngine<P> {
             return Ok(None);
         }
 
+        let proof_node = node.rlp_encode();
+        let full_node_path = original_path.slice(..path_offset);
+        proof.account_subtree.insert(full_node_path.clone(), Bytes::from(proof_node.to_vec()));
+
         let remaining_path = original_path.slice(path_offset + common_prefix_length..);
         if remaining_path.is_empty() {
-            let full_node_path = original_path.slice(..path_offset);
-            let proof_node = node.rlp_encode();
-            proof.account_subtree.insert(full_node_path, Bytes::from(proof_node.to_vec()));
             return Ok(Some(node.value()?));
         }
 
@@ -95,11 +96,6 @@ impl<P: PageManager> StorageEngine<P> {
 
         match node {
             AccountLeaf { ref storage_root, .. } => {
-                let full_node_path = original_path.slice(..path_offset);
-                let proof_node = node.rlp_encode();
-                proof
-                    .account_subtree
-                    .insert(full_node_path.clone(), Bytes::from(proof_node.to_vec()));
                 if let Some(storage_root) = storage_root {
                     let mut storage_proof = StorageMultiProof::empty();
                     storage_proof.root = storage_root.rlp().as_hash().unwrap();
@@ -134,23 +130,12 @@ impl<P: PageManager> StorageEngine<P> {
             Branch { ref prefix, ref children, .. } => {
                 if prefix.is_empty() {
                     // true branch node
-                    let full_node_path = original_path.slice(..path_offset);
-                    let proof_node = node.rlp_encode();
-                    proof
-                        .account_subtree
-                        .insert(full_node_path.clone(), Bytes::from(proof_node.to_vec()));
                     proof
                         .branch_node_hash_masks
                         .insert(full_node_path.clone(), Self::hash_mask(children));
                     proof.branch_node_tree_masks.insert(full_node_path, Self::tree_mask(children));
                 } else {
                     // extension + branch
-                    let extension_path = original_path.slice(..path_offset);
-                    let proof_node = node.rlp_encode();
-                    proof
-                        .account_subtree
-                        .insert(extension_path.clone(), Bytes::from(proof_node.to_vec()));
-
                     let branch_path = original_path.slice(..path_offset + common_prefix_length);
                     let mut branch_rlp = BytesMut::new();
                     encode_branch(children, &mut branch_rlp);
@@ -161,6 +146,7 @@ impl<P: PageManager> StorageEngine<P> {
                     proof.branch_node_tree_masks.insert(branch_path, Self::tree_mask(children));
                 }
 
+                // go down the trie
                 let child_pointer = children[remaining_path[0] as usize].as_ref();
                 let new_path_offset = path_offset + common_prefix_length + 1;
 
