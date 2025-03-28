@@ -239,10 +239,15 @@ impl Node {
         }
     }
 
-    /// Returns the RLP encoding of the [Node].
+    /// Returns the embedded RLP encoding of the [Node].
     /// This will typically be a 33 byte prefixed keccak256 hash.
     pub fn to_rlp_node(&self) -> RlpNode {
         RlpNode::from_rlp(&encode_fixed_size(self))
+    }
+
+    /// Returns the RLP encoding of the [Node].
+    pub fn rlp_encode(&self) -> ArrayVec<u8, 532> {
+        encode_fixed_size(self)
     }
 
     /// Returns the size of the [Node] if a new child were to be added.
