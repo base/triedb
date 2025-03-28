@@ -271,6 +271,8 @@ mod tests {
     #[test]
     fn test_get_account_with_proof() {
         let (storage_engine, mut context) = create_test_engine(2000);
+
+        // 1. insert first account
         let address = address!("0x0000000000000000000000000000000000000001");
         let path = AddressPath::for_address(address);
         let account = create_test_account(1, 1);
@@ -290,10 +292,37 @@ mod tests {
         assert!(proof.account_subtree.contains_key(&Nibbles::default()));
         let leaf_node_proof = proof.account_subtree.get(&Nibbles::default()).unwrap();
         assert_eq!(leaf_node_proof, &Bytes::from(hex!("0xf86aa1201468288056310c82aa4c01a7e12a10f8111a0560e72b700555479031b86c357db846f8440101a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470")));
-
         assert_eq!(proof.branch_node_hash_masks.len(), 0);
         assert_eq!(proof.branch_node_tree_masks.len(), 0);
         assert_eq!(proof.storages.len(), 0);
+        // verify proof
+        let account_proof = proof.account_proof(address, &[]).unwrap();
+        account_proof.verify(context.metadata.state_root).unwrap();
+
+        // 2. insert another account to create a branch node with 2 leaf nodes
+        let address2 = address!("0x0000000000000000000000000000000000000002");
+        let path2 = AddressPath::for_address(address2);
+        let account2 = create_test_account(2, 2);
+        storage_engine
+            .set_values(&mut context, vec![(path2.clone().into(), Some(account2.into()))].as_mut())
+            .unwrap();
+
+        let (account, proof) =
+            storage_engine.get_account_with_proof(&context, path.clone()).unwrap().unwrap();
+        assert_eq!(account, Account::new(1, U256::from(1), EMPTY_ROOT_HASH, KECCAK_EMPTY));
+        assert_eq!(proof.account_subtree.len(), 2);
+        assert!(proof.account_subtree.contains_key(&Nibbles::default()));
+        let branch_node_proof = proof.account_subtree.get(&Nibbles::default()).unwrap();
+        assert_eq!(branch_node_proof, &Bytes::from(hex!("0xf85180a0bf57afd571ba1e3c86b9109b8e1f3ea231a24a298029b7bc804ed53788918a5f8080808080808080808080a0687b2ec5bde2a80c990485ab23c35513c3180ddc6e7fea67986bbce7eee06a47808080")));
+        let leaf_node_proof = proof.account_subtree.get(&Nibbles::from_nibbles([1])).unwrap();
+        assert_eq!(leaf_node_proof, &Bytes::from(hex!("0xf869a03468288056310c82aa4c01a7e12a10f8111a0560e72b700555479031b86c357db846f8440101a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470")));
+
+        assert_eq!(proof.branch_node_hash_masks.len(), 1);
+        let hash_mask = proof.branch_node_hash_masks.get(&Nibbles::default()).unwrap();
+        assert_eq!(hash_mask, &TrieMask::new(0b0010000000000010));
+        assert_eq!(proof.branch_node_tree_masks.len(), 1);
+        let tree_mask = proof.branch_node_tree_masks.get(&Nibbles::default()).unwrap();
+        assert_eq!(tree_mask, &TrieMask::new(0b0010000000000010));
 
         // todo: test storage proof
     }
