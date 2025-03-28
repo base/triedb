@@ -1,13 +1,15 @@
 use alloy_primitives::{Bytes, StorageValue};
-use alloy_trie::Nibbles;
+use alloy_rlp::BytesMut;
+use alloy_trie::{Nibbles, TrieMask};
 use reth_trie_common::MultiProof;
 
 use crate::{
     account::Account,
     context::TransactionContext,
-    node::{Node, TrieValue},
+    node::{encode_branch, Node, TrieValue},
     page::{PageManager, SlottedPage},
     path::{AddressPath, StoragePath},
+    pointer::Pointer,
     transaction::RO,
 };
 
@@ -75,10 +77,10 @@ impl<P: PageManager> StorageEngine<P> {
             return Ok(None);
         }
 
+        let node_proof = node.rlp_encode();
+        let full_node_path = original_path.slice(..path_offset);
         let remaining_path = original_path.slice(path_offset + common_prefix_length..);
         if remaining_path.is_empty() {
-            let full_node_path = original_path.slice(..path_offset);
-            let node_proof = node.rlp_encode();
             proof.account_subtree.insert(full_node_path, Bytes::from(node_proof.to_vec()));
             return Ok(Some(node.value()));
         }
@@ -87,9 +89,32 @@ impl<P: PageManager> StorageEngine<P> {
             Node::AccountLeaf { ref storage_root, .. } => {
                 todo!()
             }
-            Node::Branch { ref children, .. } => {
+            Node::Branch { ref children, ref prefix, .. } => {
+                // update account subtree for ether branch or extension+branch
+                proof
+                    .account_subtree
+                    .insert(full_node_path.clone(), Bytes::from(node_proof.to_vec()));
+
+                if prefix.is_empty() {
+                    // node is a branch, update hash mask and tree mask for the branch
+                    proof
+                        .branch_node_hash_masks
+                        .insert(full_node_path.clone(), Self::hash_mask(children));
+                    proof.branch_node_tree_masks.insert(full_node_path, Self::tree_mask(children));
+                } else {
+                    // node is a extension + branch, update hash mask and tree mask for the branch
+                    let branch_path = original_path.slice(..path_offset + common_prefix_length);
+                    let mut branch_rlp = BytesMut::new();
+                    encode_branch(children, &mut branch_rlp);
+                    proof
+                        .branch_node_hash_masks
+                        .insert(branch_path.clone(), Self::hash_mask(children));
+                    proof.branch_node_tree_masks.insert(branch_path, Self::tree_mask(children));
+                }
                 let child_pointer = children[remaining_path[0] as usize].as_ref();
                 let new_path_offset = path_offset + common_prefix_length + 1;
+
+                // go down the trie
                 match child_pointer {
                     None => Ok(None),
                     Some(child_pointer) => {
@@ -121,6 +146,34 @@ impl<P: PageManager> StorageEngine<P> {
             }
             _ => unreachable!(),
         }
+    }
+
+    fn tree_mask(children: &[Option<Pointer>]) -> TrieMask {
+        let mut mask = TrieMask::default();
+        children.iter().enumerate().filter(|(_, child)| child.is_some()).for_each(|(i, _)| {
+            mask.set_bit(i as u8);
+        });
+        mask
+    }
+
+    fn hash_mask(children: &[Option<Pointer>]) -> TrieMask {
+        let mut mask = TrieMask::default();
+        children
+            .iter()
+            .enumerate()
+            .filter(
+                |(_, child)| {
+                    if let Some(child) = child {
+                        child.rlp().as_hash().is_some()
+                    } else {
+                        false
+                    }
+                },
+            )
+            .for_each(|(i, _)| {
+                mask.set_bit(i as u8);
+            });
+        mask
     }
 }
 

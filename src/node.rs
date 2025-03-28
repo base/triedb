@@ -581,7 +581,7 @@ impl Encodable for Node {
     }
 }
 
-fn encode_branch(children: &[Option<Pointer>], out: &mut dyn BufMut) -> usize {
+pub fn encode_branch(children: &[Option<Pointer>], out: &mut dyn BufMut) -> usize {
     // first encode the header
     let mut payload_length = 1;
     for child in children.iter() {
