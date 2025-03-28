@@ -190,7 +190,7 @@ impl<P: PageManager> StorageEngine<P> {
         context: &TransactionContext,
         original_path: &Nibbles,
         path_offset: usize,
-        slotted_page: SlottedPage<'_, RO>,
+        slotted_page: SlottedPage<'_>,
         page_index: u8,
         proof: &mut StorageMultiProof,
     ) -> Result<Option<TrieValue>, Error> {
