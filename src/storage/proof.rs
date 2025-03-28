@@ -1,14 +1,16 @@
-use alloy_primitives::{Bytes, StorageValue};
+use std::cell;
+
+use alloy_primitives::{Bytes, StorageValue, B256};
 use alloy_rlp::BytesMut;
 use alloy_trie::{Nibbles, TrieMask};
-use reth_trie_common::MultiProof;
+use reth_trie_common::{MultiProof, StorageMultiProof};
 
 use crate::{
-    account::Account,
+    account::{self, Account},
     context::TransactionContext,
     node::{encode_branch, Node, TrieValue},
     page::{PageManager, SlottedPage},
-    path::{AddressPath, StoragePath},
+    path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH},
     pointer::Pointer,
     transaction::RO,
 };
@@ -79,22 +81,53 @@ impl<P: PageManager> StorageEngine<P> {
 
         let node_proof = node.rlp_encode();
         let full_node_path = original_path.slice(..path_offset);
+        // update account subtree for leaf, or branch/branch+extension
+        proof.account_subtree.insert(full_node_path.clone(), Bytes::from(node_proof.to_vec()));
+
         let remaining_path = original_path.slice(path_offset + common_prefix_length..);
         if remaining_path.is_empty() {
-            proof.account_subtree.insert(full_node_path, Bytes::from(node_proof.to_vec()));
             return Ok(Some(node.value()));
         }
 
         match node {
             Node::AccountLeaf { ref storage_root, .. } => {
-                todo!()
+                assert_eq!(path_offset + common_prefix_length, ADDRESS_PATH_LENGTH);
+
+                if let Some(storage_root) = storage_root {
+                    let storage_location = storage_root.location();
+                    let mut storage_proof = StorageMultiProof::empty();
+
+                    let storage_value = match storage_location.cell_index() {
+                        Some(cell_index) => self.get_storage_proof_from_page(
+                            context,
+                            &remaining_path,
+                            0,
+                            slotted_page,
+                            cell_index,
+                            &mut storage_proof,
+                        )?,
+                        None => {
+                            let child_page_id = storage_location.page_id().unwrap();
+                            let child_slotted_page =
+                                self.get_slotted_page(context, child_page_id)?;
+                            self.get_storage_proof_from_page(
+                                context,
+                                &remaining_path,
+                                0,
+                                child_slotted_page,
+                                0,
+                                &mut storage_proof,
+                            )?
+                        }
+                    };
+                    let account_path = original_path.slice(..path_offset + common_prefix_length);
+                    proof.storages.insert(B256::from_slice(&account_path.pack()), storage_proof);
+
+                    return Ok(storage_value);
+                }
+                Ok(None)
             }
             Node::Branch { ref children, ref prefix, .. } => {
-                // update account subtree for ether branch or extension+branch
-                proof
-                    .account_subtree
-                    .insert(full_node_path.clone(), Bytes::from(node_proof.to_vec()));
-
                 if prefix.is_empty() {
                     // node is a branch, update hash mask and tree mask for the branch
                     proof
@@ -102,19 +135,23 @@ impl<P: PageManager> StorageEngine<P> {
                         .insert(full_node_path.clone(), Self::hash_mask(children));
                     proof.branch_node_tree_masks.insert(full_node_path, Self::tree_mask(children));
                 } else {
-                    // node is a extension + branch, update hash mask and tree mask for the branch
+                    // node is an extension + branch, update account subtree for the branch (the
+                    // extension node added before with full_node_path), update hash mask and tree
+                    // mask for the branch
                     let branch_path = original_path.slice(..path_offset + common_prefix_length);
                     let mut branch_rlp = BytesMut::new();
                     encode_branch(children, &mut branch_rlp);
+                    proof.account_subtree.insert(branch_path.clone(), branch_rlp.freeze().into());
                     proof
                         .branch_node_hash_masks
                         .insert(branch_path.clone(), Self::hash_mask(children));
                     proof.branch_node_tree_masks.insert(branch_path, Self::tree_mask(children));
                 }
+
+                // go down the trie
                 let child_pointer = children[remaining_path[0] as usize].as_ref();
                 let new_path_offset = path_offset + common_prefix_length + 1;
 
-                // go down the trie
                 match child_pointer {
                     None => Ok(None),
                     Some(child_pointer) => {
@@ -146,6 +183,18 @@ impl<P: PageManager> StorageEngine<P> {
             }
             _ => unreachable!(),
         }
+    }
+
+    fn get_storage_proof_from_page(
+        &self,
+        context: &TransactionContext,
+        original_path: &Nibbles,
+        path_offset: usize,
+        slotted_page: SlottedPage<'_, RO>,
+        page_index: u8,
+        proof: &mut StorageMultiProof,
+    ) -> Result<Option<TrieValue>, Error> {
+        todo!()
     }
 
     fn tree_mask(children: &[Option<Pointer>]) -> TrieMask {
