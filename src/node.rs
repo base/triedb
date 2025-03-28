@@ -7,7 +7,7 @@ use alloy_rlp::{
 };
 use alloy_trie::{
     nodes::{ExtensionNodeRef, LeafNodeRef, RlpNode},
-    Nibbles, TrieMask, EMPTY_ROOT_HASH, KECCAK_EMPTY,
+    Nibbles, EMPTY_ROOT_HASH, KECCAK_EMPTY,
 };
 use arrayvec::ArrayVec;
 use proptest::prelude::{any, prop, Strategy};
@@ -649,28 +649,6 @@ pub fn encode_branch(children: &[Option<Pointer>], out: &mut dyn BufMut) -> usiz
     out.put_u8(EMPTY_STRING_CODE);
 
     payload_length + length_of_length(payload_length)
-}
-
-pub fn tree_mask(children: &[Option<Pointer>]) -> TrieMask {
-    let mut mask = TrieMask::default();
-    for (i, child) in children.iter().enumerate() {
-        if child.is_some() {
-            mask.set_bit(i as u8);
-        }
-    }
-    mask
-}
-
-pub fn hash_mask(children: &[Option<Pointer>]) -> TrieMask {
-    let mut mask = TrieMask::default();
-    for (i, child) in children.iter().enumerate() {
-        if let Some(child) = child {
-            if child.rlp().as_hash().is_some() {
-                mask.set_bit(i as u8);
-            }
-        }
-    }
-    mask
 }
 
 fn arb_children() -> impl Strategy<Value = [Option<Pointer>; 16]> {

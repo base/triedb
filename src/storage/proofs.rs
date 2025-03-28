@@ -2,17 +2,18 @@ use crate::{
     account::Account,
     context::TransactionContext,
     node::{
-        encode_branch, hash_mask, tree_mask, Node,
-        Node::{AccountLeaf, Branch},
+        encode_branch,
+        Node::{self, AccountLeaf, Branch},
         TrieValue,
     },
     page::{PageManager, SlottedPage},
     path::{AddressPath, StoragePath},
+    pointer::Pointer,
 };
 
 use alloy_primitives::{Bytes, StorageValue, B256};
 use alloy_rlp::BytesMut;
-use alloy_trie::{nybbles::common_prefix_length, Nibbles};
+use alloy_trie::{nybbles::common_prefix_length, Nibbles, TrieMask};
 
 use reth_trie_common::{MultiProof, StorageMultiProof};
 
@@ -140,8 +141,8 @@ impl<P: PageManager> StorageEngine<P> {
                         .insert(full_node_path.clone(), Bytes::from(proof_node.to_vec()));
                     proof
                         .branch_node_hash_masks
-                        .insert(full_node_path.clone(), hash_mask(children));
-                    proof.branch_node_tree_masks.insert(full_node_path, tree_mask(children));
+                        .insert(full_node_path.clone(), Self::hash_mask(children));
+                    proof.branch_node_tree_masks.insert(full_node_path, Self::tree_mask(children));
                 } else {
                     // extension + branch
                     let extension_path = original_path.slice(..path_offset);
@@ -154,8 +155,10 @@ impl<P: PageManager> StorageEngine<P> {
                     let mut branch_rlp = BytesMut::new();
                     encode_branch(children, &mut branch_rlp);
                     proof.account_subtree.insert(branch_path.clone(), branch_rlp.freeze().into());
-                    proof.branch_node_hash_masks.insert(branch_path.clone(), hash_mask(children));
-                    proof.branch_node_tree_masks.insert(branch_path, tree_mask(children));
+                    proof
+                        .branch_node_hash_masks
+                        .insert(branch_path.clone(), Self::hash_mask(children));
+                    proof.branch_node_tree_masks.insert(branch_path, Self::tree_mask(children));
                 }
 
                 let child_pointer = children[remaining_path[0] as usize].as_ref();
@@ -230,8 +233,8 @@ impl<P: PageManager> StorageEngine<P> {
                     proof.subtree.insert(full_node_path.clone(), Bytes::from(proof_node.to_vec()));
                     proof
                         .branch_node_hash_masks
-                        .insert(full_node_path.clone(), hash_mask(children));
-                    proof.branch_node_tree_masks.insert(full_node_path, tree_mask(children));
+                        .insert(full_node_path.clone(), Self::hash_mask(children));
+                    proof.branch_node_tree_masks.insert(full_node_path, Self::tree_mask(children));
                 } else {
                     // extension + branch
                     let extension_path = original_path.slice(..path_offset);
@@ -242,8 +245,10 @@ impl<P: PageManager> StorageEngine<P> {
                     let mut branch_rlp = BytesMut::new();
                     encode_branch(children, &mut branch_rlp);
                     proof.subtree.insert(branch_path.clone(), branch_rlp.freeze().into());
-                    proof.branch_node_hash_masks.insert(branch_path.clone(), hash_mask(children));
-                    proof.branch_node_tree_masks.insert(branch_path, tree_mask(children));
+                    proof
+                        .branch_node_hash_masks
+                        .insert(branch_path.clone(), Self::hash_mask(children));
+                    proof.branch_node_tree_masks.insert(branch_path, Self::tree_mask(children));
                 }
 
                 let child_pointer = children[remaining_path[0] as usize].as_ref();
@@ -280,6 +285,34 @@ impl<P: PageManager> StorageEngine<P> {
             }
             _ => unreachable!(),
         }
+    }
+
+    fn tree_mask(children: &[Option<Pointer>]) -> TrieMask {
+        let mut mask = TrieMask::default();
+        children.iter().enumerate().filter(|(_, child)| child.is_some()).for_each(|(i, _)| {
+            mask.set_bit(i as u8);
+        });
+        mask
+    }
+
+    fn hash_mask(children: &[Option<Pointer>]) -> TrieMask {
+        let mut mask = TrieMask::default();
+        children
+            .iter()
+            .enumerate()
+            .filter(
+                |(_, child)| {
+                    if let Some(child) = child {
+                        child.rlp().as_hash().is_some()
+                    } else {
+                        false
+                    }
+                },
+            )
+            .for_each(|(i, _)| {
+                mask.set_bit(i as u8);
+            });
+        mask
     }
 }
 
