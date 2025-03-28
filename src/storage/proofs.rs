@@ -1,12 +1,12 @@
 use crate::{
     account::Account,
-    database::TransactionContext,
+    context::TransactionContext,
     node::{
         encode_branch, hash_mask, tree_mask, Node,
         Node::{AccountLeaf, Branch},
         TrieValue,
     },
-    page::{PageManager, SlottedPage, RO},
+    page::{PageManager, SlottedPage},
     path::{AddressPath, StoragePath},
 };
 
@@ -70,7 +70,7 @@ impl<P: PageManager> StorageEngine<P> {
         context: &TransactionContext,
         original_path: &Nibbles,
         path_offset: usize,
-        slotted_page: SlottedPage<'_, RO>,
+        slotted_page: SlottedPage<'_>,
         page_index: u8,
         proof: &mut MultiProof,
     ) -> Result<Option<TrieValue>, Error> {
@@ -87,7 +87,7 @@ impl<P: PageManager> StorageEngine<P> {
             let full_node_path = original_path.slice(..path_offset);
             let proof_node = node.rlp_encode();
             proof.account_subtree.insert(full_node_path, Bytes::from(proof_node.to_vec()));
-            return Ok(Some(node.value()));
+            return Ok(Some(node.value()?));
         }
 
         assert!(path_offset <= 64);
@@ -199,7 +199,7 @@ impl<P: PageManager> StorageEngine<P> {
         context: &TransactionContext,
         original_path: &Nibbles,
         path_offset: usize,
-        slotted_page: SlottedPage<'_, RO>,
+        slotted_page: SlottedPage<'_>,
         page_index: u8,
         proof: &mut StorageMultiProof,
     ) -> Result<Option<TrieValue>, Error> {
@@ -216,7 +216,7 @@ impl<P: PageManager> StorageEngine<P> {
             let full_node_path = original_path.slice(..path_offset);
             let proof_node = node.rlp_encode();
             proof.subtree.insert(full_node_path, Bytes::from(proof_node.to_vec()));
-            return Ok(Some(node.value()));
+            return Ok(Some(node.value()?));
         }
 
         assert!(path_offset <= 64);
