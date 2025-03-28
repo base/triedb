@@ -98,6 +98,15 @@ impl<P: PageManager> StorageEngine<P> {
         self.inner.read().unwrap().get_page(context, page_id)
     }
 
+    pub(crate) fn get_slotted_page<'p>(
+        &self,
+        context: &TransactionContext,
+        page_id: PageId,
+    ) -> Result<SlottedPage<'p>, Error> {
+        let page = self.get_page(context, page_id)?;
+        SlottedPage::try_from(page).map_err(|e| e.into())
+    }
+
     /// Retrieves a mutable [Page] from the underlying [PageManager].
     #[cfg(test)]
     fn get_mut_page<'p>(

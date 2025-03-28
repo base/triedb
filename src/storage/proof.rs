@@ -1,15 +1,17 @@
-use alloy_primitives::StorageValue;
+use alloy_primitives::{Bytes, StorageValue};
+use alloy_trie::Nibbles;
 use reth_trie_common::MultiProof;
 
 use crate::{
     account::Account,
     context::TransactionContext,
-    database::Error,
-    page::PageManager,
+    node::{Node, TrieValue},
+    page::{PageManager, SlottedPage},
     path::{AddressPath, StoragePath},
+    transaction::RO,
 };
 
-use super::engine::StorageEngine;
+use super::engine::{Error, StorageEngine};
 
 impl<P: PageManager> StorageEngine<P> {
     pub fn get_account_with_proof(
@@ -17,7 +19,14 @@ impl<P: PageManager> StorageEngine<P> {
         context: &TransactionContext,
         address_path: AddressPath,
     ) -> Result<Option<(Account, MultiProof)>, Error> {
-        todo!()
+        let result = self.get_value_with_proof(context, address_path.into())?;
+        match result {
+            Some((TrieValue::Account(account), proof)) => Ok(Some((account, proof))),
+            Some((TrieValue::Storage(_), _)) => {
+                panic!("storage node found for account path")
+            }
+            None => Ok(None),
+        }
     }
 
     pub fn get_storage_with_proof(
@@ -25,7 +34,93 @@ impl<P: PageManager> StorageEngine<P> {
         context: &TransactionContext,
         storage_path: StoragePath,
     ) -> Result<Option<(StorageValue, MultiProof)>, Error> {
-        todo!()
+        let result = self.get_value_with_proof(context, storage_path.into())?;
+        match result {
+            Some((TrieValue::Storage(storage), proof)) => Ok(Some((storage, proof))),
+            Some((TrieValue::Account(_), _)) => panic!("account node found for storage path"),
+            None => Ok(None),
+        }
+    }
+
+    fn get_value_with_proof(
+        &self,
+        context: &TransactionContext,
+        path: Nibbles,
+    ) -> Result<Option<(TrieValue, MultiProof)>, Error> {
+        if context.metadata.root_subtrie_page_id == 0 {
+            return Ok(None);
+        }
+
+        let slotted_page = self.get_slotted_page(context, context.metadata.root_subtrie_page_id)?;
+        let mut proof = MultiProof::default();
+        let value =
+            self.get_value_with_proof_from_page(context, &path, 0, slotted_page, 0, &mut proof)?;
+        Ok(value.map(|value| (value, proof)))
+    }
+
+    fn get_value_with_proof_from_page(
+        &self,
+        context: &TransactionContext,
+        original_path: &Nibbles,
+        path_offset: usize,
+        slotted_page: SlottedPage<'_>,
+        page_index: u8,
+        proof: &mut MultiProof,
+    ) -> Result<Option<TrieValue>, Error> {
+        let node = slotted_page.get_value::<Node>(page_index)?;
+
+        let common_prefix_length =
+            original_path.slice(path_offset..).common_prefix_length(node.prefix());
+        if common_prefix_length < node.prefix().len() {
+            return Ok(None);
+        }
+
+        let remaining_path = original_path.slice(path_offset + common_prefix_length..);
+        if remaining_path.is_empty() {
+            let full_node_path = original_path.slice(..path_offset);
+            let node_proof = node.rlp_encode();
+            proof.account_subtree.insert(full_node_path, Bytes::from(node_proof.to_vec()));
+            return Ok(Some(node.value()));
+        }
+
+        match node {
+            Node::AccountLeaf { ref storage_root, .. } => {
+                todo!()
+            }
+            Node::Branch { ref children, .. } => {
+                let child_pointer = children[remaining_path[0] as usize].as_ref();
+                let new_path_offset = path_offset + common_prefix_length + 1;
+                match child_pointer {
+                    None => Ok(None),
+                    Some(child_pointer) => {
+                        let child_location = child_pointer.location();
+                        if child_location.cell_index().is_some() {
+                            self.get_value_with_proof_from_page(
+                                context,
+                                original_path,
+                                new_path_offset,
+                                slotted_page,
+                                child_location.cell_index().unwrap(),
+                                proof,
+                            )
+                        } else {
+                            let child_page_id = child_location.page_id().unwrap();
+                            let child_slotted_page =
+                                self.get_slotted_page(context, child_page_id)?;
+                            self.get_value_with_proof_from_page(
+                                context,
+                                original_path,
+                                new_path_offset,
+                                child_slotted_page,
+                                0,
+                                proof,
+                            )
+                        }
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
     }
 }
 
