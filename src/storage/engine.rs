@@ -507,7 +507,7 @@ impl<P: PageManager> StorageEngine<P> {
         slotted_page: &mut SlottedPageMut<'_>,
     ) -> Result<Pointer, Error> {
         let new_node = Node::new_leaf(path.clone(), value);
-        let rlp_node = new_node.rlp_encode();
+        let rlp_node = new_node.to_rlp_node();
 
         let index = slotted_page.insert_value(&new_node)?;
         assert_eq!(index, 0, "root node must be at index 0");
@@ -540,7 +540,7 @@ impl<P: PageManager> StorageEngine<P> {
         // Update the prefix of the existing node and insert it into the page
         let node_branch_index = node.prefix()[common_prefix_length];
         node.set_prefix(node.prefix().slice(common_prefix_length + 1..));
-        let rlp_node = node.rlp_encode();
+        let rlp_node = node.to_rlp_node();
         let location = Location::for_cell(slotted_page.insert_value(node)?);
         new_parent_branch.set_child(node_branch_index, Pointer::new(location, rlp_node));
 
@@ -620,7 +620,7 @@ impl<P: PageManager> StorageEngine<P> {
         slotted_page.set_value(page_index, &new_node)?;
 
         if remaining_changes.is_empty() {
-            let rlp_node = new_node.rlp_encode();
+            let rlp_node = new_node.to_rlp_node();
             Ok(PointerChange::Update(Pointer::new(
                 node_location(slotted_page.id(), page_index),
                 rlp_node,
@@ -640,7 +640,7 @@ impl<P: PageManager> StorageEngine<P> {
                 Ok(PointerChange::None) => {
                     // even if the storage is unchanged, we still need to update the RLP encoding of
                     // this account node as its contents have changed
-                    let rlp_node = new_node.rlp_encode();
+                    let rlp_node = new_node.to_rlp_node();
                     Ok(PointerChange::Update(Pointer::new(
                         node_location(slotted_page.id(), page_index),
                         rlp_node,
@@ -698,7 +698,7 @@ impl<P: PageManager> StorageEngine<P> {
                         Some(new_child_pointer),
                         0,
                     )?;
-                    let rlp_node = node.rlp_encode();
+                    let rlp_node = node.to_rlp_node();
                     Ok(PointerChange::Update(Pointer::new(
                         node_location(slotted_page.id(), page_index),
                         rlp_node,
@@ -706,7 +706,7 @@ impl<P: PageManager> StorageEngine<P> {
                 }
                 PointerChange::Delete => {
                     self.update_node_child(node, slotted_page, page_index, None, 0)?;
-                    let rlp_node = node.rlp_encode();
+                    let rlp_node = node.to_rlp_node();
                     Ok(PointerChange::Update(Pointer::new(
                         node_location(slotted_page.id(), page_index),
                         rlp_node,
@@ -771,7 +771,7 @@ impl<P: PageManager> StorageEngine<P> {
             return Err(Error::PageSplit);
         }
 
-        let rlp_node = new_node.rlp_encode();
+        let rlp_node = new_node.to_rlp_node();
 
         // Insert the new node and update the parent
         let location = Location::for_cell(slotted_page.insert_value(&new_node)?);
@@ -779,7 +779,7 @@ impl<P: PageManager> StorageEngine<P> {
         slotted_page.set_value(page_index, node)?;
 
         if remaining_changes.is_empty() {
-            let rlp_node = node.rlp_encode();
+            let rlp_node = node.to_rlp_node();
             return Ok(PointerChange::Update(Pointer::new(
                 node_location(slotted_page.id(), page_index),
                 rlp_node,
@@ -933,7 +933,7 @@ impl<P: PageManager> StorageEngine<P> {
                         return Err(Error::PageSplit);
                     }
 
-                    let rlp_node = new_node.rlp_encode();
+                    let rlp_node = new_node.to_rlp_node();
                     let location = Location::for_cell(slotted_page.insert_value(&new_node)?);
                     node.set_child(child_index, Pointer::new(location, rlp_node));
                     slotted_page.set_value(page_index, node)?;
@@ -1004,7 +1004,7 @@ impl<P: PageManager> StorageEngine<P> {
             );
         } else {
             // Normal branch node with multiple children
-            let rlp_node = node.rlp_encode();
+            let rlp_node = node.to_rlp_node();
             return Ok(PointerChange::Update(Pointer::new(
                 node_location(slotted_page.id(), page_index),
                 rlp_node,
@@ -1044,7 +1044,7 @@ impl<P: PageManager> StorageEngine<P> {
         only_child_node.set_prefix(new_nibbles);
 
         // Get the RLP node for the merged child
-        let rlp_node = only_child_node.rlp_encode();
+        let rlp_node = only_child_node.to_rlp_node();
 
         let child_is_in_same_page = child_slotted_page.is_none();
 

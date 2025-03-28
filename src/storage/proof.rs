@@ -79,7 +79,7 @@ impl<P: PageManager> StorageEngine<P> {
             return Ok(None);
         }
 
-        let node_proof = node.rlp_encode();
+        let node_proof = node.to_rlp_node();
         let full_node_path = original_path.slice(..path_offset);
         // update account subtree for leaf, or branch/branch+extension
         proof.account_subtree.insert(full_node_path.clone(), Bytes::from(node_proof.to_vec()));
