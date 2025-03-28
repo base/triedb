@@ -1,10 +1,9 @@
-use std::cmp::{max, Ordering};
-
+use super::{Page, PageError, PageMut, PAGE_DATA_SIZE};
 use crate::storage::value::{Value, ValueRef};
-
-use super::{
-    page::{PageKind, RO, RW},
-    Page, PageError, PageId, PAGE_DATA_SIZE,
+use std::{
+    cmp::{max, Ordering},
+    fmt, mem,
+    ops::Deref,
 };
 
 pub mod cell_pointer;
@@ -16,15 +15,24 @@ pub const CELL_POINTER_SIZE: usize = 3;
 // A page that contains a sequence of pointers to variable-length values,
 // where the pointers are stored in a contiguous array of 3-byte cell pointers from the
 // beginning of the page, and the values are added from the end of the page.
-pub struct SlottedPage<'p, P: PageKind> {
-    page: Page<'p, P>,
+#[repr(transparent)]
+#[derive(Copy, Clone)]
+pub struct SlottedPage<'p> {
+    page: Page<'p>,
 }
 
-impl<P: PageKind> SlottedPage<'_, P> {
-    pub fn page_id(&self) -> PageId {
-        self.page.page_id()
-    }
+fn fmt_slotted_page(name: &str, p: &SlottedPage<'_>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let num_cells = p.num_cells();
+    f.debug_struct(name)
+        .field("id", &p.id())
+        .field("num_cells", &num_cells)
+        .field("cell_pointers", &p.cell_pointers_iter().collect::<Vec<_>>())
+        .field("free_bytes", &p.num_free_bytes_with_cell_count(num_cells))
+        .field("dead_bytes", &p.num_dead_bytes(num_cells))
+        .finish()
+}
 
+impl SlottedPage<'_> {
     // Get a reference to a value
     pub fn get_value_ref<'v, V: ValueRef<'v>>(&'v self, index: u8) -> Result<V, PageError> {
         let cell_pointer = self.get_cell_pointer(index)?;
@@ -102,20 +110,39 @@ impl<P: PageKind> SlottedPage<'_, P> {
     }
 }
 
-impl<P: PageKind> std::fmt::Debug for SlottedPage<'_, P> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let num_cells = self.num_cells();
-        write!(f, "SlottedPage {{ page_id: {}, num_cells: {}, cell_pointers: {:?}, free_bytes: {}, dead_bytes: {} }}",
-            self.page_id(),
-            self.num_cells(),
-            self.cell_pointers_iter().collect::<Vec<CellPointer>>(),
-            self.num_free_bytes_with_cell_count(num_cells),
-            self.num_dead_bytes(num_cells)
-        )
+impl<'p> Deref for SlottedPage<'p> {
+    type Target = Page<'p>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.page
     }
 }
 
-impl SlottedPage<'_, RW> {
+impl<'p> From<SlottedPage<'p>> for Page<'p> {
+    fn from(slotted_page: SlottedPage<'p>) -> Self {
+        slotted_page.page
+    }
+}
+
+impl<'p> TryFrom<Page<'p>> for SlottedPage<'p> {
+    type Error = PageError;
+
+    fn try_from(page: Page<'p>) -> Result<Self, Self::Error> {
+        Ok(Self { page })
+    }
+}
+
+impl fmt::Debug for SlottedPage<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_slotted_page("SlottedPage", self, f)
+    }
+}
+
+pub struct SlottedPageMut<'p> {
+    page: PageMut<'p>,
+}
+
+impl SlottedPageMut<'_> {
     // Sets the value at the given index.
     pub fn set_value<V: Value>(&mut self, index: u8, value: &V) -> Result<(), PageError> {
         let cell_pointer = self.get_cell_pointer(index)?;
@@ -365,23 +392,33 @@ impl SlottedPage<'_, RW> {
     }
 }
 
-impl<'p, P: PageKind> From<SlottedPage<'p, P>> for Page<'p, P> {
-    fn from(page: SlottedPage<'p, P>) -> Self {
-        page.page
+impl<'p> Deref for SlottedPageMut<'p> {
+    type Target = SlottedPage<'p>;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: `SlottedPage` uses `repr(transparent)`, thus `SlottedPage` and `Page` have the
+        // same layout.
+        unsafe { mem::transmute(&*self.page) }
     }
 }
 
-impl<'p> From<SlottedPage<'p, RW>> for SlottedPage<'p, RO> {
-    fn from(page: SlottedPage<'p, RW>) -> Self {
-        Self { page: page.page.into() }
+impl<'p> From<SlottedPageMut<'p>> for PageMut<'p> {
+    fn from(slotted_page: SlottedPageMut<'p>) -> Self {
+        slotted_page.page
     }
 }
 
-impl<'p, P: PageKind> TryFrom<Page<'p, P>> for SlottedPage<'p, P> {
+impl<'p> TryFrom<PageMut<'p>> for SlottedPageMut<'p> {
     type Error = PageError;
 
-    fn try_from(page: Page<'p, P>) -> Result<Self, Self::Error> {
+    fn try_from(page: PageMut<'p>) -> Result<Self, Self::Error> {
         Ok(Self { page })
+    }
+}
+
+impl fmt::Debug for SlottedPageMut<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_slotted_page("SlottedPageMut", self, f)
     }
 }
 
@@ -394,8 +431,8 @@ mod tests {
     #[test]
     fn test_insert_get_value() {
         let mut data = [0; PAGE_SIZE];
-        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
-        let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
+        let page = PageMut::with_snapshot(42, 123, &mut data);
+        let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
         let v1 = String::from("hello");
         let i1 = subtrie_page.insert_value(&v1).unwrap();
@@ -422,8 +459,8 @@ mod tests {
     #[test]
     fn test_insert_set_value() {
         let mut data = [0; PAGE_SIZE];
-        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
-        let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
+        let page = PageMut::with_snapshot(42, 123, &mut data);
+        let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
         let v1 = String::from("hello");
         let i1 = subtrie_page.insert_value(&v1).unwrap();
@@ -442,8 +479,8 @@ mod tests {
     #[test]
     fn test_set_value_same_length() {
         let mut data = [0; PAGE_SIZE];
-        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
-        let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
+        let page = PageMut::with_snapshot(42, 123, &mut data);
+        let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
         let v1 = String::from("hello");
         let i1 = subtrie_page.insert_value(&v1).unwrap();
@@ -472,8 +509,8 @@ mod tests {
     #[test]
     fn test_set_value_shrink() {
         let mut data = [0; PAGE_SIZE];
-        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
-        let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
+        let page = PageMut::with_snapshot(42, 123, &mut data);
+        let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
         let v1 = String::from("hello");
         let i1 = subtrie_page.insert_value(&v1).unwrap();
@@ -504,8 +541,8 @@ mod tests {
     #[test]
     fn test_set_value_shrink_with_neighbors() {
         let mut data = [0; PAGE_SIZE];
-        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
-        let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
+        let page = PageMut::with_snapshot(42, 123, &mut data);
+        let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
         let v1 = String::from("one");
         let i1 = subtrie_page.insert_value(&v1).unwrap();
@@ -564,8 +601,8 @@ mod tests {
     #[test]
     fn test_set_value_grow() {
         let mut data = [0; PAGE_SIZE];
-        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
-        let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
+        let page = PageMut::with_snapshot(42, 123, &mut data);
+        let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
         let v1 = String::from("this");
         let i1 = subtrie_page.insert_value(&v1).unwrap();
@@ -594,8 +631,8 @@ mod tests {
     #[test]
     fn test_set_value_grow_with_neighbors() {
         let mut data = [0; PAGE_SIZE];
-        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
-        let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
+        let page = PageMut::with_snapshot(42, 123, &mut data);
+        let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
         let v1 = String::from("one");
         let i1 = subtrie_page.insert_value(&v1).unwrap();
@@ -654,8 +691,8 @@ mod tests {
     #[test]
     fn test_allocate_get_delete_cell_pointer() {
         let mut data = [0; PAGE_SIZE];
-        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
-        let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
+        let page = PageMut::with_snapshot(42, 123, &mut data);
+        let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
         let cell_index = subtrie_page.insert_value(&String::from("foo")).unwrap();
         assert_eq!(cell_index, 0);
         assert_eq!(subtrie_page.num_cells(), 1);
@@ -747,8 +784,8 @@ mod tests {
     #[test]
     fn test_allocate_reuse_deleted_space() {
         let mut data = [0; PAGE_SIZE];
-        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
-        let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
+        let page = PageMut::with_snapshot(42, 123, &mut data);
+        let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
         let i0 = subtrie_page.insert_value(&String::from_iter(&['a'; 1020])).unwrap();
         assert_eq!(i0, 0);
@@ -776,8 +813,8 @@ mod tests {
     #[test]
     fn test_allocate_reuse_deleted_spaces() {
         let mut data = [0; PAGE_SIZE];
-        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
-        let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
+        let page = PageMut::with_snapshot(42, 123, &mut data);
+        let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
         // bytes 0-12 are used by the header, and the next 4072 are used by the first 4 cells
         // this sums up to 4085 bytes, which allows for one more pointer to be added later
@@ -834,8 +871,8 @@ mod tests {
     #[test]
     fn test_defragment_page() {
         let mut data = [0; PAGE_SIZE];
-        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
-        let mut subtrie_page = SlottedPage::<RW>::try_from(page).unwrap();
+        let page = PageMut::with_snapshot(42, 123, &mut data);
+        let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
         let i0 = subtrie_page.insert_value(&String::from_iter(&['a'; 814])).unwrap();
         assert_eq!(i0, 0);
@@ -880,8 +917,8 @@ mod tests {
     #[test]
     fn test_defragment_page_cells_out_of_order() {
         let mut data = [0; PAGE_SIZE];
-        let page = Page::new_rw_with_snapshot(42, 123, &mut data);
-        let mut slotted_page = SlottedPage::<RW>::try_from(page).unwrap();
+        let page = PageMut::with_snapshot(42, 123, &mut data);
+        let mut slotted_page = SlottedPageMut::try_from(page).unwrap();
 
         slotted_page.set_num_cells(16);
 

@@ -1,15 +1,15 @@
 use crate::{
     account::Account,
-    database::TransactionContext,
+    context::TransactionContext,
     location::Location,
     node::{
         Node,
         Node::{AccountLeaf, Branch},
-        TrieValue,
+        NodeError, TrieValue,
     },
     page::{
-        OrphanPageManager, Page, PageError, PageId, PageManager, RootPage, SlottedPage,
-        CELL_POINTER_SIZE, PAGE_DATA_SIZE, RO, RW,
+        OrphanPageManager, Page, PageError, PageId, PageManager, PageMut, RootPageMut, SlottedPage,
+        SlottedPageMut, CELL_POINTER_SIZE, PAGE_DATA_SIZE,
     },
     path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH, STORAGE_PATH_LENGTH},
     pointer::Pointer,
@@ -17,7 +17,7 @@ use crate::{
 };
 
 use alloy_primitives::StorageValue;
-use alloy_trie::{nybbles::common_prefix_length, Nibbles, EMPTY_ROOT_HASH};
+use alloy_trie::{nodes::RlpNode, nybbles::common_prefix_length, Nibbles, EMPTY_ROOT_HASH};
 use std::{
     cmp::{max, Ordering},
     fmt::Debug,
@@ -43,49 +43,30 @@ pub struct StorageEngine<P: PageManager> {
 struct Inner<P: PageManager> {
     page_manager: P,
     orphan_manager: OrphanPageManager,
-    status: Status,
 }
 
-#[derive(Debug)]
-enum Status {
-    Open,
-    Closed,
+enum PointerChange {
+    None,
+    Update(Pointer),
+    Delete,
 }
 
 impl<P: PageManager> StorageEngine<P> {
     /// Creates a new [StorageEngine] with the given [PageManager] and [OrphanPageManager].
     pub fn new(page_manager: P, orphan_manager: OrphanPageManager) -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(Inner {
-                page_manager,
-                orphan_manager,
-                status: Status::Open,
-            })),
-        }
+        Self { inner: Arc::new(RwLock::new(Inner { page_manager, orphan_manager })) }
     }
 
     /// Unlocks any orphaned pages as of the given [SnapshotId] for reuse.
     pub(crate) fn unlock(&self, snapshot_id: SnapshotId) {
-        let mut inner = self.inner.write().unwrap();
-
-        if inner.is_closed() {
-            return;
-        }
-
-        inner.orphan_manager.unlock(snapshot_id);
+        self.inner.write().unwrap().orphan_manager.unlock(snapshot_id);
     }
 
     /// Allocates a new page from the underlying page manager.
     /// If there is an orphaned page available as of the given [SnapshotId],
     /// it is used to allocate a new page instead.
-    fn allocate_page<'p>(&self, context: &mut TransactionContext) -> Result<Page<'p, RW>, Error> {
-        let mut inner = self.inner.write().unwrap();
-
-        if inner.is_closed() {
-            return Err(Error::EngineClosed);
-        }
-
-        inner.allocate_page(context)
+    fn allocate_page<'p>(&self, context: &mut TransactionContext) -> Result<PageMut<'p>, Error> {
+        self.inner.write().unwrap().allocate_page(context)
     }
 
     /// Retrieves a mutable clone of a [Page] from the underlying [PageManager].
@@ -95,13 +76,8 @@ impl<P: PageManager> StorageEngine<P> {
         &self,
         context: &mut TransactionContext,
         page_id: PageId,
-    ) -> Result<Page<'p, RW>, Error> {
+    ) -> Result<PageMut<'p>, Error> {
         let mut inner = self.inner.write().unwrap();
-
-        if inner.is_closed() {
-            return Err(Error::EngineClosed);
-        }
-
         let original_page = inner.get_page_mut(context, page_id)?;
 
         // if the page already has the correct snapshot id, return it without cloning.
@@ -131,14 +107,8 @@ impl<P: PageManager> StorageEngine<P> {
         &self,
         context: &TransactionContext,
         page_id: PageId,
-    ) -> Result<Page<'p, RO>, Error> {
-        let inner = self.inner.read().unwrap();
-
-        if inner.is_closed() {
-            return Err(Error::EngineClosed);
-        }
-
-        inner.get_page(context, page_id)
+    ) -> Result<Page<'p>, Error> {
+        self.inner.read().unwrap().get_page(context, page_id)
     }
 
     /// Retrieves a mutable [Page] from the underlying [PageManager].
@@ -147,14 +117,8 @@ impl<P: PageManager> StorageEngine<P> {
         &self,
         context: &TransactionContext,
         page_id: PageId,
-    ) -> Result<Page<'p, RW>, Error> {
-        let mut inner = self.inner.write().unwrap();
-
-        if inner.is_closed() {
-            return Err(Error::EngineClosed);
-        }
-
-        inner.get_page_mut(context, page_id)
+    ) -> Result<PageMut<'p>, Error> {
+        self.inner.write().unwrap().get_page_mut(context, page_id)
     }
 
     /// Retrieves an [Account] from the storage engine, identified by the given [AddressPath].
@@ -192,19 +156,17 @@ impl<P: PageManager> StorageEngine<P> {
 
         // check the cache
         let nibbles = storage_path.get_address().to_nibbles();
-        let cache_location = context.contract_account_loc_cache.get::<Nibbles>(nibbles);
+        let cache_location = context.contract_account_loc_cache.get(nibbles);
         let (slotted_page, page_index, path_offset) = match cache_location {
-            Some(cache_location) => {
+            Some((page_id, page_index)) => {
                 context.transaction_metrics.inc_cache_storage_read_hit();
 
                 let path_offset = storage_path.get_slot_offset();
-                let (page_id, page_index) = *cache_location;
-
                 // read the current account
                 let page = self.get_page(context, page_id)?;
                 let slotted_page = SlottedPage::try_from(page)?;
                 let node: Node = slotted_page.get_value(page_index)?;
-                let child_pointer = node.direct_child();
+                let child_pointer = node.direct_child()?;
                 // only when the node is an account leaf and all storage slots are removed
                 if child_pointer.is_none() {
                     return Ok(None);
@@ -249,7 +211,7 @@ impl<P: PageManager> StorageEngine<P> {
         context: &TransactionContext,
         original_path: &Nibbles,
         path_offset: usize,
-        slotted_page: SlottedPage<'_, RO>,
+        slotted_page: SlottedPage<'_>,
         page_index: u8,
     ) -> Result<Option<TrieValue>, Error> {
         let node: Node = slotted_page.get_value(page_index)?;
@@ -263,17 +225,17 @@ impl<P: PageManager> StorageEngine<P> {
         let remaining_path = original_path.slice(path_offset + common_prefix_length..);
         if remaining_path.is_empty() {
             // cache the account location if it is a contract account
-            if let TrieValue::Account(account) = node.value() {
+            if let TrieValue::Account(account) = node.value()? {
                 if account.storage_root != EMPTY_ROOT_HASH &&
                     original_path.len() == ADDRESS_PATH_LENGTH
                 {
                     context
                         .contract_account_loc_cache
-                        .insert(original_path.clone(), (slotted_page.page_id(), page_index));
+                        .insert(original_path, (slotted_page.id(), page_index));
                 }
             }
 
-            return Ok(Some(node.value()));
+            return Ok(Some(node.value()?));
         }
 
         let (child_pointer, new_path_offset) = match node {
@@ -324,10 +286,11 @@ impl<P: PageManager> StorageEngine<P> {
         if context.metadata.root_subtrie_page_id == 0 {
             // Handle empty trie case, inserting the first new value before traversing the trie.
             let page = self.allocate_page(context)?;
-            let mut slotted_page = SlottedPage::try_from(page)?;
+            let mut slotted_page = SlottedPageMut::try_from(page)?;
             let ((path, value), remaining_changes) = changes.split_first_mut().unwrap();
             let value = value.as_ref().expect("unable to delete from empty trie");
-            let root_pointer = self.handle_empty_trie(context, path, value, &mut slotted_page)?;
+            let root_pointer =
+                self.initialize_empty_trie(context, path, value, &mut slotted_page)?;
             context.metadata.root_subtrie_page_id = root_pointer.location().page_id().unwrap();
             context.metadata.state_root = root_pointer.rlp().as_hash().unwrap();
             if remaining_changes.is_empty() {
@@ -339,33 +302,35 @@ impl<P: PageManager> StorageEngine<P> {
         changes.iter().for_each(|(path, _)| {
             if path.len() == STORAGE_PATH_LENGTH {
                 let address_path = AddressPath::new(path.slice(0..ADDRESS_PATH_LENGTH));
-                context.contract_account_loc_cache.remove::<Nibbles>(&address_path.into());
+                context.contract_account_loc_cache.remove(address_path.to_nibbles());
             }
         });
 
-        let pointer =
+        let pointer_change =
             self.set_values_in_page(context, changes, 0, context.metadata.root_subtrie_page_id)?;
-        match pointer {
-            Some(pointer) => {
+        match pointer_change {
+            PointerChange::Update(pointer) => {
                 context.metadata.root_subtrie_page_id = pointer.location().page_id().unwrap();
                 context.metadata.state_root = pointer.rlp().as_hash().unwrap();
             }
-            None => {
+            PointerChange::Delete => {
                 context.metadata.root_subtrie_page_id = 0;
                 context.metadata.state_root = EMPTY_ROOT_HASH;
             }
+            PointerChange::None => {}
         }
         Ok(())
     }
+
     fn set_values_in_page(
         &self,
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
         page_id: PageId,
-    ) -> Result<Option<Pointer>, Error> {
+    ) -> Result<PointerChange, Error> {
         let page = self.get_mut_clone(context, page_id)?;
-        let mut new_slotted_page = SlottedPage::try_from(page)?;
+        let mut new_slotted_page = SlottedPageMut::try_from(page)?;
         let mut split_count = 0;
 
         loop {
@@ -382,15 +347,16 @@ impl<P: PageManager> StorageEngine<P> {
                 // TODO: this page could actually be reallocated in the same transaction,
                 // but this would require adding the page_id to a pending buffer. It would
                 // still be orphaned if unused by the end of the transaction.
-                Ok(None) => {
+                Ok(PointerChange::Delete) => {
                     self.inner
                         .write()
                         .unwrap()
                         .orphan_manager
                         .add_orphaned_page_id(context.metadata.snapshot_id, page_id);
-                    return Ok(None);
+                    return Ok(PointerChange::Delete);
                 }
-                Ok(pointer) => return Ok(pointer),
+                Ok(PointerChange::None) => return Ok(PointerChange::None),
+                Ok(PointerChange::Update(pointer)) => return Ok(PointerChange::Update(pointer)),
                 // In the case of a page split, re-attempt the operation from scratch. This ensures
                 // that a page will be consistently evaluated, and not modified in
                 // the middle of an operation, which could result in inconsistent
@@ -400,11 +366,11 @@ impl<P: PageManager> StorageEngine<P> {
                     split_count += 1;
                     // FIXME: this is a temporary limit to prevent infinite loops.
                     if split_count > 20 {
-                        panic!("Page split limit reached!");
+                        return Err(Error::PageError(PageError::PageSplitLimitReached));
                     }
                 }
                 Err(Error::PageError(PageError::PageIsFull)) => {
-                    panic!("Page is full!");
+                    return Err(Error::PageError(PageError::PageIsFull));
                 }
                 Err(e) => return Err(e),
             }
@@ -437,19 +403,14 @@ impl<P: PageManager> StorageEngine<P> {
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
-        slotted_page: &mut SlottedPage<'_, RW>,
+        slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
-    ) -> Result<Option<Pointer>, Error> {
-        let mut node = slotted_page.get_value::<Node>(page_index)?;
-
+    ) -> Result<PointerChange, Error> {
         if changes.is_empty() {
-            // no changes to make. just return a pointer to ourself.
-            let rlp_node = node.as_rlp_node();
-            return Ok(Some(Pointer::new(
-                self.node_location(slotted_page.page_id(), page_index),
-                rlp_node,
-            )));
+            return Ok(PointerChange::None);
         }
+
+        let mut node = slotted_page.get_value::<Node>(page_index)?;
 
         // Find the shortest common prefix between the node path and the changes
         let (shortest_common_prefix_idx, common_prefix_length) =
@@ -484,7 +445,9 @@ impl<P: PageManager> StorageEngine<P> {
                         page_index,
                     );
                 } else {
-                    panic!("unexpected case - shortest_common_prefix_idx is not at either end of the changes array");
+                    unreachable!(
+                        "shortest_common_prefix_idx is not at either end of the changes array"
+                    );
                 }
             }
             return self.handle_missing_parent_branch(
@@ -501,6 +464,8 @@ impl<P: PageManager> StorageEngine<P> {
 
         // Case 2: The path matches the node prefix exactly, update or delete the value
         if common_prefix_length == path.len() {
+            assert_eq!(shortest_common_prefix_idx, 0, "the leftmost change must have the matching prefix, as all other matching changes must be storage descendants of this account");
+
             return self.handle_exact_prefix_match(
                 context,
                 changes,
@@ -510,13 +475,12 @@ impl<P: PageManager> StorageEngine<P> {
                 &mut node,
                 path,
                 value,
-                shortest_common_prefix_idx,
             );
         }
 
         // Case 3: Handle leaf node with child pointer (e.g., AccountLeaf with storage)
         if node.is_account_leaf() {
-            return self.handle_leaf_node_traversal(
+            return self.handle_account_node_traversal(
                 context,
                 changes,
                 path_offset,
@@ -541,12 +505,12 @@ impl<P: PageManager> StorageEngine<P> {
     }
 
     /// Handles the case when the trie is empty and we need to insert the first node
-    fn handle_empty_trie(
+    fn initialize_empty_trie(
         &self,
         _context: &mut TransactionContext,
         path: &Nibbles,
         value: &TrieValue,
-        slotted_page: &mut SlottedPage<'_, RW>,
+        slotted_page: &mut SlottedPageMut<'_>,
     ) -> Result<Pointer, Error> {
         let new_node = Node::new_leaf(path.clone(), value);
         let rlp_node = new_node.as_rlp_node();
@@ -554,7 +518,7 @@ impl<P: PageManager> StorageEngine<P> {
         let index = slotted_page.insert_value(&new_node)?;
         assert_eq!(index, 0, "root node must be at index 0");
 
-        Ok(Pointer::new(Location::for_page(slotted_page.page_id()), rlp_node))
+        Ok(Pointer::new(Location::for_page(slotted_page.id()), rlp_node))
     }
 
     /// Handles the case when the path does not match the node prefix
@@ -563,12 +527,12 @@ impl<P: PageManager> StorageEngine<P> {
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
-        slotted_page: &mut SlottedPage<'_, RW>,
+        slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
         node: &mut Node,
         common_prefix: Nibbles,
         common_prefix_length: usize,
-    ) -> Result<Option<Pointer>, Error> {
+    ) -> Result<PointerChange, Error> {
         // Ensure page has enough space for a new branch and leaf node
         // TODO: use a more accurate threshold
         if slotted_page.num_free_bytes() < 1000 {
@@ -577,14 +541,14 @@ impl<P: PageManager> StorageEngine<P> {
         }
 
         // Create a new branch node with the common prefix
-        let mut new_parent_branch = Node::new_branch(common_prefix);
+        let mut new_parent_branch = Node::new_branch(common_prefix)?;
 
         // Update the prefix of the existing node and insert it into the page
         let node_branch_index = node.prefix()[common_prefix_length];
         node.set_prefix(node.prefix().slice(common_prefix_length + 1..));
         let rlp_node = node.as_rlp_node();
         let location = Location::for_cell(slotted_page.insert_value(node)?);
-        new_parent_branch.set_child(node_branch_index, Pointer::new(location, rlp_node));
+        new_parent_branch.set_child(node_branch_index, Pointer::new(location, rlp_node))?;
 
         // Set the new branch as the current node
         slotted_page.set_value(page_index, &new_parent_branch)?;
@@ -599,13 +563,12 @@ impl<P: PageManager> StorageEngine<P> {
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
-        slotted_page: &mut SlottedPage<'_, RW>,
+        slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
         node: &mut Node,
         path: Nibbles,
         value: Option<&TrieValue>,
-        shortest_common_prefix_idx: usize,
-    ) -> Result<Option<Pointer>, Error> {
+    ) -> Result<PointerChange, Error> {
         if value.is_none() {
             // Delete the node
             if node.has_children() {
@@ -622,15 +585,31 @@ impl<P: PageManager> StorageEngine<P> {
                 page and recursively trying to process anymore \
                 changes will result in an error"
             );
+            return Ok(PointerChange::Delete);
+        }
 
-            return Ok(None);
+        let (_, remaining_changes) = changes.split_first().unwrap();
+
+        // skip if the value is the same as the current value
+        if &node.value()? == value.unwrap() {
+            if remaining_changes.is_empty() {
+                return Ok(PointerChange::None);
+            }
+
+            return self.set_values_in_cloned_page(
+                context,
+                remaining_changes,
+                path_offset,
+                slotted_page,
+                page_index,
+            );
         }
 
         // Update the node with the new value
-        let mut new_node = Node::new_leaf(path, value.unwrap());
+        let mut new_node = Node::new_leaf(path, value.unwrap())?;
         if node.has_children() {
-            if let Some(child_pointer) = node.direct_child() {
-                new_node.set_child(0, child_pointer.clone());
+            if let Some(child_pointer) = node.direct_child()? {
+                new_node.set_child(0, child_pointer.clone())?;
             }
         }
 
@@ -644,75 +623,102 @@ impl<P: PageManager> StorageEngine<P> {
             }
         }
 
-        let rlp_node = new_node.as_rlp_node();
         slotted_page.set_value(page_index, &new_node)?;
 
-        // Handle remaining changes
-        assert_eq!(shortest_common_prefix_idx, 0, "the leftmost change must have the matching prefix, as all other matching changes must be storage descendants of this account");
-        let (_, remaining_changes) = changes.split_first().unwrap();
-
         if remaining_changes.is_empty() {
-            Ok(Some(Pointer::new(self.node_location(slotted_page.page_id(), page_index), rlp_node)))
+            let rlp_node = new_node.rlp_encode();
+            Ok(PointerChange::Update(Pointer::new(
+                node_location(slotted_page.id(), page_index),
+                rlp_node,
+            )))
         } else {
-            // Recurse with changes to the right
-            self.set_values_in_cloned_page(
+            // Recurse with remaining changes - this should return a change to the pointer of the
+            // current account node, if any
+            let account_pointer_change = self.set_values_in_cloned_page(
                 context,
                 remaining_changes,
                 path_offset,
                 slotted_page,
                 page_index,
-            )
+            );
+            match account_pointer_change {
+                Ok(PointerChange::Update(pointer)) => Ok(PointerChange::Update(pointer)),
+                Ok(PointerChange::None) => {
+                    // even if the storage is unchanged, we still need to update the RLP encoding of
+                    // this account node as its contents have changed
+                    let rlp_node = new_node.rlp_encode();
+                    Ok(PointerChange::Update(Pointer::new(
+                        node_location(slotted_page.id(), page_index),
+                        rlp_node,
+                    )))
+                }
+                Ok(PointerChange::Delete) => {
+                    panic!("unexpected case - account pointer is deleted after update");
+                }
+                Err(e) => Err(e),
+            }
         }
     }
 
     /// Handles traversal through an account leaf node with a child pointer
-    fn handle_leaf_node_traversal(
+    fn handle_account_node_traversal(
         &self,
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
-        slotted_page: &mut SlottedPage<'_, RW>,
+        slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
         node: &mut Node,
         common_prefix_length: usize,
-    ) -> Result<Option<Pointer>, Error> {
-        let child_pointer = node.direct_child();
+    ) -> Result<PointerChange, Error> {
+        let child_pointer = node.direct_child()?;
 
         if let Some(child_pointer) = child_pointer {
-            if let Some(child_cell_index) = child_pointer.location().cell_index() {
-                // Handle local child node (on same page)
-                let new_child_pointer = self.set_values_in_cloned_page(
-                    context,
-                    changes,
-                    path_offset + common_prefix_length as u8,
-                    slotted_page,
-                    child_cell_index,
-                )?;
+            let child_pointer_change =
+                if let Some(child_cell_index) = child_pointer.location().cell_index() {
+                    // Handle local child node (on same page)
+                    self.set_values_in_cloned_page(
+                        context,
+                        changes,
+                        path_offset + common_prefix_length as u8,
+                        slotted_page,
+                        child_cell_index,
+                    )?
+                } else {
+                    // Handle remote child node (on different page)
+                    let child_page_id = child_pointer.location().page_id().unwrap();
+                    self.set_values_in_page(
+                        context,
+                        changes,
+                        path_offset + common_prefix_length as u8,
+                        child_page_id,
+                    )?
+                };
 
-                self.update_node_child(node, slotted_page, page_index, new_child_pointer, 0)?;
-
-                let rlp_node = node.as_rlp_node();
-                Ok(Some(Pointer::new(
-                    self.node_location(slotted_page.page_id(), page_index),
-                    rlp_node,
-                )))
-            } else {
-                // Handle remote child node (on different page)
-                let child_page_id = child_pointer.location().page_id().unwrap();
-                let new_child_pointer = self.set_values_in_page(
-                    context,
-                    changes,
-                    path_offset + common_prefix_length as u8,
-                    child_page_id,
-                )?;
-
-                self.update_node_child(node, slotted_page, page_index, new_child_pointer, 0)?;
-
-                let rlp_node = node.as_rlp_node();
-                Ok(Some(Pointer::new(
-                    self.node_location(slotted_page.page_id(), page_index),
-                    rlp_node,
-                )))
+            match child_pointer_change {
+                PointerChange::Update(new_child_pointer) => {
+                    self.update_node_child(
+                        node,
+                        slotted_page,
+                        page_index,
+                        Some(new_child_pointer),
+                        0,
+                    )?;
+                    let rlp_node = node.rlp_encode();
+                    Ok(PointerChange::Update(Pointer::new(
+                        node_location(slotted_page.id(), page_index),
+                        rlp_node,
+                    )))
+                }
+                PointerChange::Delete => {
+                    self.update_node_child(node, slotted_page, page_index, None, 0)?;
+                    let rlp_node = node.rlp_encode();
+                    Ok(PointerChange::Update(Pointer::new(
+                        node_location(slotted_page.id(), page_index),
+                        rlp_node,
+                    )))
+                }
+                PointerChange::None => Ok(PointerChange::None),
             }
         } else {
             // The account has no storage trie yet, create a new leaf node for the first slot
@@ -734,28 +740,23 @@ impl<P: PageManager> StorageEngine<P> {
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
-        slotted_page: &mut SlottedPage<'_, RW>,
+        slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
         node: &mut Node,
         common_prefix_length: usize,
-    ) -> Result<Option<Pointer>, Error> {
+    ) -> Result<PointerChange, Error> {
         if changes.is_empty() {
-            // there are no changes to make. just return a pointer to our current node.
-            let rlp_node = node.as_rlp_node();
-            return Ok(Some(Pointer::new(
-                self.node_location(slotted_page.page_id(), page_index),
-                rlp_node,
-            )));
+            return Ok(PointerChange::None);
         }
 
         // the account has no storage trie yet, so we need to create a new leaf node for the first
         // slot Get the first change and create a new leaf node
-        let ((path, value), changes) = changes.split_first().unwrap();
+        let ((path, value), remaining_changes) = changes.split_first().unwrap();
         if value.is_none() {
             // this is a delete on a storage value that doesn't exist. skip it.
             return self.set_values_in_cloned_page(
                 context,
-                changes,
+                remaining_changes,
                 path_offset,
                 slotted_page,
                 page_index,
@@ -764,7 +765,7 @@ impl<P: PageManager> StorageEngine<P> {
 
         let node_size_incr = node.size_incr_with_new_child();
         let remaining_path = path.slice(path_offset as usize + common_prefix_length..);
-        let new_node = Node::new_leaf(remaining_path, value.as_ref().unwrap());
+        let new_node = Node::new_leaf(remaining_path, value.as_ref().unwrap())?;
 
         // if the page doesn't have enough space to
         // 1. insert the new leaf node
@@ -780,34 +781,40 @@ impl<P: PageManager> StorageEngine<P> {
 
         // Insert the new node and update the parent
         let location = Location::for_cell(slotted_page.insert_value(&new_node)?);
-        node.set_child(0, Pointer::new(location, rlp_node));
-        let rlp_node = node.as_rlp_node();
+        node.set_child(0, Pointer::new(location, rlp_node))?;
         slotted_page.set_value(page_index, node)?;
 
-        if changes.is_empty() {
-            return Ok(Some(Pointer::new(
-                self.node_location(slotted_page.page_id(), page_index),
+        if remaining_changes.is_empty() {
+            let rlp_node = node.rlp_encode();
+            return Ok(PointerChange::Update(Pointer::new(
+                node_location(slotted_page.id(), page_index),
                 rlp_node,
             )));
         }
 
         // Recurse with the remaining changes
-        self.set_values_in_cloned_page(context, changes, path_offset, slotted_page, page_index)
+        self.set_values_in_cloned_page(
+            context,
+            remaining_changes,
+            path_offset,
+            slotted_page,
+            page_index,
+        )
     }
 
     /// Updates a node's child pointer, handling both setting and removal
     fn update_node_child(
         &self,
         node: &mut Node,
-        slotted_page: &mut SlottedPage<'_, RW>,
+        slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
         new_child_pointer: Option<Pointer>,
         child_index: u8,
     ) -> Result<(), Error> {
         if let Some(new_child_pointer) = new_child_pointer {
-            node.set_child(child_index, new_child_pointer);
+            node.set_child(child_index, new_child_pointer)?;
         } else {
-            node.remove_child(child_index);
+            node.remove_child(child_index)?;
         }
 
         slotted_page.set_value(page_index, node)?;
@@ -820,11 +827,11 @@ impl<P: PageManager> StorageEngine<P> {
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
-        slotted_page: &mut SlottedPage<'_, RW>,
+        slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
         node: &mut Node,
         common_prefix_length: usize,
-    ) -> Result<Option<Pointer>, Error> {
+    ) -> Result<PointerChange, Error> {
         // Partition changes by child index
         let mut remaining_changes = changes;
 
@@ -840,46 +847,53 @@ impl<P: PageManager> StorageEngine<P> {
             }
 
             // Get the child pointer for this index
-            let child_pointer = node.child(child_index);
+            let child_pointer = node.child(child_index)?;
 
             match child_pointer {
                 Some(child_pointer) => {
                     // Child exists, traverse it
                     let child_location = child_pointer.location();
-                    if let Some(child_cell_index) = child_location.cell_index() {
-                        // Local child node
-                        let new_child_pointer = self.set_values_in_cloned_page(
-                            context,
-                            matching_changes,
-                            path_offset + common_prefix_length as u8 + 1,
-                            slotted_page,
-                            child_cell_index,
-                        )?;
+                    let child_pointer_change =
+                        if let Some(child_cell_index) = child_location.cell_index() {
+                            // Local child node
+                            self.set_values_in_cloned_page(
+                                context,
+                                matching_changes,
+                                path_offset + common_prefix_length as u8 + 1,
+                                slotted_page,
+                                child_cell_index,
+                            )?
+                        } else {
+                            // Remote child node
+                            let child_page_id = child_location.page_id().unwrap();
+                            self.set_values_in_page(
+                                context,
+                                matching_changes,
+                                path_offset + common_prefix_length as u8 + 1,
+                                child_page_id,
+                            )?
+                        };
 
-                        self.update_node_child(
-                            node,
-                            slotted_page,
-                            page_index,
-                            new_child_pointer,
-                            child_index,
-                        )?;
-                    } else {
-                        // Remote child node
-                        let child_page_id = child_location.page_id().unwrap();
-                        let new_child_pointer = self.set_values_in_page(
-                            context,
-                            matching_changes,
-                            path_offset + common_prefix_length as u8 + 1,
-                            child_page_id,
-                        )?;
-
-                        self.update_node_child(
-                            node,
-                            slotted_page,
-                            page_index,
-                            new_child_pointer,
-                            child_index,
-                        )?;
+                    match child_pointer_change {
+                        PointerChange::Update(new_child_pointer) => {
+                            self.update_node_child(
+                                node,
+                                slotted_page,
+                                page_index,
+                                Some(new_child_pointer),
+                                child_index,
+                            )?;
+                        }
+                        PointerChange::Delete => {
+                            self.update_node_child(
+                                node,
+                                slotted_page,
+                                page_index,
+                                None,
+                                child_index,
+                            )?;
+                        }
+                        PointerChange::None => {}
                     }
                 }
                 None => {
@@ -910,7 +924,7 @@ impl<P: PageManager> StorageEngine<P> {
 
                     // ensure that the page has enough space to insert a new leaf node.
                     let node_size_incr = node.size_incr_with_new_child();
-                    let new_node = Node::new_leaf(remaining_path, value);
+                    let new_node = Node::new_leaf(remaining_path, value)?;
 
                     // if the page doesn't have enough space to
                     // 1. insert the new leaf node
@@ -927,12 +941,12 @@ impl<P: PageManager> StorageEngine<P> {
 
                     let rlp_node = new_node.as_rlp_node();
                     let location = Location::for_cell(slotted_page.insert_value(&new_node)?);
-                    node.set_child(child_index, Pointer::new(location, rlp_node));
+                    node.set_child(child_index, Pointer::new(location, rlp_node))?;
                     slotted_page.set_value(page_index, node)?;
 
                     // If there are more matching changes, recurse
                     if !matching_changes.is_empty() {
-                        let new_child_pointer = self.set_values_in_cloned_page(
+                        let child_pointer_change = self.set_values_in_cloned_page(
                             context,
                             matching_changes,
                             path_offset + common_prefix_length as u8 + 1,
@@ -940,13 +954,27 @@ impl<P: PageManager> StorageEngine<P> {
                             location.cell_index().unwrap(),
                         )?;
 
-                        self.update_node_child(
-                            node,
-                            slotted_page,
-                            page_index,
-                            new_child_pointer,
-                            child_index,
-                        )?;
+                        match child_pointer_change {
+                            PointerChange::Update(new_child_pointer) => {
+                                self.update_node_child(
+                                    node,
+                                    slotted_page,
+                                    page_index,
+                                    Some(new_child_pointer),
+                                    child_index,
+                                )?;
+                            }
+                            PointerChange::Delete => {
+                                self.update_node_child(
+                                    node,
+                                    slotted_page,
+                                    page_index,
+                                    None,
+                                    child_index,
+                                )?;
+                            }
+                            PointerChange::None => {}
+                        }
                     }
                 }
             }
@@ -960,15 +988,15 @@ impl<P: PageManager> StorageEngine<P> {
     fn handle_branch_node_cleanup(
         &self,
         context: &mut TransactionContext,
-        slotted_page: &mut SlottedPage<'_, RW>,
+        slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
         node: &Node,
-    ) -> Result<Option<Pointer>, Error> {
-        let children = node.enumerate_children();
+    ) -> Result<PointerChange, Error> {
+        let children = node.enumerate_children()?;
         if children.is_empty() {
             // Delete empty branch node
             slotted_page.delete_value(page_index)?;
-            Ok(None)
+            Ok(PointerChange::Delete)
         } else if children.len() == 1 {
             // Merge branch with its only child
             let (idx, ptr) = children[0];
@@ -983,8 +1011,8 @@ impl<P: PageManager> StorageEngine<P> {
         } else {
             // Normal branch node with multiple children
             let rlp_node = node.as_rlp_node();
-            return Ok(Some(Pointer::new(
-                self.node_location(slotted_page.page_id(), page_index),
+            return Ok(PointerChange::Update(Pointer::new(
+                node_location(slotted_page.id(), page_index),
                 rlp_node,
             )));
         }
@@ -994,12 +1022,12 @@ impl<P: PageManager> StorageEngine<P> {
     fn merge_branch_with_only_child(
         &self,
         context: &mut TransactionContext,
-        slotted_page: &mut SlottedPage<'_, RW>,
+        slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
         node: &Node,
         only_child_index: u8,
         only_child_node_pointer: &Pointer,
-    ) -> Result<Option<Pointer>, Error> {
+    ) -> Result<PointerChange, Error> {
         // Get the child node
         let (mut only_child_node, child_slotted_page) =
             if let Some(cell_index) = only_child_node_pointer.location().cell_index() {
@@ -1011,7 +1039,7 @@ impl<P: PageManager> StorageEngine<P> {
                     context,
                     only_child_node_pointer.location().page_id().expect("page_id should exist"),
                 )?;
-                let child_slotted_page = SlottedPage::try_from(child_page)?;
+                let child_slotted_page = SlottedPageMut::try_from(child_page)?;
                 (child_slotted_page.get_value(0)?, Some(child_slotted_page))
             };
 
@@ -1019,7 +1047,7 @@ impl<P: PageManager> StorageEngine<P> {
         let mut new_nibbles = node.prefix().clone();
         new_nibbles.push(only_child_index);
         new_nibbles = new_nibbles.join(only_child_node.prefix());
-        only_child_node.set_prefix(new_nibbles);
+        only_child_node.set_prefix(new_nibbles)?;
 
         // Get the RLP node for the merged child
         let rlp_node = only_child_node.as_rlp_node();
@@ -1051,12 +1079,12 @@ impl<P: PageManager> StorageEngine<P> {
     /// Handles merging a branch with a child on the same page
     fn merge_with_child_on_same_page(
         &self,
-        slotted_page: &mut SlottedPage<'_, RW>,
+        slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
         only_child_node: Node,
         only_child_node_pointer: &Pointer,
-        rlp_node: alloy_trie::nodes::RlpNode,
-    ) -> Result<Option<Pointer>, Error> {
+        rlp_node: RlpNode,
+    ) -> Result<PointerChange, Error> {
         let child_cell_index =
             only_child_node_pointer.location().cell_index().expect("cell index should exist");
 
@@ -1071,8 +1099,8 @@ impl<P: PageManager> StorageEngine<P> {
             assert_eq!(only_child_node_index, page_index);
         }
 
-        Ok(Some(Pointer::new(
-            self.node_location(slotted_page.page_id(), only_child_node_index),
+        Ok(PointerChange::Update(Pointer::new(
+            node_location(slotted_page.id(), only_child_node_index),
             rlp_node,
         )))
     }
@@ -1081,13 +1109,13 @@ impl<P: PageManager> StorageEngine<P> {
     fn merge_with_child_on_different_page(
         &self,
         context: &mut TransactionContext,
-        slotted_page: &mut SlottedPage<'_, RW>,
+        slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
         only_child_node: Node,
-        mut child_slotted_page: SlottedPage<'_, RW>,
-        rlp_node: alloy_trie::nodes::RlpNode,
-    ) -> Result<Option<Pointer>, Error> {
-        let branch_page_id = slotted_page.page_id();
+        mut child_slotted_page: SlottedPageMut<'_>,
+        rlp_node: RlpNode,
+    ) -> Result<PointerChange, Error> {
+        let branch_page_id = slotted_page.id();
 
         // Ensure the child page has enough space
         if child_slotted_page.num_free_bytes() < 200 {
@@ -1108,15 +1136,7 @@ impl<P: PageManager> StorageEngine<P> {
                 .add_orphaned_page_id(context.metadata.snapshot_id, branch_page_id);
         }
 
-        Ok(Some(Pointer::new(self.node_location(child_slotted_page.page_id(), 0), rlp_node)))
-    }
-
-    fn node_location(&self, page_id: PageId, page_index: u8) -> Location {
-        if page_index == 0 {
-            Location::for_page(page_id)
-        } else {
-            Location::for_cell(page_index)
-        }
+        Ok(PointerChange::Update(Pointer::new(node_location(child_slotted_page.id(), 0), rlp_node)))
     }
 
     // Split the page into two, moving the largest immediate subtrie of the root node to a new child
@@ -1124,17 +1144,17 @@ impl<P: PageManager> StorageEngine<P> {
     fn split_page(
         &self,
         context: &mut TransactionContext,
-        page: &mut SlottedPage<'_, RW>,
+        page: &mut SlottedPageMut<'_>,
     ) -> Result<(), Error> {
         while page.num_free_bytes() < PAGE_DATA_SIZE / 4_usize {
             let child_page = self.allocate_page(context)?;
-            let mut child_slotted_page = SlottedPage::try_from(child_page)?;
+            let mut child_slotted_page = SlottedPageMut::try_from(child_page)?;
 
             let mut root_node: Node = page.get_value(0)?;
 
             // Find the child with the largest subtrie
             let (largest_child_index, largest_child_pointer) = root_node
-                .enumerate_children()
+                .enumerate_children()?
                 .into_iter()
                 .max_by_key(|(_, ptr)| {
                     // If pointer points to a cell in current page, count nodes in that subtrie
@@ -1150,18 +1170,17 @@ impl<P: PageManager> StorageEngine<P> {
             // Move the subtrie to the new page
             if let Some(cell_index) = largest_child_pointer.location().cell_index() {
                 // Move all child nodes that are in the current page
-                let location =
-                    self.move_subtrie_nodes(page, cell_index, &mut child_slotted_page)?;
+                let location = move_subtrie_nodes(page, cell_index, &mut child_slotted_page)?;
                 assert!(location.page_id().is_some(), "expected subtrie to be moved to a new page");
 
                 // Update the pointer in the root node to point to the new page
                 root_node.set_child(
                     largest_child_index,
                     Pointer::new(
-                        Location::for_page(child_slotted_page.page_id()),
+                        Location::for_page(child_slotted_page.id()),
                         largest_child_pointer.rlp().clone(),
                     ),
-                );
+                )?;
                 page.set_value(0, &root_node)?;
             }
         }
@@ -1169,69 +1188,12 @@ impl<P: PageManager> StorageEngine<P> {
         Ok(())
     }
 
-    // Helper function to move an entire subtrie from one page to another.
-    fn move_subtrie_nodes(
-        &self,
-        source_page: &mut SlottedPage<'_, RW>,
-        root_index: u8,
-        target_page: &mut SlottedPage<'_, RW>,
-    ) -> Result<Location, Error> {
-        let node: Node = source_page.get_value(root_index)?;
-        source_page.delete_value(root_index)?;
-
-        let has_children = node.has_children();
-
-        // first insert the node into the new page to secure its location.
-        let new_index = target_page.insert_value(&node)?;
-
-        // if the node has no children, we're done.
-        if !has_children {
-            return Ok(self.node_location(target_page.page_id(), new_index));
-        }
-
-        // otherwise, we need to move the children of the node.
-        let mut updated_node: Node = target_page.get_value(new_index)?;
-
-        // Process each child that's in the current page
-        let range = if updated_node.is_branch() {
-            0..16
-        } else {
-            // AccountLeaf's only have 1 child
-            0..1
-        };
-
-        for branch_index in range {
-            let child_ptr = if updated_node.is_account_leaf() {
-                updated_node.direct_child()
-            } else {
-                updated_node.child(branch_index)
-            };
-            if let Some(child_ptr) = child_ptr {
-                if let Some(child_index) = child_ptr.location().cell_index() {
-                    // Recursively move its children
-                    let new_location =
-                        self.move_subtrie_nodes(source_page, child_index, target_page)?;
-                    // update the pointer in the parent node
-                    updated_node.set_child(
-                        branch_index,
-                        Pointer::new(new_location, child_ptr.rlp().clone()),
-                    );
-                }
-            }
-        }
-
-        // update the parent node with the new child pointers.
-        target_page.set_value(new_index, &updated_node)?;
-
-        Ok(self.node_location(target_page.page_id(), new_index))
-    }
-
     // Recursively deletes a subtrie from the page, orphaning any pages that become fully
     // unreferenced as a result.
     fn delete_subtrie(
         &self,
         context: &mut TransactionContext,
-        slotted_page: &mut SlottedPage<'_, RW>,
+        slotted_page: &mut SlottedPageMut<'_>,
         cell_index: u8,
     ) -> Result<(), Error> {
         if cell_index == 0 {
@@ -1239,13 +1201,13 @@ impl<P: PageManager> StorageEngine<P> {
             // all of our descendant pages. Instead of deleting each cell one-by-one
             // we can orphan our entire page, and recursively orphan all our descendant
             // pages as well.
-            return self.orphan_subtrie(context, slotted_page.page_id());
+            return self.orphan_subtrie(context, slotted_page.id());
         }
 
         let node: Node = slotted_page.get_value(cell_index)?;
 
         if node.has_children() {
-            let children = node.enumerate_children();
+            let children = node.enumerate_children()?;
 
             for (_, child_ptr) in children {
                 if let Some(cell_index) = child_ptr.location().cell_index() {
@@ -1289,14 +1251,14 @@ impl<P: PageManager> StorageEngine<P> {
     fn orphan_subtrie_helper(
         &self,
         context: &mut TransactionContext,
-        slotted_page: &SlottedPage<'_, RO>,
+        slotted_page: &SlottedPage<'_>,
         cell_index: u8,
         orphan_page_ids: &mut Vec<PageId>,
     ) -> Result<(), Error> {
         let node: Node = slotted_page.get_value(cell_index)?;
 
         if node.has_children() {
-            let children = node.enumerate_children();
+            let children = node.enumerate_children()?;
 
             for (_, child_ptr) in children {
                 if let Some(cell_index) = child_ptr.location().cell_index() {
@@ -1316,7 +1278,7 @@ impl<P: PageManager> StorageEngine<P> {
         }
 
         if cell_index == 0 {
-            orphan_page_ids.push(slotted_page.page_id());
+            orphan_page_ids.push(slotted_page.id());
         }
 
         Ok(())
@@ -1324,13 +1286,7 @@ impl<P: PageManager> StorageEngine<P> {
 
     /// Commits all outstanding data to disk.
     pub fn commit(&self, context: &TransactionContext) -> Result<(), Error> {
-        let mut inner = self.inner.write().unwrap();
-
-        if inner.is_closed() {
-            return Err(Error::EngineClosed);
-        }
-
-        inner.commit(context)
+        self.inner.write().unwrap().commit(context)
     }
 
     /// Rolls back all outstanding data to disk. Currently unimplemented.
@@ -1351,11 +1307,6 @@ impl<P: PageManager> StorageEngine<P> {
         assert!(grow_by > 1.0, "grow_by must be greater than 1.0");
 
         let mut inner = self.inner.write().unwrap();
-
-        if inner.is_closed() {
-            return Err(Error::EngineClosed);
-        }
-
         let current_page_count = inner.page_manager.size();
         let unallocated_page_count = current_page_count - context.metadata.max_page_number - 1;
         let unlocked_page_count = inner.orphan_manager.unlocked_page_count();
@@ -1377,13 +1328,7 @@ impl<P: PageManager> StorageEngine<P> {
 
     /// Resizes the storage engine to the given number of pages.
     pub(crate) fn resize(&mut self, new_page_count: PageId) -> Result<(), Error> {
-        let mut inner = self.inner.write().unwrap();
-
-        if inner.is_closed() {
-            return Err(Error::EngineClosed);
-        }
-
-        inner.resize(new_page_count)
+        self.inner.write().unwrap().resize(new_page_count)
     }
 
     /// Returns the total number of pages in the storage engine.
@@ -1392,13 +1337,9 @@ impl<P: PageManager> StorageEngine<P> {
         inner.page_manager.size()
     }
 
-    /// Closes the storage engine and commits all outstanding data to disk.
-    pub fn close(&self, context: &TransactionContext) -> Result<(), Error> {
+    /// Shrinks the storage to its minimum size and commits all outstanding data to disk.
+    pub fn shrink_and_commit(&self, context: &TransactionContext) -> Result<(), Error> {
         let mut inner = self.inner.write().unwrap();
-
-        if inner.is_closed() {
-            return Err(Error::EngineClosed);
-        }
 
         // there will always be a minimum of 256 pages (root pages + reserved orphan pages).
         let max_page_count = max(context.metadata.max_page_number + 1, 256);
@@ -1406,10 +1347,16 @@ impl<P: PageManager> StorageEngine<P> {
         inner.resize(max_page_count)?;
         // commit all outstanding data to disk.
         inner.commit(context)?;
-        // mark engine as closed, causing all operations on engine to return an error.
-        inner.status = Status::Closed;
 
         Ok(())
+    }
+}
+
+fn node_location(page_id: PageId, page_index: u8) -> Location {
+    if page_index == 0 {
+        Location::for_page(page_id)
+    } else {
+        Location::for_cell(page_index)
     }
 }
 
@@ -1443,15 +1390,15 @@ fn find_shortest_common_prefix<T>(
 }
 
 // Helper function to count nodes in a subtrie on the given page
-fn count_subtrie_nodes(page: &SlottedPage<'_, RW>, root_index: u8) -> Result<u8, Error> {
+fn count_subtrie_nodes(page: &SlottedPage<'_>, root_index: u8) -> Result<u8, Error> {
     let mut count = 1; // Count the root node
     let node: Node = page.get_value(root_index)?;
-    if node.is_account_leaf() {
+    if !node.has_children() {
         return Ok(count);
     }
 
     // Count child nodes that are in this page
-    for (_, child_ptr) in node.enumerate_children() {
+    for (_, child_ptr) in node.enumerate_children()? {
         if let Some(child_index) = child_ptr.location().cell_index() {
             count += count_subtrie_nodes(page, child_index)?;
         }
@@ -1460,30 +1407,79 @@ fn count_subtrie_nodes(page: &SlottedPage<'_, RW>, root_index: u8) -> Result<u8,
     Ok(count)
 }
 
-impl<P: PageManager> Inner<P> {
-    fn is_closed(&self) -> bool {
-        matches!(self.status, Status::Closed)
+// Helper function to move an entire subtrie from one page to another.
+fn move_subtrie_nodes(
+    source_page: &mut SlottedPageMut<'_>,
+    root_index: u8,
+    target_page: &mut SlottedPageMut<'_>,
+) -> Result<Location, Error> {
+    let node: Node = source_page.get_value(root_index)?;
+    source_page.delete_value(root_index)?;
+
+    let has_children = node.has_children();
+
+    // first insert the node into the new page to secure its location.
+    let new_index = target_page.insert_value(&node)?;
+
+    // if the node has no children, we're done.
+    if !has_children {
+        return Ok(node_location(target_page.id(), new_index));
     }
 
+    // otherwise, we need to move the children of the node.
+    let mut updated_node: Node = target_page.get_value(new_index)?;
+
+    // Process each child that's in the current page
+    let range = if updated_node.is_branch() {
+        0..16
+    } else {
+        // AccountLeaf's only have 1 child
+        0..1
+    };
+
+    for branch_index in range {
+        let child_ptr = if updated_node.is_account_leaf() {
+            updated_node.direct_child()?
+        } else {
+            updated_node.child(branch_index)?
+        };
+        if let Some(child_ptr) = child_ptr {
+            if let Some(child_index) = child_ptr.location().cell_index() {
+                // Recursively move its children
+                let new_location = move_subtrie_nodes(source_page, child_index, target_page)?;
+                // update the pointer in the parent node
+                updated_node
+                    .set_child(branch_index, Pointer::new(new_location, child_ptr.rlp().clone()))?;
+            }
+        }
+    }
+
+    // update the parent node with the new child pointers.
+    target_page.set_value(new_index, &updated_node)?;
+
+    Ok(node_location(target_page.id(), new_index))
+}
+
+impl<P: PageManager> Inner<P> {
     fn allocate_page<'p>(
         &mut self,
         context: &mut TransactionContext,
-    ) -> Result<Page<'p, RW>, Error> {
+    ) -> Result<PageMut<'p>, Error> {
         let orphaned_page_id = self.orphan_manager.get_orphaned_page_id();
-        let page_to_return: Page<'p, RW>;
-        if let Some(orphaned_page_id) = orphaned_page_id {
+        let page_to_return = if let Some(orphaned_page_id) = orphaned_page_id {
             let mut page = self.get_page_mut(context, orphaned_page_id)?;
             page.set_snapshot_id(context.metadata.snapshot_id);
             page.contents_mut().fill(0);
             context.transaction_metrics.inc_pages_reallocated();
-            page_to_return = page;
+            page
         } else {
-            page_to_return = self.page_manager.allocate(context.metadata.snapshot_id)?;
+            let page = self.page_manager.allocate(context.metadata.snapshot_id)?;
             context.transaction_metrics.inc_pages_allocated();
-        }
+            page
+        };
 
         context.metadata.max_page_number =
-            max(context.metadata.max_page_number, page_to_return.page_id());
+            max(context.metadata.max_page_number, page_to_return.id());
         Ok(page_to_return)
     }
 
@@ -1502,7 +1498,7 @@ impl<P: PageManager> Inner<P> {
             .unwrap();
         page_mut.set_snapshot_id(context.metadata.snapshot_id);
         // TODO: include the remaining metadata in the new root page.
-        let mut new_root_page = RootPage::new(
+        let mut new_root_page = RootPageMut::new(
             page_mut,
             context.metadata.state_root,
             context.metadata.root_subtrie_page_id,
@@ -1530,7 +1526,7 @@ impl<P: PageManager> Inner<P> {
         &mut self,
         context: &TransactionContext,
         page_id: PageId,
-    ) -> Result<Page<'p, RW>, Error> {
+    ) -> Result<PageMut<'p>, Error> {
         let page = self.page_manager.get_mut(context.metadata.snapshot_id, page_id)?;
         context.transaction_metrics.inc_pages_read();
         Ok(page)
@@ -1541,7 +1537,7 @@ impl<P: PageManager> Inner<P> {
         &self,
         context: &TransactionContext,
         page_id: PageId,
-    ) -> Result<Page<'p, RO>, Error> {
+    ) -> Result<Page<'p>, Error> {
         let page = self.page_manager.get(context.metadata.snapshot_id, page_id)?;
         context.transaction_metrics.inc_pages_read();
         Ok(page)
@@ -1550,7 +1546,9 @@ impl<P: PageManager> Inner<P> {
 
 #[derive(Debug)]
 pub enum Error {
+    NodeError(NodeError),
     PageError(PageError),
+    InvalidCommonPrefixIndex,
     InvalidSnapshotId,
     EngineClosed,
     PageSplit,
@@ -1560,6 +1558,12 @@ pub enum Error {
 impl From<PageError> for Error {
     fn from(error: PageError) -> Self {
         Error::PageError(error)
+    }
+}
+
+impl From<NodeError> for Error {
+    fn from(error: NodeError) -> Self {
+        Error::NodeError(error)
     }
 }
 
@@ -1578,7 +1582,6 @@ mod tests {
     };
     use alloy_primitives::{address, b256, hex, keccak256, Address, StorageKey, B256, U256};
     use alloy_trie::{
-        nodes::RlpNode,
         root::{storage_root_unhashed, storage_root_unsorted},
         EMPTY_ROOT_HASH, KECCAK_EMPTY,
     };
@@ -1593,7 +1596,7 @@ mod tests {
 
         // Initial allocation
         let mut page = storage_engine.allocate_page(&mut context).unwrap();
-        assert_eq!(page.page_id(), 256);
+        assert_eq!(page.id(), 256);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 1);
         assert_metrics(&context, 0, 1, 0, 0);
@@ -1606,23 +1609,23 @@ mod tests {
 
         // reading mutated page
         let page = storage_engine.get_page(&context, 256).unwrap();
-        assert_eq!(page.page_id(), 256);
+        assert_eq!(page.id(), 256);
         assert_eq!(page.contents()[0], 123);
         assert_eq!(page.snapshot_id(), 1);
         assert_metrics(&context, 1, 0, 0, 0);
 
         // cloning a page should allocate a new page and orphan the original page
         let cloned_page = storage_engine.get_mut_clone(&mut context, 256).unwrap();
-        assert_eq!(cloned_page.page_id(), 257);
+        assert_eq!(cloned_page.id(), 257);
         assert_eq!(cloned_page.contents()[0], 123);
         assert_eq!(cloned_page.snapshot_id(), 2);
-        assert_ne!(cloned_page.page_id(), page.page_id());
+        assert_ne!(cloned_page.id(), page.id());
         assert_metrics(&context, 2, 1, 0, 0);
 
         // the next allocation should not come from the orphaned page, as the snapshot id is the
         // same as when the page was orphaned
         let page = storage_engine.allocate_page(&mut context).unwrap();
-        assert_eq!(page.page_id(), 258);
+        assert_eq!(page.id(), 258);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 2);
         assert_metrics(&context, 2, 2, 0, 0);
@@ -1633,7 +1636,7 @@ mod tests {
         // the next allocation should not come from the orphaned page, as the snapshot has not been
         // unlocked yet
         let page = storage_engine.allocate_page(&mut context).unwrap();
-        assert_eq!(page.page_id(), 259);
+        assert_eq!(page.id(), 259);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 3);
         assert_metrics(&context, 0, 1, 0, 0);
@@ -1643,7 +1646,7 @@ mod tests {
         // the next allocation should come from the orphaned page because the snapshot id has
         // increased. The page data should be zeroed out.
         let page = storage_engine.allocate_page(&mut context).unwrap();
-        assert_eq!(page.page_id(), 256);
+        assert_eq!(page.id(), 256);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 3);
         assert_metrics(&context, 1, 1, 1, 0);
@@ -1654,7 +1657,7 @@ mod tests {
 
     #[test]
     fn test_shared_page_mutability() {
-        let (storage_engine, context) = create_test_engine(10);
+        let (storage_engine, context) = create_test_engine(300);
 
         let page1 = storage_engine.get_page(&context, 1).unwrap();
         assert_eq!(page1.contents()[0], 0);
@@ -2042,7 +2045,7 @@ mod tests {
 
         // Split the page
         let page = storage_engine.get_mut_page(&context, 256).unwrap();
-        let mut slotted_page = SlottedPage::try_from(page).unwrap();
+        let mut slotted_page = SlottedPageMut::try_from(page).unwrap();
         storage_engine.split_page(&mut context, &mut slotted_page).unwrap();
 
         // Verify all accounts still exist after split
@@ -2120,8 +2123,7 @@ mod tests {
             let read_account =
                 storage_engine.get_account(&context, address_path.clone()).unwrap().unwrap();
             assert_eq!(read_account, account);
-            let cached_location =
-                context.contract_account_loc_cache.get::<Nibbles>(&address_path.into());
+            let cached_location = context.contract_account_loc_cache.get(address_path.to_nibbles());
             assert!(cached_location.is_none());
         }
         {
@@ -2181,7 +2183,7 @@ mod tests {
 
             // the account should be cached
             let account_cache_location =
-                context.contract_account_loc_cache.get::<Nibbles>(&address_path.into()).unwrap();
+                context.contract_account_loc_cache.get(address_path.to_nibbles()).unwrap();
             assert_eq!(account_cache_location.0, 257);
             assert_eq!(account_cache_location.1, 2); // 0 is the branch page, 1 is the first EOA
                                                      // account, 2 is the this contract account
@@ -2270,7 +2272,7 @@ mod tests {
 
             // the cache should be invalidated
             let account_cache_location =
-                context.contract_account_loc_cache.get::<Nibbles>(&address_path.into());
+                context.contract_account_loc_cache.get(address_path.to_nibbles());
             assert!(account_cache_location.is_none());
         }
     }
@@ -2576,7 +2578,7 @@ mod tests {
             if matches!(page_result, Err(Error::PageError(PageError::PageNotFound(_)))) {
                 break;
             }
-            let mut slotted_page = SlottedPage::try_from(page_result.unwrap()).unwrap();
+            let mut slotted_page = SlottedPageMut::try_from(page_result.unwrap()).unwrap();
 
             // Try to split this page
             if storage_engine.split_page(&mut context, &mut slotted_page).is_ok() {
@@ -2701,14 +2703,14 @@ mod tests {
 
             // Try to get and split the page
             if let Ok(page) = storage_engine.get_mut_page(&context, page_id) {
-                if let Ok(mut slotted_page) = SlottedPage::try_from(page) {
+                if let Ok(mut slotted_page) = SlottedPageMut::try_from(page) {
                     // Force a split
                     let _ = storage_engine.split_page(&mut context, &mut slotted_page);
 
                     // Get the node to find child pages
                     if let Ok(node) = slotted_page.get_value::<Node>(0) {
                         // Add child pages to our list
-                        for (_, child_ptr) in node.enumerate_children() {
+                        for (_, child_ptr) in node.enumerate_children().expect("can get children") {
                             if let Some(child_page_id) = child_ptr.location().page_id() {
                                 if !page_ids.contains(&child_page_id) {
                                     page_ids.push(child_page_id);
@@ -3292,15 +3294,15 @@ mod tests {
         // page1 will hold our root node and the branch node
         let page1 =
             storage_engine.get_mut_page(&context, context.metadata.root_subtrie_page_id).unwrap();
-        let mut slotted_page1 = SlottedPage::try_from(page1).unwrap();
+        let mut slotted_page1 = SlottedPageMut::try_from(page1).unwrap();
 
         // page2 will hold our 1st child
         let page2 = storage_engine.allocate_page(&mut context).unwrap();
-        let mut slotted_page2 = SlottedPage::try_from(page2).unwrap();
+        let mut slotted_page2 = SlottedPageMut::try_from(page2).unwrap();
 
         // page3 will hold our 2nd child
         let page3 = storage_engine.allocate_page(&mut context).unwrap();
-        let mut slotted_page3 = SlottedPage::try_from(page3).unwrap();
+        let mut slotted_page3 = SlottedPageMut::try_from(page3).unwrap();
 
         // we will force add 2 children to this branch node
         let mut child_1_full_path = [0u8; 64];
@@ -3312,7 +3314,8 @@ mod tests {
         let child_1: Node = Node::new_leaf(
             Nibbles::from_nibbles(&child_1_full_path[2..]),
             &TrieValue::Account(test_account.clone()),
-        );
+        )
+        .expect("can create node");
 
         let mut child_2_full_path = [0u8; 64];
         child_2_full_path[0] = 5; // root branch nibble
@@ -3323,23 +3326,30 @@ mod tests {
         let child_2: Node = Node::new_leaf(
             Nibbles::from_nibbles(&child_2_full_path[2..]),
             &TrieValue::Account(test_account.clone()),
-        );
+        )
+        .expect("can create node");
 
         // child 1 is the root of page2
         slotted_page2.insert_value(&child_1).unwrap();
-        let child_1_location = Location::from(slotted_page2.page_id());
+        let child_1_location = Location::from(slotted_page2.id());
 
         // child 2 is the root of page3
         slotted_page3.insert_value(&child_2).unwrap();
-        let child_2_location = Location::from(slotted_page3.page_id());
+        let child_2_location = Location::from(slotted_page3.id());
 
-        let mut new_branch_node: Node = Node::new_branch(Nibbles::new());
-        new_branch_node.set_child(0, Pointer::new(child_1_location, RlpNode::default()));
-        new_branch_node.set_child(15, Pointer::new(child_2_location, RlpNode::default()));
+        let mut new_branch_node: Node = Node::new_branch(Nibbles::new()).expect("can create node");
+        new_branch_node
+            .set_child(0, Pointer::new(child_1_location, RlpNode::default()))
+            .expect("can set child");
+        new_branch_node
+            .set_child(15, Pointer::new(child_2_location, RlpNode::default()))
+            .expect("can set child");
         let new_branch_node_index = slotted_page1.insert_value(&new_branch_node).unwrap();
         let new_branch_node_location = Location::from(new_branch_node_index as u32);
 
-        root_node.set_child(5, Pointer::new(new_branch_node_location, RlpNode::default()));
+        root_node
+            .set_child(5, Pointer::new(new_branch_node_location, RlpNode::default()))
+            .expect("can set child");
         slotted_page1.set_value(0, &root_node).unwrap();
 
         storage_engine.commit(&context).unwrap();
@@ -3366,9 +3376,9 @@ mod tests {
         // index 5
         let root_node: Node = slotted_page.get_value(0).unwrap();
         assert!(root_node.is_branch());
-        let child_2_pointer = root_node.child(5).unwrap();
+        let child_2_pointer = root_node.child(5).expect("can get child").unwrap();
         assert!(child_2_pointer.location().page_id().is_some());
-        assert_eq!(child_2_pointer.location().page_id().unwrap(), slotted_page3.page_id());
+        assert_eq!(child_2_pointer.location().page_id().unwrap(), slotted_page3.id());
 
         // check that the prefix for child 2 has changed
         let child_2_node: Node = slotted_page3.get_value(0).unwrap();
@@ -3395,11 +3405,11 @@ mod tests {
 
         // page2 will hold our 1st child
         let page2 = storage_engine.allocate_page(&mut context).unwrap();
-        let mut slotted_page2 = SlottedPage::try_from(page2).unwrap();
+        let mut slotted_page2 = SlottedPageMut::try_from(page2).unwrap();
 
         // page3 will hold our 2nd child
         let page3 = storage_engine.allocate_page(&mut context).unwrap();
-        let mut slotted_page3 = SlottedPage::try_from(page3).unwrap();
+        let mut slotted_page3 = SlottedPageMut::try_from(page3).unwrap();
 
         // we will force add 2 children to our root node
         let mut child_1_full_path = [0u8; 64];
@@ -3410,7 +3420,8 @@ mod tests {
         let child_1: Node = Node::new_leaf(
             Nibbles::from_nibbles(&child_1_full_path[1..]),
             &TrieValue::Account(test_account.clone()),
-        );
+        )
+        .expect("can create node");
 
         let mut child_2_full_path = [0u8; 64];
         child_2_full_path[0] = 15; // root branch nibble
@@ -3420,24 +3431,29 @@ mod tests {
         let child_2: Node = Node::new_leaf(
             Nibbles::from_nibbles(&child_2_full_path[1..]),
             &TrieValue::Account(test_account.clone()),
-        );
+        )
+        .expect("can create node");
 
         // child 1 is the root of page2
         slotted_page2.insert_value(&child_1).unwrap();
-        let child_1_location = Location::from(slotted_page2.page_id());
+        let child_1_location = Location::from(slotted_page2.id());
 
         // child 2 is the root of page3
         slotted_page3.insert_value(&child_2).unwrap();
-        let child_2_location = Location::from(slotted_page3.page_id());
+        let child_2_location = Location::from(slotted_page3.id());
 
         // next we create and update our root node
-        let mut root_node = Node::new_branch(Nibbles::new());
-        root_node.set_child(0, Pointer::new(child_1_location, RlpNode::default()));
-        root_node.set_child(15, Pointer::new(child_2_location, RlpNode::default()));
+        let mut root_node = Node::new_branch(Nibbles::new()).expect("can create node");
+        root_node
+            .set_child(0, Pointer::new(child_1_location, RlpNode::default()))
+            .expect("can set child");
+        root_node
+            .set_child(15, Pointer::new(child_2_location, RlpNode::default()))
+            .expect("can set child");
 
         let root_node_page = storage_engine.allocate_page(&mut context).unwrap();
-        context.metadata.root_subtrie_page_id = root_node_page.page_id();
-        let mut slotted_page = SlottedPage::try_from(root_node_page).unwrap();
+        context.metadata.root_subtrie_page_id = root_node_page.id();
+        let mut slotted_page = SlottedPageMut::try_from(root_node_page).unwrap();
         let root_index = slotted_page.insert_value(&root_node).unwrap();
         assert_eq!(root_index, 0);
 
@@ -3471,7 +3487,7 @@ mod tests {
         let root_node_slotted = SlottedPage::try_from(root_node_page).unwrap();
         let root_node: Node = root_node_slotted.get_value(0).unwrap();
         assert!(!root_node.is_branch());
-        assert_eq!(root_node_slotted.page_id(), child_2_location.page_id().unwrap());
+        assert_eq!(root_node_slotted.id(), child_2_location.page_id().unwrap());
 
         // check that the prefix for root node has changed
         assert_eq!(root_node.prefix().clone(), child_2_nibbles);

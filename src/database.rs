@@ -1,20 +1,18 @@
 use crate::{
-    metrics::{DatabaseMetrics, TransactionMetrics},
-    page::{
-        MmapPageManager, OrphanPageManager, PageError, PageId, PageKind, PageManager, RootPage,
-    },
+    context::TransactionContext,
+    metrics::DatabaseMetrics,
+    page::{MmapPageManager, OrphanPageManager, PageError, PageId, PageManager, RootPage},
     snapshot::SnapshotId,
     storage::engine::{self, StorageEngine},
-    transaction::{Transaction, TransactionManager, RO, RW},
+    transaction::{Transaction, TransactionError, TransactionManager, RO, RW},
 };
 use alloy_primitives::B256;
-use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
-use dashmap::DashMap;
-use std::sync::{Arc, RwLock};
+use alloy_trie::EMPTY_ROOT_HASH;
+use std::sync::RwLock;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Database<P: PageManager> {
-    pub(crate) inner: Arc<Inner<P>>,
+    pub(crate) inner: Inner<P>,
     metrics: DatabaseMetrics,
 }
 
@@ -47,23 +45,6 @@ impl Metadata {
 }
 
 #[derive(Debug)]
-pub struct TransactionContext {
-    pub(crate) metadata: Metadata,
-    pub(crate) transaction_metrics: TransactionMetrics,
-    pub(crate) contract_account_loc_cache: DashMap<Nibbles, (PageId, u8)>, // (page_id, cell_index)
-}
-
-impl TransactionContext {
-    pub fn new(metadata: Metadata) -> Self {
-        Self {
-            metadata,
-            transaction_metrics: Default::default(),
-            contract_account_loc_cache: Default::default(),
-        }
-    }
-}
-
-#[derive(Debug)]
 pub enum Error {
     PageError(PageError),
     CloseError(engine::Error),
@@ -77,7 +58,7 @@ impl Database<MmapPageManager> {
         page_manager.resize(1000).map_err(Error::PageError)?;
         for i in 0..256 {
             let page = page_manager.allocate(0).map_err(Error::PageError)?;
-            assert_eq!(page.page_id(), i);
+            assert_eq!(page.id(), i);
         }
 
         let orphan_manager = OrphanPageManager::new();
@@ -128,28 +109,23 @@ impl Database<MmapPageManager> {
 
 impl<P: PageManager> Drop for Database<P> {
     fn drop(&mut self) {
-        if let Err(e) = self.close() {
-            if let Error::CloseError(engine::Error::EngineClosed) = e {
-                return;
-            }
-            panic!("Failed to close database: {:?}", e);
-        }
+        self.shrink_and_commit().expect("failed to close database")
     }
 }
 
 impl<P: PageManager> Database<P> {
     pub fn new(metadata: Metadata, storage_engine: StorageEngine<P>) -> Self {
         Self {
-            inner: Arc::new(Inner {
+            inner: Inner {
                 metadata: RwLock::new(metadata),
                 storage_engine: RwLock::new(storage_engine),
                 transaction_manager: RwLock::new(TransactionManager::new()),
-            }),
+            },
             metrics: DatabaseMetrics::default(),
         }
     }
 
-    pub fn begin_rw(&self) -> Result<Transaction<'_, RW, P>, ()> {
+    pub fn begin_rw(&self) -> Result<Transaction<'_, RW, P>, TransactionError> {
         let mut transaction_manager = self.inner.transaction_manager.write().unwrap();
         let storage_engine = self.inner.storage_engine.read().unwrap();
         let metadata = self.inner.metadata.read().unwrap().next();
@@ -161,7 +137,7 @@ impl<P: PageManager> Database<P> {
         Ok(Transaction::new(context, self, None))
     }
 
-    pub fn begin_ro(&self) -> Result<Transaction<'_, RO, P>, ()> {
+    pub fn begin_ro(&self) -> Result<Transaction<'_, RO, P>, TransactionError> {
         let mut transaction_manager = self.inner.transaction_manager.write().unwrap();
         let storage_engine = self.inner.storage_engine.read().unwrap();
         let metadata = self.inner.metadata.read().unwrap().clone();
@@ -175,17 +151,21 @@ impl<P: PageManager> Database<P> {
         metadata.state_root
     }
 
-    pub(crate) fn resize(&self, new_page_count: PageId) -> Result<(), ()> {
+    pub(crate) fn resize(&self, new_page_count: PageId) -> Result<(), TransactionError> {
         let mut storage_engine = self.inner.storage_engine.write().unwrap();
         storage_engine.resize(new_page_count).unwrap();
         Ok(())
     }
 
-    pub fn close(&mut self) -> Result<(), Error> {
+    pub fn close(mut self) -> Result<(), Error> {
+        self.shrink_and_commit()
+    }
+
+    fn shrink_and_commit(&mut self) -> Result<(), Error> {
         let metadata = self.inner.metadata.read().unwrap();
         let context = TransactionContext::new(metadata.clone());
         let storage_engine = self.inner.storage_engine.read().unwrap();
-        storage_engine.close(&context).map_err(Error::CloseError)?;
+        storage_engine.shrink_and_commit(&context).map_err(Error::CloseError)?;
         Ok(())
     }
 
@@ -221,10 +201,10 @@ impl<P: PageManager> Database<P> {
     }
 }
 
-impl<'p, P: PageKind> From<RootPage<'p, P>> for Metadata {
-    fn from(root_page: RootPage<'p, P>) -> Self {
+impl<'p> From<RootPage<'p>> for Metadata {
+    fn from(root_page: RootPage<'p>) -> Self {
         Self {
-            root_page_id: root_page.page_id(),
+            root_page_id: root_page.id(),
             root_subtrie_page_id: root_page.root_subtrie_page_id(),
             max_page_number: root_page.max_page_number(),
             snapshot_id: root_page.snapshot_id(),
@@ -314,7 +294,7 @@ mod tests {
         // will create a database with N pages (see 'create' for N).
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
-        let mut db = Database::create(file_path.as_str()).unwrap();
+        let db = Database::create(file_path.as_str()).unwrap();
         let create_size = db.size();
 
         assert_eq!(create_size, 1000);
@@ -364,7 +344,7 @@ mod tests {
     fn test_data_persistence() {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
-        let mut db = Database::create(file_path.as_str()).unwrap();
+        let db = Database::create(file_path.as_str()).unwrap();
 
         let address1 = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
@@ -375,7 +355,7 @@ mod tests {
         tx.commit().unwrap();
         db.close().unwrap();
 
-        let mut db = Database::open(file_path.as_str()).unwrap();
+        let db = Database::open(file_path.as_str()).unwrap();
         let tx = db.begin_ro().unwrap();
         let account = tx.get_account(AddressPath::for_address(address1)).unwrap().unwrap();
         assert_eq!(account, account1);
