@@ -18,7 +18,7 @@ use alloy_trie::{nodes::RlpNode, nybbles::common_prefix_length, Nibbles, EMPTY_R
 use std::{
     cmp::{max, Ordering},
     fmt::Debug,
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock}, u32,
 };
 
 use super::value::Value;
@@ -209,69 +209,21 @@ impl<P: PageManager> StorageEngine<P> {
         let page = self.get_page(context, page_id)?;
         let slotted_page = SlottedPage::try_from(page)?;
         let node: Node = slotted_page.get_value(0)?;
-        let child_pointers = node.enumerate_children();
-        for (_, child) in child_pointers {
-            if child.location().cell_index().is_none() {
-                //new page
-                println!("new page");
-            } else {
-                println!("{:?}", child.location());
-            }
-        }
-        Ok(None)
-        //let original_path: Nibbles = storage_path.full_path();
-
-        // check the cache
-        //let nibbles = storage_path.get_address().to_nibbles();
-        // let cache_location = context.contract_account_loc_cache.get::<Nibbles>(nibbles);
-        // let (slotted_page, page_index, path_offset) = match cache_location {
-        //     Some(cache_location) => {
-        //         //context.transaction_metrics.inc_cache_storage_read_hit();
-
-        //         let path_offset = storage_path.get_slot_offset();
-        //         let (page_id, page_index) = *cache_location;
-
-        //         // read the current account
-        //         let page = self.get_page(context, page_id)?;
-        //         let slotted_page = SlottedPage::try_from(page)?;
-        //         let node: Node = slotted_page.get_value(page_index)?;
-        //         //KALEY TODO check if node is branch or AcctLeaf first
-        //         let child_pointer = node.enumerate_children();
-        //         // only when the node is an account leaf and all storage slots are removed
-        //         if child_pointer.is_none() {
-        //             return Ok(None);
-        //         }
-        //         let child_location = child_pointer.unwrap().location();
-        //         let (slotted_page, page_index) = if child_location.cell_index().is_some() {
-        //             (slotted_page, child_location.cell_index().unwrap())
-        //         } else {
-        //             let child_page_id = child_location.page_id().unwrap();
-        //             let child_page = self.get_page(context, child_page_id)?;
-        //             let child_slotted_page = SlottedPage::try_from(child_page)?;
-        //             (child_slotted_page, 0)
-        //         };
-        //         (slotted_page, page_index, path_offset)
-        //     }
-        //     None => {
-        //         context.transaction_metrics.inc_cache_storage_read_miss();
-
-        //         let page_id = context.metadata.root_subtrie_page_id;
-        //         let page = self.get_page(context, page_id)?;
-        //         let slotted_page = SlottedPage::try_from(page)?;
-        //         (slotted_page, 0, 0)
-        //     }
+        self.traverse_page(context, slotted_page, 0, String::from(""));
+        // let child_pointers = match node.enumerate_children() {
+        //     Ok(child_pointers) => child_pointers,
+        //     _ => Vec::new()
         // };
-
-        // match self.get_value_from_page(
-        //     context,
-        //     &original_path,
-        //     path_offset,
-        //     slotted_page,
-        //     page_index,
-        // )? {
-        //     Some(TrieValue::Storage(storage_value)) => Ok(Some(storage_value)),
-        //     _ => Ok(None),
+        // for (_, child) in child_pointers {
+        //     if child.location().cell_index().is_none() {
+        //         //new page
+        //         println!("new page");
+        //     } else {
+        //         println!("{:?}", child.location());
+        //     }
         // }
+        Ok(None)
+       
     }
 
     fn traverse_page(
@@ -281,57 +233,77 @@ impl<P: PageManager> StorageEngine<P> {
         //path_offset: usize,
         slotted_page: SlottedPage<'_>,
         cell_index: u8,
+        indent: String,
     ) -> Result<Option<TrieValue>, Error> {
         let node: Node = slotted_page.get_value(cell_index)?;
 
-        // let common_prefix_length =
-        //     original_path.slice(path_offset..).common_prefix_length(node.prefix());
-        // if common_prefix_length < node.prefix().len() {
-        //     return Ok(None);
-        // }
-
-        //let remaining_path = original_path.slice(path_offset + common_prefix_length..);
-        // if remaining_path.is_empty() {
-        //     // cache the account location if it is a contract account
-        //     if let TrieValue::Account(account) = node.value() {
-        //         if account.storage_root != EMPTY_ROOT_HASH &&
-        //             original_path.len() == ADDRESS_PATH_LENGTH
-        //         {
-        //             context
-        //                 .contract_account_loc_cache
-        //                 .insert(original_path.clone(), (slotted_page.id(), page_index));
-        //         }
-        //     }
-
-        //     return Ok(Some(node.value()));
-        // }
-
-        let child_pointers = node.enumerate_children();
-
-        for child_pointer in child_pointers {
-            let _ret = match child_pointer {
-                Some(child_pointer) => {
-                    let child_location = child_pointer.location();
-                    if child_location.cell_index().is_some() {
-                        self.traverse_page(
-                            context,
-                            slotted_page,
-                            child_location.cell_index().unwrap(),
-                        )
-                    } else {
-                        let child_page_id = child_location.page_id().unwrap();
-                        let child_page = self.get_page(context, child_page_id)?;
-                        let child_slotted_page = SlottedPage::try_from(child_page)?;
-                        self.traverse_page(
-                            context,
-                            child_slotted_page,
-                            0,
-                        )
+        match node {
+            Node::AccountLeaf { prefix, nonce_rlp, balance_rlp, code_hash, storage_root } => {
+                println!("{}{:?}, A", indent, prefix);
+                if let Some(direct_child) = storage_root {
+                    let mut new_indent = indent.clone();
+                    new_indent.push_str("\t");
+                    self.traverse_page(context, slotted_page, direct_child.location().cell_index().unwrap(), new_indent);
+                } else {
+                    println!("No storage root");
+                }   
+            },
+            Node::Branch { prefix, children } => {
+                println!("{}{:?}, B", indent, prefix);
+                for child in children {
+                    if let Some(child_ptr) = child {
+                        //check if child is on same page
+                        if (u32::from(child_ptr.location())) < 256 {
+                            //KALEY TODO: check unwrap here
+                            let mut new_indent = indent.clone();
+                            new_indent.push_str("\t");
+                            self.traverse_page(context, slotted_page, child_ptr.location().cell_index().unwrap(), new_indent);
+                        } else {
+                            println!("Child on new page");
+                        }
                     }
                 }
-                None => Ok(None),
-            }
+            },
+            Node::StorageLeaf { prefix, value_rlp } => println!("{:?}", prefix)
         }
+       
+        /*let child_pointers = match node {
+            Node::AccountLeaf { prefix, nonce_rlp, balance_rlp, code_hash, storage_root } => {
+                if storage_root.is_some() {
+                    node.direct_child().unwrap().unwrap()
+                }
+            },
+            Node::StorageLeaf { prefix, value_rlp } => {
+                println!("storage leaf: {:?}", node.value()); 
+                return Ok(None)
+            },
+            Node::Branch { prefix, children } => ()
+        };
+
+        let child_pointers = match node.enumerate_children() {
+            Ok(child_pointers) => child_pointers,
+            _ => Vec::new()
+        };
+
+        for (_ , child_pointer) in child_pointers {  
+            let child_location = child_pointer.location();
+            if child_location.cell_index().is_some() {
+                self.traverse_page(
+                    context,
+                    slotted_page,
+                    child_location.cell_index().unwrap(),
+                );
+            } else {
+                let child_page_id = child_location.page_id().unwrap();
+                let child_page = self.get_page(context, child_page_id)?;
+                let child_slotted_page = SlottedPage::try_from(child_page)?;
+                self.traverse_page(
+                    context,
+                    child_slotted_page,
+                    0,
+                );
+            }     
+        }*/
         Ok(None)
     }
 
