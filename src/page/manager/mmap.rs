@@ -4,7 +4,7 @@ use crate::{
     page::{Page, PageError, PageId, PageManager, PageMut, PAGE_SIZE},
     snapshot::SnapshotId,
 };
-use memmap2::MmapMut;
+use memmap2::{Advice, MmapMut};
 
 // Manages pages in a memory mapped file.
 #[derive(Debug)]
@@ -26,18 +26,24 @@ impl MmapPageManager {
         // SAFETY: we assume that we have full ownership of the file, even though in practice
         // there's no way to guarantee it
         let mmap = unsafe { MmapMut::map_mut(&file).map_err(PageError::IO)? };
-        Ok(Self::new(mmap, Some(file), None))
+        Self::new(mmap, Some(file), None)
     }
 
     /// Creates a new `MmapPageManager` with the given memory mapped file.
-    pub fn new(mmap: MmapMut, file: Option<File>, next_page_id: Option<PageId>) -> Self {
+    pub fn new(
+        mmap: MmapMut,
+        file: Option<File>,
+        next_page_id: Option<PageId>,
+    ) -> Result<Self, PageError> {
         let max_pages = (mmap.len() / PAGE_SIZE).try_into().expect("memory map too large");
         let next_page_id = next_page_id.unwrap_or(max_pages);
         if next_page_id > max_pages {
             panic!("`next_page_id` is greater than the number of pages in the memory map");
         }
 
-        Self { mmap, file, next_page_id }
+        mmap.advise(Advice::Random).map_err(PageError::IO)?;
+
+        Ok(Self { mmap, file, next_page_id })
     }
 
     /// Creates a new `MmapPageManager` with an anonymous memory map.
@@ -46,7 +52,7 @@ impl MmapPageManager {
         let mmap = memmap2::MmapMut::map_anon(capacity as usize * PAGE_SIZE)
             .map_err(PageError::IO)?
             .into();
-        Ok(Self::new(mmap, None, Some(next_page_id)))
+        Self::new(mmap, None, Some(next_page_id))
     }
 
     // Returns a mutable reference to the data of the page with the given id.
@@ -106,9 +112,11 @@ impl PageManager for MmapPageManager {
             let old_len = self.mmap.len();
             let new_len = (new_page_count as usize) * PAGE_SIZE;
 
-            self.mmap.flush().map_err(PageError::IO)?;
-
             if let Some(ref file) = self.file {
+                // MacOS does not support flushing an empty file
+                if old_len > 0 {
+                    self.mmap.flush().map_err(PageError::IO)?;
+                }
                 file.set_len(new_len as u64).map_err(PageError::IO)?;
             }
 
@@ -123,8 +131,15 @@ impl PageManager for MmapPageManager {
             {
                 self.mmap = match self.file {
                     Some(ref file) => MmapMut::map_mut(file).map_err(PageError::IO)?,
-                    None => memmap2::MmapMut::map_anon(new_len).map_err(PageError::IO)?,
+                    None => {
+                        let mut new_map =
+                            memmap2::MmapMut::map_anon(new_len).map_err(PageError::IO)?;
+                        let common = std::cmp::min(old_len, new_len);
+                        new_map[..common].copy_from_slice(&self.mmap[..common]);
+                        new_map
+                    }
                 };
+                self.mmap.advise(Advice::Random).map_err(PageError::IO)?;
             }
 
             if new_len < old_len {
@@ -149,6 +164,7 @@ impl PageManager for MmapPageManager {
 mod tests {
     use super::*;
     use crate::page::page::PAGE_DATA_SIZE;
+    use std::io::Write;
 
     #[test]
     fn test_allocate_get() {
@@ -228,21 +244,35 @@ mod tests {
         manager.resize(1).unwrap();
         assert_eq!(manager.next_page_id, 0);
 
-        let page = manager.allocate(42).unwrap();
+        let mut page = manager.allocate(42).unwrap();
+
         assert_eq!(page.id(), 0);
         assert_eq!(page.contents(), &mut [0; PAGE_DATA_SIZE]);
         assert_eq!(page.snapshot_id(), 42);
         assert_eq!(manager.next_page_id, 1);
 
+        // write some data to the page
+        page.contents_mut().write(b"abc").expect("write failed");
         manager.commit(42).unwrap();
 
         // attempt to allocate again, expect error because the file is full
         let err = manager.allocate(42).unwrap_err();
         assert!(matches!(err, PageError::OutOfBounds(1)));
 
+        // resize so that there's room for a new page
         manager.resize(2).unwrap();
         assert_eq!(manager.next_page_id, 1);
 
+        // verify that the previous page contents were preserved
+        let page = manager.get(42, 0).unwrap();
+        assert_eq!(page.id(), 0);
+        let mut expected_contents = [0; PAGE_DATA_SIZE];
+        (&mut expected_contents[..]).write(b"abc").expect("write failed");
+        assert_eq!(page.contents(), &expected_contents);
+        assert_eq!(page.snapshot_id(), 42);
+        assert_eq!(manager.next_page_id, 1);
+
+        // verify that there's a new empty page
         let page = manager.allocate(42).unwrap();
         assert_eq!(page.id(), 1);
         assert_eq!(page.contents(), &mut [0; PAGE_DATA_SIZE]);
@@ -289,21 +319,44 @@ mod tests {
     #[test]
     fn test_resize_anon() {
         let mut manager = MmapPageManager::new_anon(10, 0).unwrap();
+
         // allocate 10 times
         for i in 0..10 {
-            let result = manager.allocate(42).unwrap();
-            assert_eq!(result.id(), i);
+            let mut page = manager.allocate(42).unwrap();
+            assert_eq!(page.id(), i);
+            assert_eq!(page.contents(), &[0; PAGE_DATA_SIZE]);
+            assert_eq!(page.snapshot_id(), 42);
+            assert_eq!(manager.next_page_id, i + 1);
+            write!(page.contents_mut(), "this is page #{i}").expect("write failed");
         }
+
         // attempt to allocate, expect error
         let err = manager.allocate(42).unwrap_err();
         assert!(matches!(err, PageError::OutOfBounds(10)));
+
         // resize to 20
         manager.resize(20).unwrap();
+
+        // verify the contents of the first 10 pages
+        for i in 0..10 {
+            let page = manager.get(42, i).unwrap();
+            assert_eq!(page.id(), i);
+            assert_eq!(page.snapshot_id(), 42);
+
+            let mut expected_contents = [0; PAGE_DATA_SIZE];
+            write!(&mut expected_contents[..], "this is page #{i}").expect("write failed");
+            assert_eq!(page.contents(), &expected_contents);
+        }
+
         // allocate 10 more times
         for i in 10..20 {
-            let result = manager.allocate(42).unwrap();
-            assert_eq!(result.id(), i);
+            let page = manager.allocate(42).unwrap();
+            assert_eq!(page.id(), i);
+            assert_eq!(page.contents(), &[0; PAGE_DATA_SIZE]);
+            assert_eq!(page.snapshot_id(), 42);
+            assert_eq!(manager.next_page_id, i + 1);
         }
+
         // attempt to allocate, expect error
         let err = manager.allocate(42).unwrap_err();
         assert!(matches!(err, PageError::OutOfBounds(20)));
