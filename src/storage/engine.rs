@@ -239,32 +239,37 @@ impl<P: PageManager> StorageEngine<P> {
 
         match node {
             Node::AccountLeaf { prefix, nonce_rlp, balance_rlp, code_hash, storage_root } => {
-                println!("{}{:?}, A", indent, prefix);
+                println!("{}A: {:?}", indent, prefix);
+                let mut new_indent = indent.clone();
+                new_indent.push_str("\t");
                 if let Some(direct_child) = storage_root {
-                    let mut new_indent = indent.clone();
-                    new_indent.push_str("\t");
-                    self.traverse_page(context, slotted_page, direct_child.location().cell_index().unwrap(), new_indent);
+                    self.traverse_page(context, slotted_page, direct_child.location().cell_index().unwrap(), new_indent)
                 } else {
-                    println!("No storage root");
+                    println!("{}No direct child", new_indent);
+                    return Ok(None)
                 }   
             },
             Node::Branch { prefix, children } => {
-                println!("{}{:?}, B", indent, prefix);
+                println!("{}B: {:?}", indent, prefix);
                 for child in children {
                     if let Some(child_ptr) = child {
+                        let mut new_indent = indent.clone();
+                        new_indent.push_str("\t");
                         //check if child is on same page
                         if (u32::from(child_ptr.location())) < 256 {
                             //KALEY TODO: check unwrap here
-                            let mut new_indent = indent.clone();
-                            new_indent.push_str("\t");
                             self.traverse_page(context, slotted_page, child_ptr.location().cell_index().unwrap(), new_indent);
                         } else {
-                            println!("Child on new page");
+                            println!("{}Child on new page", new_indent);
                         }
-                    }
+                    } 
                 }
+                return Ok(None)
             },
-            Node::StorageLeaf { prefix, value_rlp } => println!("{:?}", prefix)
+            Node::StorageLeaf { prefix, value_rlp } => {
+                println!("{}S: {:?}", indent, prefix);
+                return Ok(None)
+            }
         }
        
         /*let child_pointers = match node {
@@ -304,7 +309,6 @@ impl<P: PageManager> StorageEngine<P> {
                 );
             }     
         }*/
-        Ok(None)
     }
 
     /// Retrieves a [TrieValue] from the given page or any of its descendants.
