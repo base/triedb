@@ -305,17 +305,53 @@ impl<P: PageManager> StorageEngine<P> {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{address, b256, hex, U256};
-    use alloy_trie::{TrieMask, EMPTY_ROOT_HASH};
+    use alloy_trie::{TrieMask, EMPTY_ROOT_HASH, KECCAK_EMPTY};
 
     use super::*;
     use crate::storage::test_utils::test_utils::{create_test_account, create_test_engine};
 
     #[test]
+    fn test_get_nonexistent_proof() {
+        let (storage_engine, mut context) = create_test_engine(2000);
+
+        // the account and storage slot are not present in the trie
+        let address = address!("0x0000000000000000000000000000000000000001");
+        let path = AddressPath::for_address(address);
+        let account = create_test_account(1, 1);
+        let proof = storage_engine.get_account_with_proof(&context, path.clone()).unwrap();
+        assert!(proof.is_none());
+
+        let storage_path = StoragePath::for_address_and_slot(
+            address,
+            b256!("0x0000000000000000000000000000000000000000000000000000000000000001"),
+        );
+        let proof = storage_engine.get_storage_with_proof(&context, storage_path.clone()).unwrap();
+        assert!(proof.is_none());
+
+        // insert the account
+        storage_engine
+            .set_values(
+                &mut context,
+                vec![(path.clone().into(), Some(account.clone().into()))].as_mut(),
+            )
+            .unwrap();
+
+        // storage proof is still none
+        let proof = storage_engine.get_storage_with_proof(&context, storage_path.clone()).unwrap();
+        assert!(proof.is_none());
+
+        // proof of another account is still none
+        let address2 = address!("0x0000000000000000000000000000000000000002");
+        let path2 = AddressPath::for_address(address2);
+        let proof = storage_engine.get_account_with_proof(&context, path2.clone()).unwrap();
+        assert!(proof.is_none());
+    }
+
+    #[test]
     fn test_get_proof() {
         let (storage_engine, mut context) = create_test_engine(2000);
 
-        // insert a single account
-
+        // 1. insert a single account
         let address = address!("0x0000000000000000000000000000000000000001");
         let path = AddressPath::for_address(address);
         let account = create_test_account(1, 1);
@@ -329,10 +365,7 @@ mod tests {
 
         let (read_account, proof) =
             storage_engine.get_account_with_proof(&context, path.clone()).unwrap().unwrap();
-        assert_eq!(read_account.nonce, account.nonce);
-        assert_eq!(read_account.balance, account.balance);
-        assert_eq!(read_account.code_hash, account.code_hash);
-        assert_eq!(read_account.storage_root, EMPTY_ROOT_HASH);
+        assert_eq!(read_account, Account::new(1, U256::from(1), EMPTY_ROOT_HASH, KECCAK_EMPTY));
 
         assert_eq!(proof.account_subtree.len(), 1);
         assert!(proof.account_subtree.contains_key(&Nibbles::default()));
@@ -346,8 +379,7 @@ mod tests {
         let account_proof = proof.account_proof(address, &[]).unwrap();
         account_proof.verify(context.metadata.state_root).unwrap();
 
-        // insert a new account so that both accounts are under the same top-level branch node
-
+        // 2. insert a new account so that both accounts are under the same top-level branch node
         let address2 = address!("0x0000000000000000000000000000000000000002");
         let path2 = AddressPath::for_address(address2);
         let account2 = create_test_account(2, 2);
@@ -358,10 +390,7 @@ mod tests {
 
         let (read_account, proof) =
             storage_engine.get_account_with_proof(&context, path.clone()).unwrap().unwrap();
-        assert_eq!(read_account.nonce, account.nonce);
-        assert_eq!(read_account.balance, account.balance);
-        assert_eq!(read_account.code_hash, account.code_hash);
-        assert_eq!(read_account.storage_root, EMPTY_ROOT_HASH);
+        assert_eq!(read_account, Account::new(1, U256::from(1), EMPTY_ROOT_HASH, KECCAK_EMPTY));
 
         assert_eq!(proof.account_subtree.len(), 2, "Proof should contain a branch and a leaf");
         assert!(proof.account_subtree.contains_key(&Nibbles::default()));
@@ -381,8 +410,7 @@ mod tests {
         let account_proof = proof.account_proof(address, &[]).unwrap();
         account_proof.verify(context.metadata.state_root).unwrap();
 
-        // insert a new storage slot for the first account
-
+        // 3. insert a new storage slot for the first account
         let storage_path = StoragePath::for_address_and_slot(
             address,
             b256!("0x0000000000000000000000000000000000000000000000000000000000000001"),
@@ -398,12 +426,14 @@ mod tests {
 
         let (read_account, account_proof) =
             storage_engine.get_account_with_proof(&context, path.clone()).unwrap().unwrap();
-        assert_eq!(read_account.nonce, account.nonce);
-        assert_eq!(read_account.balance, account.balance);
-        assert_eq!(read_account.code_hash, account.code_hash);
         assert_eq!(
-            read_account.storage_root,
-            b256!("0x2a2ec95a7e5360e7e4bee7c204bbdfdb16ad550f1e3e53d2ee2fafa31dfb4013")
+            read_account,
+            Account::new(
+                1,
+                U256::from(1),
+                b256!("0x2a2ec95a7e5360e7e4bee7c204bbdfdb16ad550f1e3e53d2ee2fafa31dfb4013"),
+                KECCAK_EMPTY
+            )
         );
 
         let (read_storage, storage_proof) =
@@ -418,7 +448,6 @@ mod tests {
 
         // account-level proof should be the same as before, except with new hashes due to the new
         // storage value
-
         assert_eq!(
             storage_proof.account_subtree.len(),
             2,
@@ -469,43 +498,5 @@ mod tests {
         storage_slot_proof
             .verify(b256!("0x2a2ec95a7e5360e7e4bee7c204bbdfdb16ad550f1e3e53d2ee2fafa31dfb4013"))
             .unwrap();
-    }
-
-    #[test]
-    fn test_get_nonexistent_proof() {
-        let (storage_engine, mut context) = create_test_engine(2000);
-
-        let address = address!("0x0000000000000000000000000000000000000001");
-        let path = AddressPath::for_address(address);
-        let account = create_test_account(1, 1);
-        let proof = storage_engine.get_account_with_proof(&context, path.clone()).unwrap();
-        assert!(proof.is_none());
-
-        let storage_path = StoragePath::for_address_and_slot(
-            address,
-            b256!("0x0000000000000000000000000000000000000000000000000000000000000001"),
-        );
-        let proof = storage_engine.get_storage_with_proof(&context, storage_path.clone()).unwrap();
-        assert!(proof.is_none());
-
-        // insert the account
-        storage_engine
-            .set_values(
-                &mut context,
-                vec![(path.clone().into(), Some(account.clone().into()))].as_mut(),
-            )
-            .unwrap();
-
-        // storage proof is still none
-
-        let proof = storage_engine.get_storage_with_proof(&context, storage_path.clone()).unwrap();
-        assert!(proof.is_none());
-
-        // proof of another account is still none
-
-        let address2 = address!("0x0000000000000000000000000000000000000002");
-        let path2 = AddressPath::for_address(address2);
-        let proof = storage_engine.get_account_with_proof(&context, path2.clone()).unwrap();
-        assert!(proof.is_none());
     }
 }
