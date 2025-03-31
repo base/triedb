@@ -7,7 +7,7 @@ use crate::{
         TrieValue,
     },
     page::{PageManager, SlottedPage},
-    path::{AddressPath, StoragePath},
+    path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH},
     pointer::Pointer,
 };
 
@@ -96,6 +96,8 @@ impl<P: PageManager> StorageEngine<P> {
 
         match node {
             AccountLeaf { ref storage_root, .. } => {
+                assert_eq!(path_offset + common_prefix_length, ADDRESS_PATH_LENGTH);
+
                 if let Some(storage_root) = storage_root {
                     let mut storage_proof = StorageMultiProof::empty();
                     storage_proof.root = storage_root.rlp().as_hash().unwrap();
@@ -103,7 +105,7 @@ impl<P: PageManager> StorageEngine<P> {
                     let storage_value = if storage_location.cell_index().is_some() {
                         self.get_storage_proof_from_page(
                             context,
-                            &original_path.slice(64..),
+                            &remaining_path,
                             0,
                             slotted_page,
                             storage_location.cell_index().unwrap(),
@@ -114,14 +116,14 @@ impl<P: PageManager> StorageEngine<P> {
                         let child_slotted_page = self.get_slotted_page(context, child_page_id)?;
                         self.get_storage_proof_from_page(
                             context,
-                            &original_path.slice(64..),
+                            &remaining_path,
                             0,
                             child_slotted_page,
                             0,
                             &mut storage_proof,
                         )?
                     };
-                    let account_path = original_path.slice(..64);
+                    let account_path = original_path.slice(..path_offset + common_prefix_length);
                     proof.storages.insert(B256::from_slice(&account_path.pack()), storage_proof);
                     return Ok(storage_value);
                 }
@@ -212,21 +214,19 @@ impl<P: PageManager> StorageEngine<P> {
 
         match node {
             Branch { ref prefix, ref children, .. } => {
+                // update account subtree for branch node or branch+extension node
+                let full_node_path = original_path.slice(..path_offset);
+                let proof_node = node.rlp_encode();
+                proof.subtree.insert(full_node_path.clone(), Bytes::from(proof_node.to_vec()));
+
                 if prefix.is_empty() {
                     // true branch node
-                    let full_node_path = original_path.slice(..path_offset);
-                    let proof_node = node.rlp_encode();
-                    proof.subtree.insert(full_node_path.clone(), Bytes::from(proof_node.to_vec()));
                     proof
                         .branch_node_hash_masks
                         .insert(full_node_path.clone(), Self::hash_mask(children));
                     proof.branch_node_tree_masks.insert(full_node_path, Self::tree_mask(children));
                 } else {
                     // extension + branch
-                    let extension_path = original_path.slice(..path_offset);
-                    let proof_node = node.rlp_encode();
-                    proof.subtree.insert(extension_path.clone(), Bytes::from(proof_node.to_vec()));
-
                     let branch_path = original_path.slice(..path_offset + common_prefix_length);
                     let mut branch_rlp = BytesMut::new();
                     encode_branch(children, &mut branch_rlp);
