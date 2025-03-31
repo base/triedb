@@ -16,6 +16,7 @@ use alloy_primitives::{StorageValue, B256};
 use alloy_trie::Nibbles;
 pub use error::TransactionError;
 pub use manager::TransactionManager;
+use reth_trie_common::{AccountProof, MultiProof};
 use sealed::sealed;
 use std::collections::HashMap;
 
@@ -85,6 +86,22 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
 
     pub fn state_root(&self) -> B256 {
         self.context.metadata.state_root
+    }
+
+    pub fn get_account_with_proof(
+        &self,
+        address_path: AddressPath,
+    ) -> Result<Option<(Account, MultiProof)>, TransactionError> {
+        let storage_engine = self.database.inner.storage_engine.read().unwrap();
+        Ok(storage_engine.get_account_with_proof(&self.context, address_path).unwrap())
+    }
+
+    pub fn get_storage_with_proof(
+        &self,
+        storage_path: StoragePath,
+    ) -> Result<Option<(StorageValue, MultiProof)>, TransactionError> {
+        let storage_engine = self.database.inner.storage_engine.read().unwrap();
+        Ok(storage_engine.get_storage_with_proof(&self.context, storage_path).unwrap())
     }
 }
 
