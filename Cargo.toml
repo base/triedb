@@ -16,6 +16,7 @@ sealed = "0.6.0"
 pprof = { version = "0.14", features = ["criterion", "protobuf-codec"] }
 metrics-derive = "0.1.0"
 metrics = "0.24.1"
+reth-trie-common = { git = "https://github.com/paradigmxyz/reth", tag = "v1.2.2" }
 
 [dev-dependencies]
 criterion = "0.5"
