@@ -236,10 +236,14 @@ impl<P: PageManager> StorageEngine<P> {
         indent: String,
     ) -> Result<Option<TrieValue>, Error> {
         let node: Node = slotted_page.get_value(cell_index)?;
+        let val = match node.value() {
+            Ok(_) => node.value()?,
+            _ => return Err(None)
+        }
 
         match node {
             Node::AccountLeaf { prefix, nonce_rlp, balance_rlp, code_hash, storage_root } => {
-                println!("{}A: {:?}", indent, prefix);
+                println!("{}A: {:?}", indent, val.unwrap());
                 let mut new_indent = indent.clone();
                 new_indent.push_str("\t");
                 if let Some(direct_child) = storage_root {
@@ -250,7 +254,7 @@ impl<P: PageManager> StorageEngine<P> {
                 }   
             },
             Node::Branch { prefix, children } => {
-                println!("{}B: {:?}", indent, prefix);
+                println!("{}B", indent);
                 for child in children {
                     if let Some(child_ptr) = child {
                         let mut new_indent = indent.clone();
@@ -261,13 +265,19 @@ impl<P: PageManager> StorageEngine<P> {
                             self.traverse_page(context, slotted_page, child_ptr.location().cell_index().unwrap(), new_indent);
                         } else {
                             println!("{}Child on new page", new_indent);
+                            let child_page_id = child_ptr.location().page_id().unwrap();
+                            let child_page = self.get_page(context, child_page_id)?;
+                            println!("{:?}", child_page.id());
+                            let child_slotted_page = SlottedPage::try_from(child_page)?;
+                            self.traverse_page(context, child_slotted_page, 0, new_indent);
+
                         }
                     } 
                 }
                 return Ok(None)
             },
             Node::StorageLeaf { prefix, value_rlp } => {
-                println!("{}S: {:?}", indent, prefix);
+                println!("{}S: {:?}", indent, val);
                 return Ok(None)
             }
         }
@@ -2796,6 +2806,8 @@ mod tests {
         }
         // Verify the pages split metric
         assert!(context.transaction_metrics.get_pages_split() > 0);
+        //KALEY TODO delete
+        let _ = storage_engine.pretty_print_page(&context);
     }
 
     #[test]
