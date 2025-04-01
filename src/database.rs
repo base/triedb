@@ -8,7 +8,7 @@ use crate::{
 };
 use alloy_primitives::B256;
 use alloy_trie::EMPTY_ROOT_HASH;
-use std::sync::RwLock;
+use std::{fs::File, sync::RwLock};
 
 #[derive(Debug)]
 pub struct Database<P: PageManager> {
@@ -106,12 +106,13 @@ impl Database<MmapPageManager> {
         Ok(database)
     }
 
-    pub fn pretty_print(self) -> Result<(), Error> {
+    pub fn pretty_print(self, output_file: &File) -> Result<(), Error> {
         let metadata = self.inner.metadata.read().unwrap().clone();
 
         let context = TransactionContext::new(metadata);
         let storage_engine = self.inner.storage_engine.read().unwrap();
-        storage_engine.pretty_print_page(&context);
+        //KALEY TODO proper error handling
+        let _ = storage_engine.pretty_print_page(&context, output_file);
         Ok(())
     }
 }

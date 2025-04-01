@@ -16,9 +16,7 @@ use crate::{
 use alloy_primitives::StorageValue;
 use alloy_trie::{nodes::RlpNode, nybbles::common_prefix_length, Nibbles, EMPTY_ROOT_HASH};
 use std::{
-    cmp::{max, Ordering},
-    fmt::Debug,
-    sync::{Arc, RwLock}, u32,
+    cmp::{max, Ordering}, fmt::Debug, fs::File, io::{BufWriter, Write}, sync::{Arc, RwLock}, u32
 };
 
 use super::value::Value;
@@ -199,17 +197,20 @@ impl<P: PageManager> StorageEngine<P> {
         //metadata: Metadata
         context: &TransactionContext,
         //storage_path: StoragePath,
+        output_file: &File
     ) -> Result<Option<StorageValue>, Error> {
-
+        println!("here");
        if context.metadata.root_subtrie_page_id == 0 {
             return Ok(None);
         }
 
+        let mut file_writer = BufWriter::new(output_file);
+
         let page_id = context.metadata.root_subtrie_page_id;
         let page = self.get_page(context, page_id)?;
         let slotted_page = SlottedPage::try_from(page)?;
-        let node: Node = slotted_page.get_value(0)?;
-        self.traverse_page(context, slotted_page, 0, String::from(""));
+        //KALEY TODO proper error handling
+        let _ = self.traverse_page(context, slotted_page, 0, String::from(""), &mut file_writer);
         // let child_pointers = match node.enumerate_children() {
         //     Ok(child_pointers) => child_pointers,
         //     _ => Vec::new()
@@ -234,27 +235,36 @@ impl<P: PageManager> StorageEngine<P> {
         slotted_page: SlottedPage<'_>,
         cell_index: u8,
         indent: String,
+        file_writer: &mut BufWriter<&File>
     ) -> Result<Option<TrieValue>, Error> {
         let node: Node = slotted_page.get_value(cell_index)?;
         let val = match node.value() {
-            Ok(_) => node.value()?,
-            _ => return Err(None)
-        }
+            Ok(TrieValue::Account(acct)) => acct.nonce.to_string(),
+            Ok(TrieValue::Storage(strg)) => strg.to_string(),
+            _ => "".to_string()
+        };
 
         match node {
-            Node::AccountLeaf { prefix, nonce_rlp, balance_rlp, code_hash, storage_root } => {
-                println!("{}A: {:?}", indent, val.unwrap());
+            Node::AccountLeaf { prefix: _, nonce_rlp: _, balance_rlp: _, code_hash: _, storage_root } => {
+                let output_string = format!("{}A: {:?}\n", indent, val);
+                //KALEY TODO proper error handling
+                let _ = file_writer.write(&output_string.as_bytes());
+                //KALEY TODO: flush file_writer?
                 let mut new_indent = indent.clone();
                 new_indent.push_str("\t");
                 if let Some(direct_child) = storage_root {
-                    self.traverse_page(context, slotted_page, direct_child.location().cell_index().unwrap(), new_indent)
+                    self.traverse_page(context, slotted_page, direct_child.location().cell_index().unwrap(), new_indent, file_writer)
                 } else {
-                    println!("{}No direct child", new_indent);
+                    let output_string = format!("{}No direct child\n", new_indent);
+                    //KALEY TODO proper error handling
+                    let _ = file_writer.write(&output_string.as_bytes());
                     return Ok(None)
                 }   
             },
-            Node::Branch { prefix, children } => {
-                println!("{}B", indent);
+            Node::Branch { prefix: _, children } => {
+                let output_string = format!("{}B\n", indent);
+                //KALEY TODO proper error handling
+                let _ = file_writer.write(&output_string.as_bytes());
                 for child in children {
                     if let Some(child_ptr) = child {
                         let mut new_indent = indent.clone();
@@ -262,63 +272,32 @@ impl<P: PageManager> StorageEngine<P> {
                         //check if child is on same page
                         if (u32::from(child_ptr.location())) < 256 {
                             //KALEY TODO: check unwrap here
-                            self.traverse_page(context, slotted_page, child_ptr.location().cell_index().unwrap(), new_indent);
+                            //KALEY TODO proper error handling
+                            let _ = self.traverse_page(context, slotted_page, child_ptr.location().cell_index().unwrap(), new_indent, file_writer);
                         } else {
-                            println!("{}Child on new page", new_indent);
+                            
                             let child_page_id = child_ptr.location().page_id().unwrap();
                             let child_page = self.get_page(context, child_page_id)?;
-                            println!("{:?}", child_page.id());
+                            let output_string= format!("{}Child on new page: {:?}\n", new_indent, child_page_id);
+                            //KALEY TODO proper error handling
+                            let _ = file_writer.write(&output_string.as_bytes());
+
                             let child_slotted_page = SlottedPage::try_from(child_page)?;
-                            self.traverse_page(context, child_slotted_page, 0, new_indent);
+                            //KALEY TODO proper error handling
+                            let _ = self.traverse_page(context, child_slotted_page, 0, new_indent, file_writer);
 
                         }
                     } 
                 }
                 return Ok(None)
             },
-            Node::StorageLeaf { prefix, value_rlp } => {
-                println!("{}S: {:?}", indent, val);
+            Node::StorageLeaf { prefix: _, value_rlp: _ } => {
+                let output_string = format!("{}S: {:?}\n", indent, val);
+                //KALEY TODO proper error handling
+                let _ = file_writer.write(&output_string.as_bytes());
                 return Ok(None)
             }
         }
-       
-        /*let child_pointers = match node {
-            Node::AccountLeaf { prefix, nonce_rlp, balance_rlp, code_hash, storage_root } => {
-                if storage_root.is_some() {
-                    node.direct_child().unwrap().unwrap()
-                }
-            },
-            Node::StorageLeaf { prefix, value_rlp } => {
-                println!("storage leaf: {:?}", node.value()); 
-                return Ok(None)
-            },
-            Node::Branch { prefix, children } => ()
-        };
-
-        let child_pointers = match node.enumerate_children() {
-            Ok(child_pointers) => child_pointers,
-            _ => Vec::new()
-        };
-
-        for (_ , child_pointer) in child_pointers {  
-            let child_location = child_pointer.location();
-            if child_location.cell_index().is_some() {
-                self.traverse_page(
-                    context,
-                    slotted_page,
-                    child_location.cell_index().unwrap(),
-                );
-            } else {
-                let child_page_id = child_location.page_id().unwrap();
-                let child_page = self.get_page(context, child_page_id)?;
-                let child_slotted_page = SlottedPage::try_from(child_page)?;
-                self.traverse_page(
-                    context,
-                    child_slotted_page,
-                    0,
-                );
-            }     
-        }*/
     }
 
     /// Retrieves a [TrieValue] from the given page or any of its descendants.
@@ -2807,7 +2786,9 @@ mod tests {
         // Verify the pages split metric
         assert!(context.transaction_metrics.get_pages_split() > 0);
         //KALEY TODO delete
-        let _ = storage_engine.pretty_print_page(&context);
+        let output_file = File::create("./printed_page").unwrap();
+        let res = storage_engine.pretty_print_page(&context, &output_file);
+        println!("{:?}", res);
     }
 
     #[test]

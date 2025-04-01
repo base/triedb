@@ -1,5 +1,6 @@
-use triedb::{Database, database::Error};
+use triedb::Database;
 use std::env;
+use std::fs::File;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get the first command line argument
@@ -11,7 +12,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => panic!("Could not open database: {:?}", e)
     };
 
-    db.pretty_print();
+    //KALEY TODO fix, maybe create/pass file_writer here instead
+    let output_file = File::create("./printed_page")?;
+    match db.pretty_print(&output_file) {
+        Ok(_) => println!("Page printed to {}", file_path),
+        Err(e) => println!("Error printing page: {:?}", e)
+    }
     
     
     Ok(())
