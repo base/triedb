@@ -365,7 +365,7 @@ mod tests {
 
         let (read_account, proof) =
             storage_engine.get_account_with_proof(&context, path.clone()).unwrap().unwrap();
-        assert_eq!(read_account, Account::new(1, U256::from(1), EMPTY_ROOT_HASH, KECCAK_EMPTY));
+        assert_eq!(read_account, account);
 
         assert_eq!(proof.account_subtree.len(), 1);
         assert!(proof.account_subtree.contains_key(&Nibbles::default()));
@@ -390,7 +390,7 @@ mod tests {
 
         let (read_account, proof) =
             storage_engine.get_account_with_proof(&context, path.clone()).unwrap().unwrap();
-        assert_eq!(read_account, Account::new(1, U256::from(1), EMPTY_ROOT_HASH, KECCAK_EMPTY));
+        assert_eq!(read_account, account);
 
         assert_eq!(proof.account_subtree.len(), 2, "Proof should contain a branch and a leaf");
         assert!(proof.account_subtree.contains_key(&Nibbles::default()));
