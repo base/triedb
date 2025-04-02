@@ -18,6 +18,7 @@ metrics-derive = "0.1.0"
 metrics = "0.24.1"
 dashmap = "6.1.0"
 zerocopy = { version = "0.8.24", features = ["derive"] }
+reth-trie-common = { git = "https://github.com/paradigmxyz/reth", tag = "v1.2.2" }
 
 [dev-dependencies]
 criterion = "0.5"
