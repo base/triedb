@@ -36,6 +36,10 @@ harness = false
 name = "hashmap_benchmarks"
 harness = false
 
+[[bench]]
+name = "proof_benchmarks"
+harness = false
+
 [profile.bench]
 debug = false
 opt-level = 3
