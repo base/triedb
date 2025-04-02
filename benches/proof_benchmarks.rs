@@ -2,7 +2,8 @@ mod benchmark_common;
 
 use alloy_primitives::{StorageKey, U256};
 use benchmark_common::{
-    generate_random_address, setup_database, setup_database_with_storage, BATCH_SIZE,
+    generate_random_address, generate_storage_paths, setup_database, setup_database_with_storage,
+    BATCH_SIZE,
 };
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::prelude::*;
@@ -45,22 +46,7 @@ fn bench_storage_get_proof(c: &mut Criterion) {
             (0..total_addresses).map(|_| generate_random_address(&mut rng)).collect();
 
         let total_storage_per_address = BATCH_SIZE / total_addresses;
-        let storage_paths = {
-            let capacity = total_addresses * (total_storage_per_address + 1);
-            let mut storage_paths: Vec<StoragePath> = Vec::with_capacity(capacity);
-            addresses
-                .iter()
-                .flat_map(|address| {
-                    (0..=total_storage_per_address).map(|i| {
-                        StoragePath::for_address_path_and_slot(
-                            address.clone(),
-                            StorageKey::from(U256::from(i)),
-                        )
-                    })
-                })
-                .for_each(|path| storage_paths.push(path));
-            storage_paths
-        };
+        let storage_paths = generate_storage_paths(&addresses, total_storage_per_address);
 
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
         group.bench_with_input(BenchmarkId::new("storage_get_proof", size), &size, |b, _| {

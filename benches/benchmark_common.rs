@@ -71,3 +71,23 @@ pub fn setup_database_with_storage(size: usize) -> (TempDir, Database<MmapPageMa
     }
     (dir, db)
 }
+
+pub fn generate_storage_paths(
+    addresses: &[AddressPath],
+    storage_per_address: usize,
+) -> Vec<StoragePath> {
+    let capacity = addresses.len() * (storage_per_address + 1);
+    let mut storage_paths: Vec<StoragePath> = Vec::with_capacity(capacity);
+    addresses
+        .iter()
+        .flat_map(|address| {
+            (0..=storage_per_address).map(|i| {
+                StoragePath::for_address_path_and_slot(
+                    address.clone(),
+                    StorageKey::from(U256::from(i)),
+                )
+            })
+        })
+        .for_each(|path| storage_paths.push(path));
+    storage_paths
+}
