@@ -1,55 +1,13 @@
-use alloy_primitives::{Address, StorageKey, StorageValue, U256};
-use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
+mod database_benchmarks;
+
+use alloy_primitives::{StorageKey, U256};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use database_benchmarks::{generate_random_address, setup_database_with_storage};
 use rand::prelude::*;
-use tempdir::TempDir;
-use triedb::{
-    account::Account,
-    path::{AddressPath, StoragePath},
-    Database, MmapPageManager,
-};
+use triedb::path::{AddressPath, StoragePath};
 
 const SIZES: &[usize] = &[1_000_000, 3_000_000];
 const BATCH_SIZE: usize = 10_000;
-
-fn generate_random_address(rng: &mut StdRng) -> AddressPath {
-    let addr = Address::random_with(rng);
-    AddressPath::for_address(addr)
-}
-
-fn setup_database_with_storage(size: usize) -> (TempDir, Database<MmapPageManager>) {
-    let dir = TempDir::new("triedb_bench_proof").unwrap();
-    let db_path = dir.path().join("db");
-    let db = Database::create(db_path.to_str().unwrap()).unwrap();
-
-    // Populate database with initial accounts
-    let mut rng = StdRng::seed_from_u64(42);
-    {
-        let mut tx = db.begin_rw().unwrap();
-        let num_accounts_to_generate = size / BATCH_SIZE;
-        for i in 1..=num_accounts_to_generate {
-            let address = generate_random_address(&mut rng);
-            let account =
-                Account::new(i as u64, U256::from(i as u64), EMPTY_ROOT_HASH, KECCAK_EMPTY);
-
-            tx.set_account(address.clone(), Some(account)).unwrap();
-
-            // add random storage to each account
-            for i in 0..=BATCH_SIZE {
-                let storage_key = StorageKey::from(U256::from(i));
-                let storage_path =
-                    StoragePath::for_address_path_and_slot(address.clone(), storage_key);
-                let storage_value =
-                    StorageValue::from_be_slice(storage_path.get_slot().pack().as_slice());
-
-                tx.set_storage_slot(storage_path, Some(storage_value)).unwrap();
-            }
-        }
-
-        tx.commit().unwrap();
-    }
-    (dir, db)
-}
 
 fn bench_storage_get_proof(c: &mut Criterion) {
     let mut group = c.benchmark_group("storage_get_proof");

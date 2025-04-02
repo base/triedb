@@ -13,7 +13,7 @@ use triedb::{
 const SIZES: &[usize] = &[1_000_000, 3_000_000];
 const BATCH_SIZE: usize = 10_000;
 
-fn generate_random_address(rng: &mut StdRng) -> AddressPath {
+pub fn generate_random_address(rng: &mut StdRng) -> AddressPath {
     let addr = Address::random_with(rng);
     AddressPath::for_address(addr)
 }
@@ -41,7 +41,7 @@ fn setup_database(size: usize) -> (TempDir, Database<MmapPageManager>) {
     (dir, db)
 }
 
-fn setup_database_with_storage(size: usize) -> (TempDir, Database<MmapPageManager>) {
+pub fn setup_database_with_storage(size: usize) -> (TempDir, Database<MmapPageManager>) {
     let dir = TempDir::new("triedb_bench_storage").unwrap();
     let db_path = dir.path().join("db");
     let db = Database::create(db_path.to_str().unwrap()).unwrap();
