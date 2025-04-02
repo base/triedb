@@ -322,7 +322,7 @@ impl<'p> TryFrom<PageMut<'p>> for RootPageMut<'p> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::page::{MmapPageManager, PAGE_DATA_SIZE};
+    use crate::page::MmapPageManager;
 
     const MAX_ORPHANS: usize = 1011;
 
@@ -534,7 +534,7 @@ mod tests {
         root_page.add_orphaned_page_ids(&expected_orphan_page_ids, 0, &mut page_manager).unwrap();
 
         // THEN: Page 1 should not be changed at all
-        assert_eq!(page1.contents(), [0; PAGE_DATA_SIZE]);
+        assert_eq!(page1.contents(), [0; Page::DATA_SIZE]);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::page::{PageError, PAGE_DATA_SIZE};
+use crate::page::{Page, PageError};
 
 // A pointer to a page cell, which encodes the offset and length as 12-bit numbers in 3 bytes.
 pub(crate) struct CellPointer<'p>(&'p [u8; 3]);
@@ -19,8 +19,8 @@ impl From<CellPointerError> for PageError {
 impl<'p> CellPointer<'p> {
     // Creates a new cell pointer and writes it to the given data.
     pub fn new(offset: u16, length: u16, data: &'p mut [u8; 3]) -> Self {
-        assert!(offset < PAGE_DATA_SIZE as u16);
-        assert!(length < PAGE_DATA_SIZE as u16);
+        assert!(offset < Page::DATA_SIZE as u16);
+        assert!(length < Page::DATA_SIZE as u16);
         assert!(offset >= length);
 
         data[0] = (offset >> 4) as u8;
