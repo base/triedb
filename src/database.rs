@@ -106,13 +106,13 @@ impl Database<MmapPageManager> {
         Ok(database)
     }
 
-    pub fn pretty_print(self, output_file: &File) -> Result<(), Error> {
+    pub fn pretty_print(self, output_file: &File, page_id: u32) -> Result<(), Error> {
         let metadata = self.inner.metadata.read().unwrap().clone();
 
         let context = TransactionContext::new(metadata);
         let storage_engine = self.inner.storage_engine.read().unwrap();
         //KALEY TODO proper error handling
-        let _ = storage_engine.pretty_print_page(&context, output_file);
+        let _ = storage_engine.pretty_print_page(&context, output_file, page_id);
         Ok(())
     }
 }
