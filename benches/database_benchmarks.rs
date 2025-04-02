@@ -18,7 +18,7 @@ pub fn generate_random_address(rng: &mut StdRng) -> AddressPath {
     AddressPath::for_address(addr)
 }
 
-fn setup_database(size: usize) -> (TempDir, Database<MmapPageManager>) {
+pub fn setup_database(size: usize) -> (TempDir, Database<MmapPageManager>) {
     let dir = TempDir::new("triedb_bench").unwrap();
     let db_path = dir.path().join("db");
     let db = Database::create(db_path.to_str().unwrap()).unwrap();

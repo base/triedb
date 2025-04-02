@@ -2,12 +2,36 @@ mod database_benchmarks;
 
 use alloy_primitives::{StorageKey, U256};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use database_benchmarks::{generate_random_address, setup_database_with_storage};
+use database_benchmarks::{generate_random_address, setup_database, setup_database_with_storage};
 use rand::prelude::*;
 use triedb::path::{AddressPath, StoragePath};
 
 const SIZES: &[usize] = &[1_000_000, 3_000_000];
 const BATCH_SIZE: usize = 10_000;
+
+fn bench_account_get_proof(c: &mut Criterion) {
+    let mut group = c.benchmark_group("account_get_proof");
+
+    for &size in SIZES {
+        let (_dir, db) = setup_database(size);
+        let mut rng = StdRng::seed_from_u64(42);
+        let addresses: Vec<AddressPath> =
+            (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
+
+        group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+        group.bench_with_input(BenchmarkId::new("account_get_proof", size), &size, |b, _| {
+            b.iter(|| {
+                let tx = db.begin_ro().unwrap();
+                for addr in &addresses {
+                    let result = tx.get_account_with_proof(addr.clone()).unwrap();
+                    assert!(result.is_some());
+                }
+                tx.commit().unwrap();
+            });
+        });
+    }
+    group.finish();
+}
 
 fn bench_storage_get_proof(c: &mut Criterion) {
     let mut group = c.benchmark_group("storage_get_proof");
@@ -37,8 +61,8 @@ fn bench_storage_get_proof(c: &mut Criterion) {
             b.iter(|| {
                 let tx = db.begin_ro().unwrap();
                 for storage_path in &storage_paths {
-                    let a = tx.get_storage_with_proof(storage_path.clone()).unwrap();
-                    assert!(a.is_some());
+                    let result = tx.get_storage_with_proof(storage_path.clone()).unwrap();
+                    assert!(result.is_some());
                 }
                 tx.commit().unwrap();
             });
@@ -47,6 +71,6 @@ fn bench_storage_get_proof(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_storage_get_proof,);
+criterion_group!(benches, bench_account_get_proof, bench_storage_get_proof);
 
 criterion_main!(benches);
