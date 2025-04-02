@@ -1,13 +1,14 @@
-mod database_benchmarks;
+mod benchmark_common;
 
 use alloy_primitives::{StorageKey, U256};
+use benchmark_common::{
+    generate_random_address, setup_database, setup_database_with_storage, BATCH_SIZE,
+};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use database_benchmarks::{generate_random_address, setup_database, setup_database_with_storage};
 use rand::prelude::*;
 use triedb::path::{AddressPath, StoragePath};
 
 const SIZES: &[usize] = &[1_000_000, 3_000_000];
-const BATCH_SIZE: usize = 10_000;
 
 fn bench_account_get_proof(c: &mut Criterion) {
     let mut group = c.benchmark_group("account_get_proof");
