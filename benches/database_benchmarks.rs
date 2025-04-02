@@ -83,15 +83,22 @@ fn bench_storage_reads_multiple_accounts(c: &mut Criterion) {
             (0..total_addresses).map(|_| generate_random_address(&mut rng)).collect();
 
         let total_storage_per_address = BATCH_SIZE / total_addresses;
-        let mut storage_paths: Vec<StoragePath> = Vec::new();
-        for address in addresses {
-            for i in 0..=total_storage_per_address {
-                let storage_key = StorageKey::from(U256::from(i));
-                let storage_path =
-                    StoragePath::for_address_path_and_slot(address.clone(), storage_key);
-                storage_paths.push(storage_path);
-            }
-        }
+        let storage_paths = {
+            let capacity = total_addresses * (total_storage_per_address + 1);
+            let mut storage_paths: Vec<StoragePath> = Vec::with_capacity(capacity);
+            addresses
+                .iter()
+                .flat_map(|address| {
+                    (0..=total_storage_per_address).map(|i| {
+                        StoragePath::for_address_path_and_slot(
+                            address.clone(),
+                            StorageKey::from(U256::from(i)),
+                        )
+                    })
+                })
+                .for_each(|path| storage_paths.push(path));
+            storage_paths
+        };
 
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
         group.bench_with_input(
@@ -405,15 +412,22 @@ fn bench_storage_mutliple_accounts_deletes(c: &mut Criterion) {
             (0..total_addresses).map(|_| generate_random_address(&mut rng)).collect();
 
         let total_storage_per_address = BATCH_SIZE / total_addresses;
-        let mut storage_paths: Vec<StoragePath> = Vec::new();
-        for address in &addresses {
-            for i in 0..=total_storage_per_address {
-                let storage_key = StorageKey::from(U256::from(i));
-                let storage_path =
-                    StoragePath::for_address_path_and_slot(address.clone(), storage_key);
-                storage_paths.push(storage_path);
-            }
-        }
+        let storage_paths = {
+            let capacity = total_addresses * (total_storage_per_address + 1);
+            let mut storage_paths: Vec<StoragePath> = Vec::with_capacity(capacity);
+            addresses
+                .iter()
+                .flat_map(|address| {
+                    (0..=total_storage_per_address).map(|i| {
+                        StoragePath::for_address_path_and_slot(
+                            address.clone(),
+                            StorageKey::from(U256::from(i)),
+                        )
+                    })
+                })
+                .for_each(|path| storage_paths.push(path));
+            storage_paths
+        };
 
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
         group.bench_with_input(
