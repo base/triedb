@@ -1,23 +1,57 @@
 use crate::{page::PageId, snapshot::SnapshotId};
 use std::{fmt, mem, ops::Deref};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
+// In order to support zero-copy access to the on-disk data, and to ensure the same serialization
+// format on all supported platforms, we must stick to one endianness. In practice, this ensures
+// that one can copy the database file from one machine to another, and the database software will
+// be able to use it reliably.
+#[cfg(not(target_endian = "little"))]
+compile_error!("This code only supports little-endian platforms");
 
 pub const PAGE_SIZE: usize = 4096;
 pub const HEADER_SIZE: usize = 8;
 pub const PAGE_DATA_SIZE: usize = PAGE_SIZE - HEADER_SIZE;
 
+#[repr(C)]
+#[derive(FromBytes, IntoBytes, Immutable, KnownLayout)]
+struct PageHeader {
+    snapshot_id: SnapshotId,
+}
+
+#[repr(C, align(4096))]
+#[derive(FromBytes, IntoBytes, Immutable, KnownLayout)]
+struct PageData {
+    header: PageHeader,
+    contents: [u8; PAGE_DATA_SIZE],
+}
+
 #[derive(Copy, Clone)]
 pub struct Page<'p> {
     id: PageId,
-    data: &'p [u8; PAGE_SIZE],
-    snapshot_id: SnapshotId,
+    data: &'p PageData,
 }
 
 pub struct PageMut<'p> {
     #[allow(dead_code)]
     id: PageId,
-    data: &'p mut [u8; PAGE_SIZE],
-    snapshot_id: SnapshotId,
+    data: &'p mut PageData,
 }
+
+// Compile-time assertion to verify that `PageData` and `PageHeader` have the expected size,
+// alignment, and internal layout.
+const _: () = {
+    use std::mem::{align_of, offset_of, size_of};
+
+    assert!(size_of::<PageData>() == PAGE_SIZE);
+    assert!(align_of::<PageData>() == PAGE_SIZE);
+
+    assert!(size_of::<PageHeader>() == HEADER_SIZE);
+    assert!(align_of::<PageHeader>() == HEADER_SIZE);
+
+    assert!(offset_of!(PageData, header) == 0);
+    assert!(offset_of!(PageData, contents) == HEADER_SIZE);
+};
 
 // Compile-time assertion to verify that `Page` and `PageMut` have the same layout and internal
 // structure (and consequently that `PageMut` can be safely transmuted to `Page`).
@@ -31,7 +65,6 @@ const _: () = {
 
     assert!(offset_of!(Page<'_>, id) == offset_of!(PageMut<'_>, id));
     assert!(offset_of!(Page<'_>, data) == offset_of!(PageMut<'_>, data));
-    assert!(offset_of!(Page<'_>, snapshot_id) == offset_of!(PageMut<'_>, snapshot_id));
 };
 
 fn fmt_page(name: &str, p: &Page<'_>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -43,9 +76,14 @@ fn fmt_page(name: &str, p: &Page<'_>, f: &mut fmt::Formatter<'_>) -> fmt::Result
 }
 
 impl<'p> Page<'p> {
+    /// Constructs a new immutable page for reading.
+    ///
+    /// # Panics
+    ///
+    /// If `data` is not aligned to the page size.
     pub fn new(id: PageId, data: &'p [u8; PAGE_SIZE]) -> Self {
-        let snapshot_id = u64::from_le_bytes(data[0..8].try_into().unwrap());
-        Self { id, snapshot_id, data }
+        let data = PageData::ref_from_bytes(data).expect("data must be properly aligned");
+        Self { id, data }
     }
 
     pub fn id(&self) -> PageId {
@@ -54,12 +92,12 @@ impl<'p> Page<'p> {
 
     /// Returns the snapshot id of the page.
     pub fn snapshot_id(&self) -> SnapshotId {
-        self.snapshot_id
+        self.data.header.snapshot_id
     }
 
     /// Returns the contents of the page without the header
     pub fn contents(&self) -> &[u8] {
-        &self.data[HEADER_SIZE..]
+        &self.data.contents
     }
 }
 
@@ -70,9 +108,14 @@ impl fmt::Debug for Page<'_> {
 }
 
 impl<'p> PageMut<'p> {
+    /// Constructs a new mutable page for reading and writing.
+    ///
+    /// # Panics
+    ///
+    /// If `data` is not aligned to the page size.
     pub fn new(id: PageId, data: &'p mut [u8; PAGE_SIZE]) -> Self {
-        let snapshot_id = u64::from_le_bytes(data[0..8].try_into().unwrap());
-        Self { id, snapshot_id, data }
+        let data = PageData::mut_from_bytes(data).expect("data must be properly aligned");
+        Self { id, data }
     }
 
     /// Creates a new RW Page with the given id, snapshot id, and data.
@@ -81,18 +124,18 @@ impl<'p> PageMut<'p> {
         snapshot_id: SnapshotId,
         data: &'p mut [u8; PAGE_SIZE],
     ) -> Self {
-        data[0..8].copy_from_slice(&snapshot_id.to_le_bytes());
-        Self { id, snapshot_id, data }
+        let mut page = Self::new(id, data);
+        page.set_snapshot_id(snapshot_id);
+        page
     }
 
     pub fn set_snapshot_id(&mut self, snapshot_id: SnapshotId) {
-        self.snapshot_id = snapshot_id;
-        self.data[0..8].copy_from_slice(&snapshot_id.to_le_bytes());
+        self.data.header.snapshot_id = snapshot_id;
     }
 
     /// Returns a mutable reference to the contents of the page without the header
     pub fn contents_mut(&mut self) -> &mut [u8] {
-        &mut self.data[HEADER_SIZE..]
+        &mut self.data.contents
     }
 }
 
@@ -117,12 +160,15 @@ impl fmt::Debug for PageMut<'_> {
 mod tests {
     use super::*;
 
+    #[repr(align(4096))]
+    struct DataArray([u8; PAGE_SIZE]);
+
     #[test]
     fn test_ref_new() {
         let id = 42;
-        let mut data = [0; PAGE_SIZE];
+        let data = DataArray([0; PAGE_SIZE]);
 
-        let page = Page::new(id, &mut data);
+        let page = Page::new(id, &data.0);
 
         assert_eq!(page.id(), 42);
         assert_eq!(page.snapshot_id(), 0);
@@ -132,9 +178,9 @@ mod tests {
     #[test]
     fn test_mut_new() {
         let id = 42;
-        let mut data = [0; PAGE_SIZE];
+        let mut data = DataArray([0; PAGE_SIZE]);
 
-        let page_mut = PageMut::new(id, &mut data);
+        let page_mut = PageMut::new(id, &mut data.0);
 
         assert_eq!(page_mut.id(), 42);
         assert_eq!(page_mut.snapshot_id(), 0);
@@ -145,9 +191,9 @@ mod tests {
     fn test_mut_with_snapshot() {
         let id = 42;
         let snapshot = 1337;
-        let mut data = [0; PAGE_SIZE];
+        let mut data = DataArray([0; PAGE_SIZE]);
 
-        let page_mut = PageMut::with_snapshot(id, snapshot, &mut data);
+        let page_mut = PageMut::with_snapshot(id, snapshot, &mut data.0);
 
         assert_eq!(page_mut.id(), 42);
         assert_eq!(page_mut.snapshot_id(), 1337);
