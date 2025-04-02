@@ -33,10 +33,6 @@ name = "database_benchmarks"
 harness = false
 
 [[bench]]
-name = "hashmap_benchmarks"
-harness = false
-
-[[bench]]
 name = "proof_benchmarks"
 harness = false
 
