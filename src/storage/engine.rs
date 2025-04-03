@@ -197,16 +197,18 @@ impl<P: PageManager> StorageEngine<P> {
         context: &TransactionContext,
         //storage_path: StoragePath,
         output_file: &File,
-        page_id: u32
+        page_id: Option<u32>
     ) -> Result<Option<Page>, Error> {
        if context.metadata.root_subtrie_page_id == 0 {
-        //Kaley todo ???
             return Ok(None);
         }
 
         let mut file_writer = BufWriter::new(output_file);
 
-        let page = self.get_page(context, page_id);
+        let (page, print_whole_db) = match page_id {
+            Some(id) => (self.get_page(context, id), false),
+            None => (self.get_page(context, context.metadata.root_subtrie_page_id), true)
+        };
 
         if page.is_err() {
             println!("page not found");
@@ -214,19 +216,8 @@ impl<P: PageManager> StorageEngine<P> {
         }
         let slotted_page = SlottedPage::try_from(page.unwrap())?;
         //KALEY TODO proper error handling
-        let _ = self.traverse_page(context, slotted_page, 0, String::from(""), &mut file_writer);
-        // let child_pointers = match node.enumerate_children() {
-        //     Ok(child_pointers) => child_pointers,
-        //     _ => Vec::new()
-        // };
-        // for (_, child) in child_pointers {
-        //     if child.location().cell_index().is_none() {
-        //         //new page
-        //         println!("new page");
-        //     } else {
-        //         println!("{:?}", child.location());
-        //     }
-        // }
+        let _ = self.traverse_page(context, slotted_page, 0, String::from(""), &mut file_writer, print_whole_db);
+
         Ok(None)
        
     }
@@ -234,12 +225,11 @@ impl<P: PageManager> StorageEngine<P> {
     fn traverse_page(
         &self,
         context: &TransactionContext,
-        //original_path: &Nibbles,
-        //path_offset: usize,
         slotted_page: SlottedPage<'_>,
         cell_index: u8,
         indent: String,
-        file_writer: &mut BufWriter<&File>
+        file_writer: &mut BufWriter<&File>,
+        print_whole_db: bool
     ) -> Result<Option<TrieValue>, Error> {
         let node: Node = slotted_page.get_value(cell_index)?;
 
@@ -251,14 +241,14 @@ impl<P: PageManager> StorageEngine<P> {
 
         match node {
             Node::AccountLeaf { prefix: _, nonce_rlp: _, balance_rlp: _, code_hash: _, storage_root } => {
-                let output_string = format!("{}A: {:?}\n", indent, val);
+                let output_string = format!("{}Account leaf: {:?}\n", indent, val);
                 //KALEY TODO proper error handling
                 let _ = file_writer.write(&output_string.as_bytes());
                 //KALEY TODO: flush file_writer?
                 let mut new_indent = indent.clone();
                 new_indent.push_str("\t");
                 if let Some(direct_child) = storage_root {
-                    self.traverse_page(context, slotted_page, direct_child.location().cell_index().unwrap(), new_indent, file_writer)
+                    self.traverse_page(context, slotted_page, direct_child.location().cell_index().unwrap(), new_indent, file_writer, print_whole_db)
                 } else {
                     let output_string = format!("{}No direct child\n", new_indent);
                     //KALEY TODO proper error handling
@@ -267,7 +257,7 @@ impl<P: PageManager> StorageEngine<P> {
                 }   
             },
             Node::Branch { prefix: _, children } => {
-                let output_string = format!("{}B\n", indent);
+                let output_string = format!("{}Branch, Page ID: {:?} \n", indent, slotted_page.id());
                 //KALEY TODO proper error handling
                 let _ = file_writer.write(&output_string.as_bytes());
                 for child in children {
@@ -278,26 +268,32 @@ impl<P: PageManager> StorageEngine<P> {
                         if child_ptr.location().page_id().is_none() {
                             //KALEY TODO: check unwrap here
                             //KALEY TODO proper error handling
-                            let _ = self.traverse_page(context, slotted_page, child_ptr.location().cell_index().unwrap(), new_indent, file_writer);
+                            let _ = self.traverse_page(context, slotted_page, child_ptr.location().cell_index().unwrap(), new_indent, file_writer, print_whole_db);
                         } else {
-                            
-                            let child_page_id = child_ptr.location().page_id().unwrap();
-                            //let child_page = self.get_page(context, child_page_id)?;
-                            let output_string= format!("{}Child on new page: {:?}\n", new_indent, child_page_id);
-                            //KALEY TODO proper error handling
-                            let _ = file_writer.write(&output_string.as_bytes());
+                            if print_whole_db {
+                                let child_page_id = child_ptr.location().page_id().unwrap();
+                                let child_page = self.get_page(context, child_page_id)?;
+                                let output_string= format!("{}Child on new page: {:?}\n", new_indent, child_page_id);
+                                //KALEY TODO proper error handling
+                                let _ = file_writer.write(&output_string.as_bytes());
 
-                            //let child_slotted_page = SlottedPage::try_from(child_page)?;
-                            //KALEY TODO proper error handling
-                            //let _ = self.traverse_page(context, child_slotted_page, 0, new_indent, file_writer);
-
+                                let child_slotted_page = SlottedPage::try_from(child_page)?;
+                                //KALEY TODO proper error handling
+                                let _ = self.traverse_page(context, child_slotted_page, 0, new_indent, file_writer, print_whole_db);
+                            } else {
+                                let child_page_id = child_ptr.location().page_id().unwrap();
+                                //let child_page = self.get_page(context, child_page_id)?;
+                                let output_string= format!("{}Child on new page: {:?}\n", new_indent, child_page_id);
+                                //KALEY TODO proper error handling
+                                let _ = file_writer.write(&output_string.as_bytes());
+                            }
                         }
                     } 
                 }
                 return Ok(None)
             },
             Node::StorageLeaf { prefix: _, value_rlp: _ } => {
-                let output_string = format!("{}S: {:?}\n", indent, val);
+                let output_string = format!("{}Storage leaf: {:?}\n", indent, val);
                 //KALEY TODO proper error handling
                 let _ = file_writer.write(&output_string.as_bytes());
                 return Ok(None)
@@ -2792,7 +2788,7 @@ mod tests {
         assert!(context.transaction_metrics.get_pages_split() > 0);
         //KALEY TODO delete
         let output_file = File::create("./printed_page").unwrap();
-        let res = storage_engine.pretty_print_page(&context, &output_file, 465);
+        let res = storage_engine.pretty_print_page(&context, &output_file, Some(465));
         println!("{:?}", res);
     }
 

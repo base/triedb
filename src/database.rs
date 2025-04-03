@@ -106,7 +106,7 @@ impl Database<MmapPageManager> {
         Ok(database)
     }
 
-    pub fn pretty_print(self, output_file: &File, page_id: u32) -> Result<(), Error> {
+    pub fn pretty_print(self, output_file: &File, page_id: Option<u32>) -> Result<(), Error> {
         let metadata = self.inner.metadata.read().unwrap().clone();
 
         let context = TransactionContext::new(metadata);
