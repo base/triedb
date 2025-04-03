@@ -9,7 +9,7 @@ use crate::{
     },
     page::{
         OrphanPageManager, Page, PageError, PageId, PageManager, PageMut, RootPageMut, SlottedPage,
-        SlottedPageMut, CELL_POINTER_SIZE, PAGE_DATA_SIZE,
+        SlottedPageMut, CELL_POINTER_SIZE,
     },
     path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH, STORAGE_PATH_LENGTH},
     pointer::Pointer,
@@ -1146,7 +1146,7 @@ impl<P: PageManager> StorageEngine<P> {
         context: &mut TransactionContext,
         page: &mut SlottedPageMut<'_>,
     ) -> Result<(), Error> {
-        while page.num_free_bytes() < PAGE_DATA_SIZE / 4_usize {
+        while page.num_free_bytes() < Page::DATA_SIZE / 4_usize {
             let child_page = self.allocate_page(context)?;
             let mut child_slotted_page = SlottedPageMut::try_from(child_page)?;
 
