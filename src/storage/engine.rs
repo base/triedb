@@ -17,7 +17,9 @@ use crate::{
 };
 
 use alloy_primitives::StorageValue;
-use alloy_trie::{nodes::RlpNode, nybbles::common_prefix_length, Nibbles, EMPTY_ROOT_HASH};
+use alloy_trie::{
+    nodes::RlpNode, nybbles, nybbles::common_prefix_length, Nibbles, EMPTY_ROOT_HASH,
+};
 use std::{
     cmp::{max, Ordering},
     fmt::Debug,
@@ -136,7 +138,7 @@ impl<P: PageManager> StorageEngine<P> {
         let slotted_page = SlottedPage::try_from(page)?;
         let path: Nibbles = address_path.into();
 
-        match self.get_value_from_page(context, &path, 0, slotted_page, 0)? {
+        match self.get_value_from_page(context, &path.as_slice(), 0, slotted_page, 0)? {
             Some(TrieValue::Account(account)) => Ok(Some(account)),
             _ => Ok(None),
         }
@@ -209,7 +211,7 @@ impl<P: PageManager> StorageEngine<P> {
     fn get_value_from_page(
         &self,
         context: &TransactionContext,
-        original_path: &Nibbles,
+        original_path_slice: &[u8],
         path_offset: usize,
         slotted_page: SlottedPage<'_>,
         page_index: u8,
@@ -217,21 +219,24 @@ impl<P: PageManager> StorageEngine<P> {
         let node: Node = slotted_page.get_value(page_index)?;
 
         let common_prefix_length =
-            original_path.slice(path_offset..).common_prefix_length(node.prefix());
+            nybbles::common_prefix_length(&original_path_slice[path_offset..], node.prefix());
+
         if common_prefix_length < node.prefix().len() {
             return Ok(None);
         }
 
-        let remaining_path = original_path.slice(path_offset + common_prefix_length..);
+        let remaining_path = &original_path_slice[path_offset + common_prefix_length..];
         if remaining_path.is_empty() {
             // cache the account location if it is a contract account
             if let TrieValue::Account(account) = node.value()? {
                 if account.storage_root != EMPTY_ROOT_HASH &&
-                    original_path.len() == ADDRESS_PATH_LENGTH
+                    original_path_slice.len() == ADDRESS_PATH_LENGTH
                 {
+                    // convert the slice to a nibbles
+                    let original_path = Nibbles::from_nibbles_unchecked(original_path_slice);
                     context
                         .contract_account_loc_cache
-                        .insert(original_path, (slotted_page.id(), page_index));
+                        .insert(&original_path, (slotted_page.id(), page_index));
                 }
             }
 
@@ -255,7 +260,7 @@ impl<P: PageManager> StorageEngine<P> {
                 if child_location.cell_index().is_some() {
                     self.get_value_from_page(
                         context,
-                        original_path,
+                        original_path_slice,
                         new_path_offset,
                         slotted_page,
                         child_location.cell_index().unwrap(),
@@ -266,7 +271,7 @@ impl<P: PageManager> StorageEngine<P> {
                     let child_slotted_page = SlottedPage::try_from(child_page)?;
                     self.get_value_from_page(
                         context,
-                        original_path,
+                        original_path_slice,
                         new_path_offset,
                         child_slotted_page,
                         0,
