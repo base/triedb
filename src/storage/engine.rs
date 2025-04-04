@@ -17,9 +17,7 @@ use crate::{
 };
 
 use alloy_primitives::StorageValue;
-use alloy_trie::{
-    nodes::RlpNode, nybbles, nybbles::common_prefix_length, Nibbles, EMPTY_ROOT_HASH,
-};
+use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
 use std::{
     cmp::{max, Ordering},
     fmt::Debug,
@@ -232,7 +230,6 @@ impl<P: PageManager> StorageEngine<P> {
                 if account.storage_root != EMPTY_ROOT_HASH &&
                     original_path_slice.len() == ADDRESS_PATH_LENGTH
                 {
-                    // convert the slice to a nibbles
                     let original_path = Nibbles::from_nibbles_unchecked(original_path_slice);
                     context
                         .contract_account_loc_cache
@@ -1384,8 +1381,8 @@ fn find_shortest_common_prefix<T>(
         "changes must be sorted after slicing with path offset"
     );
 
-    let leftmost_prefix_length = common_prefix_length(node.prefix(), leftmost_path);
-    let rightmost_prefix_length = common_prefix_length(node.prefix(), rightmost_path);
+    let leftmost_prefix_length = nybbles::common_prefix_length(node.prefix(), leftmost_path);
+    let rightmost_prefix_length = nybbles::common_prefix_length(node.prefix(), rightmost_path);
 
     if leftmost_prefix_length <= rightmost_prefix_length {
         (0, leftmost_prefix_length)
@@ -3754,7 +3751,7 @@ mod tests {
             let (idx, shortest_common_prefix_length) = find_shortest_common_prefix(&changes, 0, &node);
             assert!(idx == 0 || idx == changes.len() - 1, "the shortest common prefix must be found at either end of the changes list");
 
-            let shortest_from_full_iteration = changes.iter().map(|(path, _)| common_prefix_length(path, node.prefix())).min().unwrap();
+            let shortest_from_full_iteration = changes.iter().map(|(path, _)| nybbles::common_prefix_length(path, node.prefix())).min().unwrap();
 
             assert_eq!(shortest_common_prefix_length, shortest_from_full_iteration);
         }
