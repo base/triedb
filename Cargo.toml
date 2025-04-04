@@ -35,7 +35,7 @@ name = "database_benchmarks"
 harness = false
 
 [[bench]]
-name = "hashmap_benchmarks"
+name = "proof_benchmarks"
 harness = false
 
 [profile.bench]

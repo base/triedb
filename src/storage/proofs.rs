@@ -22,6 +22,8 @@ use super::engine::Error;
 use super::engine::StorageEngine;
 
 impl<P: PageManager> StorageEngine<P> {
+    /// Retrieves a [(Account, MultiProof)] from the storage engine, identified by the given
+    /// [AddressPath]. Returns [None] if the path is not found.
     pub fn get_account_with_proof(
         &self,
         context: &TransactionContext,
@@ -35,6 +37,8 @@ impl<P: PageManager> StorageEngine<P> {
         }
     }
 
+    /// Retrieves a [(StorageValue, MultiProof)] from the storage engine, identified by the given
+    /// [StoragePath]. Returns [None] if the path is not found.
     pub fn get_storage_with_proof(
         &self,
         context: &TransactionContext,
