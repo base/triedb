@@ -138,7 +138,7 @@ impl<P: PageManager> StorageEngine<P> {
         let slotted_page = SlottedPage::try_from(page)?;
         let path: Nibbles = address_path.into();
 
-        match self.get_value_from_page(context, &path.as_slice(), 0, slotted_page, 0)? {
+        match self.get_value_from_page(context, &path, 0, slotted_page, 0)? {
             Some(TrieValue::Account(account)) => Ok(Some(account)),
             _ => Ok(None),
         }
