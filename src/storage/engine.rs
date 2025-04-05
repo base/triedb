@@ -35,13 +35,13 @@ use super::value::Value;
 ///
 /// All operations are thread-safe through the use of a read-write lock around the inner state.
 #[derive(Debug)]
-pub struct StorageEngine<P: PageManager> {
-    inner: Arc<RwLock<Inner<P>>>,
+pub struct StorageEngine {
+    inner: Arc<RwLock<Inner>>,
 }
 
 #[derive(Debug)]
-struct Inner<P: PageManager> {
-    page_manager: P,
+struct Inner {
+    page_manager: PageManager,
     orphan_manager: OrphanPageManager,
 }
 
@@ -51,9 +51,9 @@ enum PointerChange {
     Delete,
 }
 
-impl<P: PageManager> StorageEngine<P> {
+impl StorageEngine {
     /// Creates a new [StorageEngine] with the given [PageManager] and [OrphanPageManager].
-    pub fn new(page_manager: P, orphan_manager: OrphanPageManager) -> Self {
+    pub fn new(page_manager: PageManager, orphan_manager: OrphanPageManager) -> Self {
         Self { inner: Arc::new(RwLock::new(Inner { page_manager, orphan_manager })) }
     }
 
@@ -1462,7 +1462,7 @@ fn move_subtrie_nodes(
     Ok(node_location(target_page.id(), new_index))
 }
 
-impl<P: PageManager> Inner<P> {
+impl Inner {
     fn allocate_page<'p>(
         &mut self,
         context: &mut TransactionContext,

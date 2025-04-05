@@ -6,7 +6,7 @@ use crate::{
         Node::{self, AccountLeaf, Branch},
         TrieValue,
     },
-    page::{PageManager, SlottedPage},
+    page::SlottedPage,
     path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH},
     pointer::Pointer,
 };
@@ -21,7 +21,7 @@ use super::engine::Error;
 
 use super::engine::StorageEngine;
 
-impl<P: PageManager> StorageEngine<P> {
+impl StorageEngine {
     /// Retrieves a [(Account, MultiProof)] from the storage engine, identified by the given
     /// [AddressPath]. Returns [None] if the path is not found.
     pub fn get_account_with_proof(

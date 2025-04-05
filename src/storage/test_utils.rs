@@ -6,13 +6,11 @@ pub mod test_utils {
 
     use crate::{
         account::Account, context::TransactionContext, database::Metadata, page::OrphanPageManager,
-        storage::engine::StorageEngine, MmapPageManager,
+        storage::engine::StorageEngine, PageManager,
     };
 
-    pub(crate) fn create_test_engine(
-        page_count: u32,
-    ) -> (StorageEngine<MmapPageManager>, TransactionContext) {
-        let manager = MmapPageManager::new_anon(page_count, 256).unwrap();
+    pub(crate) fn create_test_engine(page_count: u32) -> (StorageEngine, TransactionContext) {
+        let manager = PageManager::new_anon(page_count, 256).unwrap();
         let orphan_manager = OrphanPageManager::new();
         let metadata = Metadata {
             snapshot_id: 1,
