@@ -18,11 +18,11 @@ lint:
 
 .PHONY: bench-baseline
 bench-baseline:
-	@cargo bench -- --save-baseline $(shell git rev-parse --abbrev-ref HEAD)
+	@cargo bench --bench database_benchmarks -- --save-baseline $(shell git rev-parse --abbrev-ref HEAD)
 
 .PHONY: bench-compare
 bench-compare:
-	@cargo bench -- --baseline $(BASELINE)
+	@cargo bench --bench database_benchmarks -- --baseline $(BASELINE)
 
 .PHONY: test
 test:
