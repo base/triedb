@@ -279,10 +279,15 @@ impl Node {
         }
     }
 
-    /// Returns the RLP encoding of the [Node].
+    /// Returns the embedded RLP encoding of the [Node].
     /// This will typically be a 33 byte prefixed keccak256 hash.
-    pub fn rlp_encode(&self) -> RlpNode {
-        RlpNode::from_rlp(&encode_fixed_size(self))
+    pub fn as_rlp_node(&self) -> RlpNode {
+        RlpNode::from_rlp(&self.rlp_encode())
+    }
+
+    /// Returns the RLP encoding of the [Node].
+    pub fn rlp_encode(&self) -> ArrayVec<u8, 532> {
+        encode_fixed_size(self)
     }
 
     /// Returns the size of the [Node] if a new child were to be added.
@@ -621,7 +626,7 @@ impl Encodable for Node {
     }
 }
 
-fn encode_branch(children: &[Option<Pointer>], out: &mut dyn BufMut) -> usize {
+pub fn encode_branch(children: &[Option<Pointer>], out: &mut dyn BufMut) -> usize {
     // first encode the header
     let mut payload_length = 1;
     for child in children.iter() {
@@ -974,7 +979,7 @@ mod tests {
         let mut bytes = vec![];
         node.encode(&mut bytes);
         assert_eq!(bytes, hex!("0xf872a120761d5c42184a02cc64585ed2ff339fc39a907e82731d70313c83d2212b2da36bb84ef84c80888ac7230489e80000a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"));
-        let rlp_encoded = node.rlp_encode();
+        let rlp_encoded = node.as_rlp_node();
         // hash prefixed with 0xa0 (length 32)
         assert_eq!(
             rlp_encoded.as_slice(),
@@ -1142,7 +1147,7 @@ mod tests {
                 "0xf8518080808080a018e3b46e84b35270116303fb2a33c853861d45d99da2d87117c2136f7edbd0b980a0717aef38e7ba4a0ae477856a6e7f6ba8d4ee764c57908e6f22643a558db737ff808080808080808080"
             )
         );
-        let rlp_encoded = node.rlp_encode();
+        let rlp_encoded = node.as_rlp_node();
         // hash prefixed with 0xa0 (length 32)
         assert_eq!(
             rlp_encoded.as_slice(),
@@ -1160,7 +1165,7 @@ mod tests {
 
         #[test]
         fn fuzz_node_rlp_encode(node: Node) {
-            node.rlp_encode();
+            node.as_rlp_node();
         }
     }
 }

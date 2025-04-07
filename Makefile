@@ -18,11 +18,11 @@ lint:
 
 .PHONY: bench-baseline
 bench-baseline:
-	@cargo bench -- --save-baseline $(shell git rev-parse --abbrev-ref HEAD)
+	@cargo bench --bench database_benchmarks -- --save-baseline $(shell git rev-parse --abbrev-ref HEAD)
 
 .PHONY: bench-compare
 bench-compare:
-	@cargo bench -- --baseline $(BASELINE)
+	@cargo bench --bench database_benchmarks -- --baseline $(BASELINE)
 
 .PHONY: test
 test:
@@ -42,7 +42,7 @@ tests/fixtures: tests/fixtures_stable.tar.gz
 
 tests/fixtures_stable.tar.gz:
 	@curl -L https://github.com/ethereum/execution-spec-tests/releases/download/$(ETHEREUM_EXECUTION_SPEC_VERSION)/fixtures_stable.tar.gz > $@.tmp.tar
-	@sha384sum -c <<< "$(ETHEREUM_EXECUTION_SPEC_VERSION_FILE_HASH) $@.tmp.tar"
+	@shasum -a 384 -c <<< "$(ETHEREUM_EXECUTION_SPEC_VERSION_FILE_HASH)  $@.tmp.tar"
 	@mv $@.tmp.tar $@
 
 .PHONY: clean

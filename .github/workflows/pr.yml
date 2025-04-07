@@ -10,13 +10,16 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
     - uses: actions/checkout@v4
     - name: Build
       run: cargo build --verbose
-  
+
   format:
     runs-on: ubuntu-latest
 
@@ -34,17 +37,23 @@ jobs:
           cargo +nightly fmt --all -- --check
           exit 1
         fi
-  
+
   unit-tests:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
     - uses: actions/checkout@v4
     - name: Run unit tests
-      run: make unit-tests flags=--verbose
+      run: make unit-tests cargo_flags=--verbose
 
   integration-tests:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
     - uses: actions/checkout@v4
