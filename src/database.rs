@@ -106,13 +106,12 @@ impl Database<MmapPageManager> {
         Ok(database)
     }
 
-    pub fn pretty_print(self, output_file: &File, page_id: Option<u32>) -> Result<(), Error> {
+    pub fn print_page(self, output_file: &File, page_id: Option<u32>) -> Result<(), Error> {
         let metadata = self.inner.metadata.read().unwrap().clone();
 
         let context = TransactionContext::new(metadata);
         let storage_engine = self.inner.storage_engine.read().unwrap();
-        //KALEY TODO proper error handling
-        let _ = storage_engine.pretty_print_page(&context, output_file, page_id);
+        let _ = storage_engine.print_page(&context, output_file, page_id);
         Ok(())
     }
 }
@@ -352,11 +351,9 @@ mod tests {
 
     #[test]
     fn test_data_persistence() {
-        //TODO KALEY: change back to tempdir
-        //let tmp_dir = TempDir::new("test_db").unwrap();
-        //let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
-        let file_path = "/Users/kaleychicoine/triedb/cli/test_db.db";
-        let mut db = Database::create(file_path).unwrap();
+        let tmp_dir = TempDir::new("test_db").unwrap();
+        let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
+        let db = Database::create(&file_path).unwrap();
 
         let address1 = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
@@ -367,7 +364,7 @@ mod tests {
         tx.commit().unwrap();
         db.close().unwrap();
 
-        let mut db = Database::open(file_path).unwrap();
+        let db = Database::open(file_path.as_str()).unwrap();
         let tx = db.begin_ro().unwrap();
         let account = tx.get_account(AddressPath::for_address(address1)).unwrap().unwrap();
         assert_eq!(account, account1);
@@ -382,7 +379,7 @@ mod tests {
         tx.commit().unwrap();
         db.close().unwrap();
 
-        let db = Database::open(file_path).unwrap();
+        let db = Database::open(&file_path).unwrap();
         let tx = db.begin_ro().unwrap();
 
         let account = tx.get_account(AddressPath::for_address(address1)).unwrap().unwrap();
