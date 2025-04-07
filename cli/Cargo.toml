@@ -5,3 +5,4 @@ edition = "2021"
 
 [dependencies]
 triedb = { path = ".." }
+clap = { version = "4.4", features = ["derive"] }

@@ -1,27 +1,65 @@
-use std::env;
-use std::fs::File;
+use clap::{Parser, Subcommand};
 use triedb::Database;
+use std::fs::File;
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Print a specific page from the database
+    Print {
+        /// Path to the database file
+        #[arg(short = 'd', long = "database")]
+        path: String,
+        
+        /// Page ID to print (optional)
+        #[arg(short = 'p', long = "page")]
+        page_id: Option<u32>,
+
+        /// Output filepath (optional)
+        #[arg(short = 'o', long = "output", default_value="./printed_page")]
+        output_path: String, 
+    },
+    
+    // Get information about a specific account
+    // Account {
+    //     // Path to the database file
+    //     #[arg(short, long)]
+    //     path: String,
+        
+    //     // Account ID to look up
+    //     #[arg(short, long)]
+    //     account_id: String,
+    // },
+    
+    // // Get statistics about the database
+    // Stats {
+    //     // Path to the database file
+    //     #[arg(short, long)]
+    //     path: String,
+    // },
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Get the first command line argument
-    let args: Vec<String> = env::args().collect();
-    let command = args.get(1).ok_or("Usage: cargo run print <db path> <page id>")?.as_str();
-    match command {
-        "print" => {
-            let db_path = args.get(2).ok_or("Usage: cargo run print <db path> <page id>")?;
-            let page_id_str = args.get(3);
-            let page_id = if page_id_str.is_none() {
-                None
-            } else {
-                Some(page_id_str.unwrap().parse::<u32>()?)
-            };
-
-            let output_path = "./printed_page";
-            print_page(db_path, page_id, output_path);
+    let args = Args::parse();
+    
+    match args.command {
+        Commands::Print { path, page_id, output_path } => {
+            print_page(&path, page_id, &output_path);
         }
-        _ => println!("Usage: cargo run print <db path> <page id> "),
+        // Commands::Account { path, account_id } => {
+        //     get_account(&path, &account_id)?;
+        // }
+        // Commands::Stats { path } => {
+        //     get_stats(&path)?;
+        // }
     }
-
+    
     Ok(())
 }
 
@@ -37,3 +75,19 @@ fn print_page(db_path: &str, page_id: Option<u32>, output_path: &str) {
         Err(e) => println!("Error printing page: {:?}", e),
     }
 }
+
+// fn get_account(db_path: &str, account_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+//     let db = Database::open(db_path)?;
+//     let mut context = db.start_read_only_transaction()?;
+//     // TODO: Implement account lookup
+//     println!("Looking up account: {}", account_id);
+//     Ok(())
+// }
+
+// fn get_stats(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+//     let db = Database::open(db_path)?;
+//     let mut context = db.start_read_only_transaction()?;
+//     // TODO: Implement stats collection
+//     println!("Getting database statistics");
+//     Ok(())
+// }
