@@ -19,7 +19,12 @@ use crate::{
 use alloy_primitives::StorageValue;
 use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
 use std::{
-    cmp::{max, Ordering}, fmt::Debug, fs::File, io::{BufWriter, Write}, sync::{Arc, RwLock}, u32
+    cmp::{max, Ordering},
+    fmt::Debug,
+    fs::File,
+    io::{BufWriter, Write},
+    sync::{Arc, RwLock},
+    u32,
 };
 
 use super::value::Value;
@@ -206,9 +211,9 @@ impl<P: PageManager> StorageEngine<P> {
         &self,
         context: &TransactionContext,
         output_file: &File,
-        page_id: Option<u32>
+        page_id: Option<u32>,
     ) -> Result<(), Error> {
-       if context.metadata.root_subtrie_page_id == 0 {
+        if context.metadata.root_subtrie_page_id == 0 {
             return Ok(());
         }
 
@@ -216,7 +221,7 @@ impl<P: PageManager> StorageEngine<P> {
 
         let (page, print_whole_db) = match page_id {
             Some(id) => (self.get_page(context, id), false),
-            None => (self.get_page(context, context.metadata.root_subtrie_page_id), true)
+            None => (self.get_page(context, context.metadata.root_subtrie_page_id), true),
         };
 
         if page.is_err() {
@@ -224,8 +229,14 @@ impl<P: PageManager> StorageEngine<P> {
             return Ok(())
         }
         let slotted_page = SlottedPage::try_from(page.unwrap())?;
-        self.print_page_traverse(context, slotted_page, 0, String::from(""), &mut file_writer, print_whole_db)
-       
+        self.print_page_traverse(
+            context,
+            slotted_page,
+            0,
+            String::from(""),
+            &mut file_writer,
+            print_whole_db,
+        )
     }
 
     fn print_page_traverse(
@@ -235,63 +246,99 @@ impl<P: PageManager> StorageEngine<P> {
         cell_index: u8,
         indent: String,
         file_writer: &mut BufWriter<&File>,
-        print_whole_db: bool
+        print_whole_db: bool,
     ) -> Result<(), Error> {
         let node: Node = slotted_page.get_value(cell_index)?;
 
         let val = match node.value() {
-            Ok(TrieValue::Account(acct)) => format!("nonce: {:?}, balance: {:?}", acct.nonce, acct.balance),
+            Ok(TrieValue::Account(acct)) => {
+                format!("nonce: {:?}, balance: {:?}", acct.nonce, acct.balance)
+            }
             Ok(TrieValue::Storage(strg)) => strg.to_string(),
-            _ => "".to_string()
+            _ => "".to_string(),
         };
 
         match node {
-            Node::AccountLeaf { prefix: _, nonce_rlp: _, balance_rlp: _, code_hash: _, storage_root } => {
+            Node::AccountLeaf {
+                prefix: _,
+                nonce_rlp: _,
+                balance_rlp: _,
+                code_hash: _,
+                storage_root,
+            } => {
                 let output_string = format!("{}Account leaf: {:?}\n", indent, val);
                 let _ = file_writer.write(&output_string.as_bytes());
                 let mut new_indent = indent.clone();
                 new_indent.push_str("\t");
 
                 if let Some(direct_child) = storage_root {
-                    self.print_page_traverse(context, slotted_page, direct_child.location().cell_index().unwrap(), new_indent, file_writer, print_whole_db)
+                    self.print_page_traverse(
+                        context,
+                        slotted_page,
+                        direct_child.location().cell_index().unwrap(),
+                        new_indent,
+                        file_writer,
+                        print_whole_db,
+                    )
                 } else {
                     let output_string = format!("{}No direct child\n", new_indent);
                     let _ = file_writer.write(&output_string.as_bytes());
                     return Ok(())
-                }   
-            },
+                }
+            }
 
             Node::Branch { prefix: _, children } => {
-                let output_string = format!("{}Branch, Page ID: {:?} \n", indent, slotted_page.id());
+                let output_string =
+                    format!("{}Branch, Page ID: {:?} \n", indent, slotted_page.id());
                 let _ = file_writer.write(&output_string.as_bytes());
                 for child in children {
                     if let Some(child_ptr) = child {
                         let mut new_indent = indent.clone();
                         new_indent.push_str("\t");
-                        
+
                         //check if child is on same page
                         if child_ptr.location().page_id().is_none() {
-                            let _ = self.print_page_traverse(context, slotted_page, child_ptr.location().cell_index().unwrap(), new_indent, file_writer, print_whole_db);
+                            let _ = self.print_page_traverse(
+                                context,
+                                slotted_page,
+                                child_ptr.location().cell_index().unwrap(),
+                                new_indent,
+                                file_writer,
+                                print_whole_db,
+                            );
                         } else {
                             if print_whole_db {
                                 let child_page_id = child_ptr.location().page_id().unwrap();
                                 let child_page = self.get_page(context, child_page_id)?;
-                                let output_string= format!("{}Child on new page: {:?}\n", new_indent, child_page_id);
+                                let output_string = format!(
+                                    "{}Child on new page: {:?}\n",
+                                    new_indent, child_page_id
+                                );
                                 let _ = file_writer.write(&output_string.as_bytes());
 
                                 let child_slotted_page = SlottedPage::try_from(child_page)?;
-                                let _ = self.print_page_traverse(context, child_slotted_page, 0, new_indent, file_writer, print_whole_db);
+                                let _ = self.print_page_traverse(
+                                    context,
+                                    child_slotted_page,
+                                    0,
+                                    new_indent,
+                                    file_writer,
+                                    print_whole_db,
+                                );
                             } else {
                                 let child_page_id = child_ptr.location().page_id().unwrap();
-                                let output_string= format!("{}Child on new page: {:?}\n", new_indent, child_page_id);
+                                let output_string = format!(
+                                    "{}Child on new page: {:?}\n",
+                                    new_indent, child_page_id
+                                );
                                 let _ = file_writer.write(&output_string.as_bytes());
                             }
                         }
-                    } 
+                    }
                 }
                 let _ = file_writer.flush();
                 return Ok(())
-            },
+            }
             Node::StorageLeaf { prefix: _, value_rlp: _ } => {
                 let output_string = format!("{}Storage leaf: {:?}\n", indent, val);
                 let _ = file_writer.write(&output_string.as_bytes());
