@@ -13,7 +13,7 @@ use crate::{
 
 use alloy_primitives::{Bytes, StorageValue, B256};
 use alloy_rlp::BytesMut;
-use alloy_trie::{nybbles::common_prefix_length, Nibbles, TrieMask};
+use alloy_trie::{nybbles, nybbles::common_prefix_length, Nibbles, TrieMask};
 
 use reth_trie_common::{MultiProof, StorageMultiProof};
 
@@ -73,7 +73,7 @@ impl<P: PageManager> StorageEngine<P> {
     fn get_value_with_proof_from_page(
         &self,
         context: &TransactionContext,
-        original_path: &Nibbles,
+        original_path_slice: &[u8],
         path_offset: usize,
         slotted_page: SlottedPage<'_>,
         page_index: u8,
@@ -82,16 +82,21 @@ impl<P: PageManager> StorageEngine<P> {
         let node: Node = slotted_page.get_value(page_index)?;
 
         let common_prefix_length =
-            common_prefix_length(&original_path[path_offset..], node.prefix());
+            nybbles::common_prefix_length(&original_path_slice[path_offset..], node.prefix());
         if common_prefix_length < node.prefix().len() {
             return Ok(None);
         }
 
         let proof_node = node.rlp_encode();
-        let full_node_path = original_path.slice(..path_offset);
+        let full_node_path = {
+            let mut fnp = Nibbles::with_capacity(path_offset);
+            fnp.extend_from_slice_unchecked(&original_path_slice[..path_offset]);
+            fnp
+        };
+
         proof.account_subtree.insert(full_node_path.clone(), Bytes::from(proof_node.to_vec()));
 
-        let remaining_path = original_path.slice(path_offset + common_prefix_length..);
+        let remaining_path = &original_path_slice[path_offset + common_prefix_length..];
         if remaining_path.is_empty() {
             return Ok(Some(node.value()?));
         }
@@ -127,7 +132,14 @@ impl<P: PageManager> StorageEngine<P> {
                             &mut storage_proof,
                         )?
                     };
-                    let account_path = original_path.slice(..path_offset + common_prefix_length);
+                    // let account_path = original_path.slice(..path_offset + common_prefix_length);
+                    let account_path = {
+                        let mut ap = Nibbles::with_capacity(path_offset + common_prefix_length);
+                        ap.extend_from_slice_unchecked(
+                            &original_path_slice[..path_offset + common_prefix_length],
+                        );
+                        ap
+                    };
                     proof.storages.insert(B256::from_slice(&account_path.pack()), storage_proof);
                     return Ok(storage_value);
                 }
@@ -142,7 +154,13 @@ impl<P: PageManager> StorageEngine<P> {
                     proof.branch_node_tree_masks.insert(full_node_path, Self::tree_mask(children));
                 } else {
                     // extension + branch
-                    let branch_path = original_path.slice(..path_offset + common_prefix_length);
+                    let branch_path = {
+                        let mut bp = Nibbles::with_capacity(path_offset + common_prefix_length);
+                        bp.extend_from_slice_unchecked(
+                            &original_path_slice[..path_offset + common_prefix_length],
+                        );
+                        bp
+                    };
                     let mut branch_rlp = BytesMut::new();
                     encode_branch(children, &mut branch_rlp);
                     proof.account_subtree.insert(branch_path.clone(), branch_rlp.freeze().into());
@@ -162,7 +180,7 @@ impl<P: PageManager> StorageEngine<P> {
                         if child_location.cell_index().is_some() {
                             self.get_value_with_proof_from_page(
                                 context,
-                                original_path,
+                                original_path_slice,
                                 new_path_offset,
                                 slotted_page,
                                 child_location.cell_index().unwrap(),
@@ -174,7 +192,7 @@ impl<P: PageManager> StorageEngine<P> {
                                 self.get_slotted_page(context, child_page_id)?;
                             self.get_value_with_proof_from_page(
                                 context,
-                                original_path,
+                                original_path_slice,
                                 new_path_offset,
                                 child_slotted_page,
                                 0,
@@ -192,7 +210,7 @@ impl<P: PageManager> StorageEngine<P> {
     fn get_storage_proof_from_page(
         &self,
         context: &TransactionContext,
-        original_path: &Nibbles,
+        original_path_slice: &[u8],
         path_offset: usize,
         slotted_page: SlottedPage<'_>,
         page_index: u8,
@@ -201,14 +219,16 @@ impl<P: PageManager> StorageEngine<P> {
         let node: Node = slotted_page.get_value(page_index)?;
 
         let common_prefix_length =
-            common_prefix_length(&original_path[path_offset..], node.prefix());
+            nybbles::common_prefix_length(&original_path_slice[path_offset..], node.prefix());
+
         if common_prefix_length < node.prefix().len() {
             return Ok(None);
         }
 
-        let remaining_path = original_path.slice(path_offset + common_prefix_length..);
+        let remaining_path = &original_path_slice[path_offset + common_prefix_length..];
         if remaining_path.is_empty() {
-            let full_node_path = original_path.slice(..path_offset);
+            let full_node_path =
+                Nibbles::from_vec_unchecked(original_path_slice[..path_offset].to_vec());
             let proof_node = node.rlp_encode();
             proof.subtree.insert(full_node_path, Bytes::from(proof_node.to_vec()));
             return Ok(Some(node.value()?));
@@ -219,7 +239,8 @@ impl<P: PageManager> StorageEngine<P> {
         match node {
             Branch { ref prefix, ref children, .. } => {
                 // update account subtree for branch node or branch+extension node
-                let full_node_path = original_path.slice(..path_offset);
+                let full_node_path =
+                    Nibbles::from_vec_unchecked(original_path_slice[..path_offset].to_vec());
                 let proof_node = node.rlp_encode();
                 proof.subtree.insert(full_node_path.clone(), Bytes::from(proof_node.to_vec()));
 
@@ -231,7 +252,9 @@ impl<P: PageManager> StorageEngine<P> {
                     proof.branch_node_tree_masks.insert(full_node_path, Self::tree_mask(children));
                 } else {
                     // extension + branch
-                    let branch_path = original_path.slice(..path_offset + common_prefix_length);
+                    let branch_path = Nibbles::from_vec_unchecked(
+                        original_path_slice[..path_offset + common_prefix_length].to_vec(),
+                    );
                     let mut branch_rlp = BytesMut::new();
                     encode_branch(children, &mut branch_rlp);
                     proof.subtree.insert(branch_path.clone(), branch_rlp.freeze().into());
@@ -250,7 +273,7 @@ impl<P: PageManager> StorageEngine<P> {
                         if child_location.cell_index().is_some() {
                             self.get_storage_proof_from_page(
                                 context,
-                                original_path,
+                                original_path_slice,
                                 new_path_offset,
                                 slotted_page,
                                 child_location.cell_index().unwrap(),
@@ -262,7 +285,7 @@ impl<P: PageManager> StorageEngine<P> {
                                 self.get_slotted_page(context, child_page_id)?;
                             self.get_storage_proof_from_page(
                                 context,
-                                original_path,
+                                original_path_slice,
                                 new_path_offset,
                                 child_slotted_page,
                                 0,
