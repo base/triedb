@@ -1,320 +1,226 @@
 use super::{PageError, PageId, PageManager};
 use crate::{
-    page::{Page, PageMut},
+    page::{page::PageHeader, OrphanListPage, OrphanListPageMut, Page, PageMut},
     snapshot::SnapshotId,
 };
 use alloy_primitives::B256;
-use std::{collections::VecDeque, fmt, iter::Peekable, mem, ops::Deref};
+use std::{iter, mem, num::NonZero, ops::Deref};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-#[repr(transparent)]
-#[derive(Copy, Clone)]
+#[repr(C, align(4096))]
+#[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Debug)]
+pub(super) struct RootPageData {
+    pub(super) header: PageHeader,
+    pub(super) state_root: [u8; 32],
+    pub(super) root_subtrie_page_id: PageId,
+    pub(super) max_page_number: PageId,
+    pub(super) orphaned_page_ids: [Option<NonZero<PageId>>; 1011],
+    pub(super) next: Option<NonZero<PageId>>,
+}
+
+#[derive(Copy, Clone, Debug)]
 pub struct RootPage<'p> {
-    page: Page<'p>,
+    pub(super) id: PageId,
+    pub(super) data: &'p RootPageData,
 }
 
-fn fmt_root_page(name: &str, p: &RootPage<'_>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    f.debug_struct(name)
-        .field("id", &p.id())
-        .field("state_root", &p.state_root())
-        .field("root_subtrie_page_id", &p.root_subtrie_page_id())
-        .field("max_page_number", &p.max_page_number())
-        .field("snapshot_id", &p.snapshot_id())
-        .finish()
+#[derive(Debug)]
+pub struct RootPageMut<'p> {
+    pub(super) id: PageId,
+    pub(super) data: &'p mut RootPageData,
 }
+
+// Compile-time assertion to verify that `RootPage` and `RootPageMut` have the same layout and
+// internal structure (and consequently that `RootPageMut` can be safely transmuted to `RootPage`).
+const _: () = {
+    use std::{alloc::Layout, mem::offset_of};
+
+    let ref_layout = Layout::new::<RootPage<'_>>();
+    let mut_layout = Layout::new::<RootPageMut<'_>>();
+    assert!(ref_layout.size() == mut_layout.size());
+    assert!(ref_layout.align() == mut_layout.align());
+
+    assert!(offset_of!(RootPage<'_>, id) == offset_of!(RootPageMut<'_>, id));
+    assert!(offset_of!(RootPage<'_>, data) == offset_of!(RootPageMut<'_>, data));
+};
 
 impl RootPage<'_> {
+    pub fn id(&self) -> PageId {
+        self.id
+    }
+
+    pub fn snapshot_id(&self) -> SnapshotId {
+        self.data.header.snapshot_id
+    }
+
     pub fn state_root(&self) -> B256 {
-        B256::from_slice(&self.page.contents()[0..32])
+        B256::from(self.data.state_root)
     }
 
     pub fn root_subtrie_page_id(&self) -> PageId {
-        PageId::from_le_bytes(
-            self.page.contents()[32..36].try_into().expect("subtrie page id is 4 bytes"),
-        )
+        self.data.root_subtrie_page_id
     }
 
     pub fn max_page_number(&self) -> PageId {
-        PageId::from_le_bytes(
-            self.page.contents()[36..40].try_into().expect("max page number is 4 bytes"),
-        )
+        self.data.max_page_number
     }
 
     pub fn get_orphaned_page_ids(
         &self,
         page_manager: &PageManager,
     ) -> Result<Vec<PageId>, PageError> {
-        // A "slot" can be thought of as a single orphan page_id which is 4 bytes.
-        // We start at slot 10 (byte index 40 == 10*4) because the root page contains metadata
-        // before the orphan list starts: state_root(32 bytes) + root_subtrie_page_number(4
-        // bytes) + max_page_number(4 bytes)
-        let current_slot_index = 10;
-        let mut orphan_page_ids = Vec::new();
+        let mut result = self
+            .data
+            .orphaned_page_ids
+            .iter()
+            .filter_map(|item| item.map(NonZero::get))
+            .collect::<Vec<PageId>>();
 
-        self.get_orphaned_page_ids_helper(
-            self.page.contents(),
-            current_slot_index,
-            &mut orphan_page_ids,
-            page_manager,
-        )?;
-
-        Ok(orphan_page_ids)
-    }
-
-    fn get_orphaned_page_ids_helper(
-        &self,
-        page_contents: &[u8],
-        mut current_slot_index: usize,
-        orphan_page_ids: &mut Vec<PageId>,
-        page_manager: &PageManager,
-    ) -> Result<(), PageError> {
-        let last_slot_index = (page_contents.len() / 4) - 1;
-
-        // Keep reading orphan page ids, across pages, until we encounter an orphan page id
-        // that is 0
-        loop {
-            let current_orphan_page_id_start_index = current_slot_index * 4;
-            let orphan_page_id = u32::from_le_bytes(
-                page_contents
-                    [current_orphan_page_id_start_index..current_orphan_page_id_start_index + 4]
-                    .try_into()
-                    .expect("orphan page id is 4 bytes"),
-            );
-
-            // orphan page id list is 0 terminated
-            if orphan_page_id == 0 {
-                return Ok(());
-            }
-
-            if current_slot_index == last_slot_index {
-                // the last slot is a special case that, if non-zero, indicates that the
-                // orphan list continues at the page id stored in the last slot.
-                let next_page = page_manager.get(self.snapshot_id(), orphan_page_id)?;
-                return self.get_orphaned_page_ids_helper(
-                    next_page.contents(),
-                    0,
-                    orphan_page_ids,
-                    page_manager,
-                );
-            }
-
-            orphan_page_ids.push(orphan_page_id);
-            current_slot_index += 1;
+        let mut next = self.data.next.map(NonZero::get);
+        while let Some(next_page_id) = next {
+            assert!(next_page_id >= 2, "orphan continuation page cannot be a root page");
+            let page = page_manager
+                .get(self.snapshot_id(), next_page_id)
+                .and_then(OrphanListPage::try_from)?;
+            result.extend(page.orphaned_page_ids());
+            next = page.next();
         }
+
+        Ok(result)
     }
 }
 
-impl<'p> Deref for RootPage<'p> {
-    type Target = Page<'p>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.page
-    }
-}
-
-impl fmt::Debug for RootPage<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_root_page("RootPage", self, f)
-    }
-}
-
-#[repr(transparent)]
-pub struct RootPageMut<'p> {
-    page: PageMut<'p>,
-}
-
-impl<'p> Deref for RootPageMut<'p> {
-    type Target = RootPage<'p>;
-
-    fn deref(&self) -> &Self::Target {
-        // SAFETY: `RootPage` uses `repr(transparent)`, thus `RootPage` and `Page` have the same
-        // layout.
-        unsafe { mem::transmute(&*self.page) }
-    }
-}
-
-impl<'p> RootPageMut<'p> {
-    pub fn new(
-        mut page: PageMut<'p>,
-        state_root: B256,
-        root_subtrie_page_id: PageId,
-        max_page_number: PageId,
-    ) -> Self {
-        let contents = page.contents_mut();
-        contents[0..32].copy_from_slice(state_root.as_slice());
-        contents[32..36].copy_from_slice(&root_subtrie_page_id.to_le_bytes());
-        contents[36..40].copy_from_slice(&max_page_number.to_le_bytes());
-
-        Self { page }
+impl RootPageMut<'_> {
+    pub fn set_state_root(&mut self, state_root: B256) {
+        self.data.state_root = state_root.into();
     }
 
-    pub fn add_orphaned_page_ids<'a>(
+    pub fn set_root_subtrie_page_id(&mut self, page_id: PageId) {
+        self.data.root_subtrie_page_id = page_id;
+    }
+
+    pub fn set_max_page_number(&mut self, page_id: PageId) {
+        self.data.max_page_number = page_id;
+    }
+
+    pub fn set_orphaned_page_ids<'a>(
         &mut self,
-        orphan_page_ids: impl IntoIterator<Item = &'a PageId>,
-        num_orphan_slots_used: usize,
+        new_orphan_page_ids: impl IntoIterator<Item = &'a PageId>,
         page_manager: &mut PageManager,
     ) -> Result<(), PageError> {
-        // A "slot" can be thought of as a single orphan page_id which is 4 bytes.
-        // We start at slot 10 (byte index 40 == 10*4) because the root page contains metadata
-        // before the orphan list starts: state_root(32 bytes) + root_subtrie_page_number(4
-        // bytes) + max_page_number(4 bytes)
-        let current_slot_index = 10;
+        let snapshot_id = self.snapshot_id();
+        let mut new_orphan_page_ids = new_orphan_page_ids.into_iter().copied().peekable();
 
-        // TODO: this can be optimized by storing the length of the on disk
-        // list when opening the database.
-        let original_list_on_disk = self.get_orphaned_page_ids(page_manager)?;
-        if num_orphan_slots_used >= original_list_on_disk.len() {
-            // all of our original orphan page ids on disk have been used.
-            // we need to write the entire current in-memory list to disk.
-            return Self::add_orphaned_page_ids_helper(
-                self.snapshot_id(),
-                &mut self.page,
-                current_slot_index,
-                orphan_page_ids.into_iter().peekable(),
-                page_manager,
-            );
+        // Place the orphan page IDs in this root first.
+        for (slot, page_id) in self
+            .data
+            .orphaned_page_ids
+            .iter_mut()
+            .zip((&mut new_orphan_page_ids).chain(iter::repeat(0)))
+        {
+            *slot = NonZero::new(page_id);
         }
 
-        // assuming a FIFO strategy from the orphan manager, the end of our list
-        // should contain new elements if there are any. By rotating them to the
-        // front of the list, we can minimize the number of elements we actually
-        // have to write to disk.
-        //
-        // (e.g):
-        // 1. on_disk: [1, 2, 3, 4, 5]
-        // 2. 2 orphan pages are used: [3, 4, 5]
-        // 3. 2 new orphan pages come in [3, 4, 5, 6, 7]
-        // 4. Rotate right by 2: [6, 7, 3, 4, 5]
-        // 5. When we write to disk only the first 2 slots change
-        let mut deq: VecDeque<PageId> = VecDeque::from_iter(orphan_page_ids.into_iter().copied());
-        deq.rotate_right(num_orphan_slots_used % deq.len());
-        Self::add_orphaned_page_ids_helper(
-            self.snapshot_id(),
-            &mut self.page,
-            current_slot_index,
-            deq.iter().peekable(),
-            page_manager,
-        )
-    }
+        let mut current_page_id = self.id();
+        let mut next_page_pointer = &mut self.data.next;
 
-    fn add_orphaned_page_ids_helper<'a, I>(
-        snapshot_id: SnapshotId,
-        page: &mut PageMut<'_>,
-        mut current_slot_index: usize,
-        mut orphan_page_ids: Peekable<I>,
-        page_manager: &mut PageManager,
-    ) -> Result<(), PageError>
-    where
-        I: Iterator<Item = &'a PageId>,
-    {
-        let current_page_id = page.id();
-        let page_contents = page.contents_mut();
-        let last_slot_index = (page_contents.len() / 4) - 1;
+        // If not all orphan page IDs could fit in the root page, use additional orphan list pages.
+        while new_orphan_page_ids.peek().is_some() {
+            let orphan_list_page = if let Some(next_page_id) = next_page_pointer {
+                // Reuse the orphan list page that was previously used.
+                page_manager.get_mut(snapshot_id, next_page_id.get())?
+            } else if current_page_id < 255 {
+                // Pages from 2 to 255 are reserved for orphan list pages, so use one of that if
+                // possible.
+                //
+                // TODO: This is currently unsafe and unsound, as this may overwrite a page that is
+                // still referenced by the other root page.
+                let next_page_id = (current_page_id + 1).max(2);
+                page_manager.get_mut(snapshot_id, next_page_id)?
+            } else {
+                // Not enough pages in the range 2..255; need to allocate a new one.
+                //
+                // TODO: This can leak pages, because if this page is no longer needed in the
+                // future, it won't be tracked by the orphan manager.
+                page_manager.allocate(snapshot_id)?
+            };
 
-        while orphan_page_ids.peek().is_some() {
-            let current_orphan_page_id_start_index = current_slot_index * 4;
-            let current_orphan_page_id = u32::from_le_bytes(
-                page_contents
-                    [current_orphan_page_id_start_index..current_orphan_page_id_start_index + 4]
-                    .try_into()
-                    .expect("orphan page id is 4 bytes"),
-            );
+            current_page_id = orphan_list_page.id();
+            debug_assert!(current_page_id >= 2);
 
-            if current_slot_index == last_slot_index {
-                // the last slot is a special case that, if non-zero, indicates that the
-                // orphan list continues at the page id stored in the last slot.
-
-                let mut next_page: PageMut<'p>;
-
-                if current_orphan_page_id == 0 {
-                    // we are at the end of the orphan list on disk but we have more elements
-                    // to add. We need to create a new page or use a reserved page and
-                    // write the new page's page id into the last slot of the current page.
-                    if current_page_id >= 255 {
-                        // Pages 2-255 are reserved for the orphan page list, but if we have
-                        // more orphan page ids than the reserved section can hold, we need
-                        // to allocate a new page and continue the list there
-                        next_page = page_manager.allocate(snapshot_id)?;
-                    } else {
-                        // we must be in the "reserved" section (pages 2-255).
-                        // move on to the next reserved page
-                        let mut next_reserved_page = current_page_id + 1;
-                        if next_reserved_page == 1 {
-                            // special case where we are currently at root page 0,
-                            // then the next page to continue the orphan page list
-                            // is page id 2 (not 1)
-                            next_reserved_page += 1
-                        }
-                        next_page = page_manager.get_mut(snapshot_id, next_reserved_page)?;
-                    }
-
-                    // Write the next_page page's id into the last slot of the current page,
-                    // signaling that the list continues at the written page number.
-                    page_contents[current_orphan_page_id_start_index..
-                        current_orphan_page_id_start_index + 4]
-                        .copy_from_slice(&next_page.id().to_le_bytes());
-                } else {
-                    // the last slot is populated with a page id. we need to continue adding
-                    // elements there
-                    next_page = page_manager.get_mut(snapshot_id, current_orphan_page_id)?;
-                }
-
-                return Self::add_orphaned_page_ids_helper(
-                    snapshot_id,
-                    &mut next_page,
-                    0,
-                    orphan_page_ids,
-                    page_manager,
-                );
+            // Place the next chunk of orphan page IDs in this page.
+            let orphan_list_page = OrphanListPageMut::try_from(orphan_list_page)?;
+            for (slot, page_id) in orphan_list_page
+                .data
+                .orphaned_page_ids
+                .iter_mut()
+                .zip((&mut new_orphan_page_ids).chain(iter::repeat(0)))
+            {
+                *slot = NonZero::new(page_id);
             }
 
-            let orphan_page_id_to_write = orphan_page_ids.next().expect("value should be present");
-            page_contents
-                [current_orphan_page_id_start_index..current_orphan_page_id_start_index + 4]
-                .copy_from_slice(&orphan_page_id_to_write.to_le_bytes());
-
-            current_slot_index += 1;
+            // Connect this page to the previous one.
+            *next_page_pointer = NonZero::new(current_page_id);
+            next_page_pointer = &mut orphan_list_page.data.next;
         }
 
-        // We are done writing. Explicity set the next slot to 0 to
-        // mark the end of the list.
-        //
-        // Note: it should be safe to always write the next slot at this point since our
-        // last orphan page id write should always at least be before the last slot index.
-        let current_orphan_page_id_start_index = current_slot_index * 4;
-        page_contents[current_orphan_page_id_start_index..current_orphan_page_id_start_index + 4]
-            .copy_from_slice(&0_u32.to_le_bytes());
-
+        *next_page_pointer = None;
         Ok(())
     }
 }
 
-impl fmt::Debug for RootPageMut<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_root_page("RootPageMut", self, f)
+impl<'a> TryFrom<Page<'a>> for RootPage<'a> {
+    type Error = PageError;
+
+    fn try_from(page: Page<'a>) -> Result<Self, Self::Error> {
+        let Page { id, data } = page;
+        if id > 1 {
+            return Err(PageError::InvalidPageId(id));
+        }
+
+        let data = zerocopy::transmute_ref!(data);
+        Ok(Self { id, data })
     }
 }
 
-impl<'p> TryFrom<Page<'p>> for RootPage<'p> {
+impl<'a> TryFrom<PageMut<'a>> for RootPageMut<'a> {
     type Error = PageError;
 
-    fn try_from(page: Page<'p>) -> Result<Self, Self::Error> {
-        if page.id() > 1 {
-            return Err(PageError::InvalidRootPage(page.id()));
+    fn try_from(page: PageMut<'a>) -> Result<Self, Self::Error> {
+        let PageMut { id, data } = page;
+        if id > 1 {
+            return Err(PageError::InvalidPageId(id));
         }
 
-        Ok(Self { page })
+        let data = zerocopy::transmute_mut!(data);
+        Ok(Self { id, data })
     }
 }
 
-impl<'p> TryFrom<PageMut<'p>> for RootPageMut<'p> {
-    type Error = PageError;
+impl<'a> From<RootPage<'a>> for Page<'a> {
+    fn from(page: RootPage<'a>) -> Self {
+        let RootPage { id, data } = page;
+        let data = zerocopy::transmute_ref!(data);
+        Self { id, data }
+    }
+}
 
-    fn try_from(page: PageMut<'p>) -> Result<Self, Self::Error> {
-        if page.id() > 1 {
-            return Err(PageError::InvalidRootPage(page.id()));
-        }
+impl<'a> From<RootPageMut<'a>> for PageMut<'a> {
+    fn from(page: RootPageMut<'a>) -> Self {
+        let RootPageMut { id, data } = page;
+        let data = zerocopy::transmute_mut!(data);
+        Self { id, data }
+    }
+}
 
-        Ok(Self { page })
+impl<'a> Deref for RootPageMut<'a> {
+    type Target = RootPage<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: `Page` and `PageMut` have the same layout and representation. This transmutation
+        // has the only effect of downcasting a mutable reference to an immutable reference, which
+        // is safe.
+        unsafe { mem::transmute(self) }
     }
 }
 
@@ -329,15 +235,15 @@ mod tests {
         // GIVEN: a root page with orphan ids
         let mut page_manager = PageManager::new_anon(20, 0).unwrap();
         let page = page_manager.allocate(42).unwrap();
-        let mut root_page = RootPageMut::new(page, B256::default(), 0, 0);
-        let my_orphan_page_ids: &[PageId] = &[2, 3, 4, 5, 6, 7, 8, 9, 10];
-        root_page.add_orphaned_page_ids(my_orphan_page_ids, 0, &mut page_manager).unwrap();
+        let mut root_page = RootPageMut::try_from(page).unwrap();
+        let my_orphan_page_ids = [2, 3, 4, 5, 6, 7, 8, 9, 10];
+        root_page.set_orphaned_page_ids(&my_orphan_page_ids, &mut page_manager).unwrap();
 
         // WHEN: the list of orphan ids are requested
         let orphan_page_ids = root_page.get_orphaned_page_ids(&page_manager).unwrap();
 
         // THEN: the returned list of orphan page ids should match the original list
-        assert_eq!(my_orphan_page_ids.to_vec(), orphan_page_ids);
+        assert_eq!(&my_orphan_page_ids[..], &orphan_page_ids);
     }
 
     #[test]
@@ -345,7 +251,7 @@ mod tests {
         // GIVEN: a root page with no orphan ids
         let mut page_manager = PageManager::new_anon(20, 0).unwrap();
         let page = page_manager.allocate(42).unwrap();
-        let root_page = RootPageMut::new(page, B256::default(), 0, 0);
+        let root_page = RootPageMut::try_from(page).unwrap();
 
         // WHEN: the list of orphan ids are requested
         let orphan_page_ids = root_page.get_orphaned_page_ids(&page_manager).unwrap();
@@ -363,12 +269,12 @@ mod tests {
         let mut page2 = page_manager.allocate(42).unwrap();
         let mut my_orphan_page_ids: Vec<PageId> = Vec::new();
 
-        let mut root_page = RootPageMut::new(page0, B256::default(), 0, 0);
+        let mut root_page = RootPageMut::try_from(page0).unwrap();
         // we should be able to store MAX_ORPHANS orphan page ids in a root page.
         // the last 4 bytes of the root page will be the next page id containing
         // the remainder of the list of orphan page ids
-        let orphan_page_ids = (1..MAX_ORPHANS + 1).map(|x| x as u32).collect::<Vec<PageId>>();
-        root_page.add_orphaned_page_ids(&orphan_page_ids, 0, &mut page_manager).unwrap();
+        let orphan_page_ids = (1..MAX_ORPHANS as PageId + 1).collect::<Vec<PageId>>();
+        root_page.set_orphaned_page_ids(&orphan_page_ids, &mut page_manager).unwrap();
         for i in orphan_page_ids {
             my_orphan_page_ids.push(i);
         }
@@ -397,124 +303,12 @@ mod tests {
     }
 
     #[test]
-    fn test_add_replaces_used_slots() {
-        // GIVEN: a root page with a list of orphan page ids
-        let mut page_manager = PageManager::new_anon(20, 0).unwrap();
-        let page = page_manager.allocate(42).unwrap();
-        let mut root_page = RootPageMut::new(page, B256::default(), 0, 0);
-        let my_orphan_page_ids: &[PageId] = &[1, 2, 3, 4, 5, 6, 7, 8, 9];
-        root_page
-            .add_orphaned_page_ids(&my_orphan_page_ids.to_vec(), 0, &mut page_manager)
-            .unwrap();
-
-        // WHEN: The first 2 orphan page ids are used for new pages, and 2 new pages
-        // are orphaned
-        let num_orphan_slots_used = 2;
-        root_page
-            .add_orphaned_page_ids(
-                &[3, 4, 5, 6, 7, 8, 9, 10, 11].to_vec(),
-                num_orphan_slots_used,
-                &mut page_manager,
-            )
-            .unwrap();
-
-        // THEN: the first 2 "free" slots should be used to store the new orphan page ids
-        let orphan_page_ids = root_page.get_orphaned_page_ids(&page_manager).unwrap();
-        let expected_orphan_page_ids: &[PageId] = &[10, 11, 3, 4, 5, 6, 7, 8, 9];
-        assert_eq!(orphan_page_ids, expected_orphan_page_ids);
-    }
-
-    #[test]
-    fn test_add_replaces_used_slots_across_pages() {
-        // GIVEN: a root page with a list of orphan page ids spanning 2 pages
-        let mut page_manager = PageManager::new_anon(20, 0).unwrap();
-        let page = page_manager.allocate(42).unwrap();
-        let mut root_page = RootPageMut::new(page, B256::default(), 0, 0);
-
-        // page 0 allocated. our pages for this test will spill into page 2
-        // so allocate at least 2 more pages.
-        for _ in 1..3 {
-            page_manager.allocate(42).unwrap();
-        }
-
-        let mut my_orphan_page_ids: VecDeque<PageId> =
-            VecDeque::from((1..2001).map(|x| x as PageId).collect::<Vec<PageId>>());
-        root_page.add_orphaned_page_ids(&my_orphan_page_ids, 0, &mut page_manager).unwrap();
-
-        // WHEN: The first 1050 orphan page ids are popped and 1050 new orphan page ids come in
-        let num_orphan_slots_used = 1050;
-        for _ in 0..num_orphan_slots_used {
-            my_orphan_page_ids.pop_front();
-        }
-
-        for i in 2000..3050 {
-            my_orphan_page_ids.push_back(i);
-        }
-
-        root_page
-            .add_orphaned_page_ids(&my_orphan_page_ids, num_orphan_slots_used, &mut page_manager)
-            .unwrap();
-
-        // THEN: the first 1050 "free" slots should be used to store the new orphan page ids
-        let mut expected_orphan_page_ids: Vec<PageId> = (2000..3050).map(|x| x as PageId).collect();
-        let mut remainder: Vec<PageId> = (1051..2001).map(|x| x as PageId).collect();
-        expected_orphan_page_ids.append(&mut remainder);
-        let orphan_page_ids = root_page.get_orphaned_page_ids(&page_manager).unwrap();
-        assert_eq!(orphan_page_ids, expected_orphan_page_ids);
-    }
-
-    #[test]
-    fn test_add_replaces_used_slots_and_adds_to_end() {
-        // GIVEN: a root page with a list of orphan page ids spanning 2 pages
-        let mut page_manager = PageManager::new_anon(20, 0).unwrap();
-        let page = page_manager.allocate(42).unwrap();
-        let mut root_page = RootPageMut::new(page, B256::default(), 0, 0);
-
-        // page 0 allocated. our pages for this test will spill into page 2
-        // so allocate at least 2 more pages.
-        for _ in 1..4 {
-            page_manager.allocate(42).unwrap();
-        }
-
-        let mut my_orphan_page_ids: VecDeque<PageId> =
-            VecDeque::from((1..2001).map(|x| x as PageId).collect::<Vec<PageId>>());
-        root_page.add_orphaned_page_ids(&my_orphan_page_ids, 0, &mut page_manager).unwrap();
-
-        // WHEN: The first 20 orphan page ids are popped off and used for new pages, and 100 new
-        // pages are orphaned
-        let num_orphan_slots_used = 20;
-        for _ in 0..num_orphan_slots_used {
-            my_orphan_page_ids.pop_front();
-        }
-
-        // adds 100 new orphan page ids
-        for i in 2000..2100 {
-            my_orphan_page_ids.push_back(i);
-        }
-
-        root_page
-            .add_orphaned_page_ids(&my_orphan_page_ids, num_orphan_slots_used, &mut page_manager)
-            .unwrap();
-
-        // THEN: the first 20 "free" slots should be used to store the new orphan page ids and
-        // the rest should be added to the end of the list
-        //
-        // the first 20 elements should match the last 20 elements of the new page ids id
-
-        let mut expected_orphan_page_ids = my_orphan_page_ids.clone();
-        expected_orphan_page_ids.rotate_right(num_orphan_slots_used);
-
-        let orphan_page_ids = root_page.get_orphaned_page_ids(&page_manager).unwrap();
-        assert_eq!(orphan_page_ids, Vec::from(expected_orphan_page_ids));
-    }
-
-    #[test]
     fn test_root_0_doesnt_spill_into_root_1() {
         // GIVEN: 2 root pages
         let mut page_manager = PageManager::new_anon(257, 0).unwrap();
         let page0 = page_manager.allocate(42).unwrap();
         assert_eq!(page0.id(), 0);
-        let mut root_page = RootPageMut::new(page0, B256::default(), 0, 0);
+        let mut root_page = RootPageMut::try_from(page0).unwrap();
 
         let page1 = page_manager.allocate(42).unwrap();
         assert_eq!(page1.id(), 1);
@@ -528,8 +322,8 @@ mod tests {
         // WHEN: Root page 0 is filled with more orphan page ids than it can hold
         //
         // The root page can hold MAX_ORPHANS orphan page ids
-        let expected_orphan_page_ids: Vec<PageId> = (1..2000).map(|x| x as PageId).collect();
-        root_page.add_orphaned_page_ids(&expected_orphan_page_ids, 0, &mut page_manager).unwrap();
+        let expected_orphan_page_ids: Vec<PageId> = (1..2000).collect();
+        root_page.set_orphaned_page_ids(&expected_orphan_page_ids, &mut page_manager).unwrap();
 
         // THEN: Page 1 should not be changed at all
         assert_eq!(page1.contents(), [0; Page::DATA_SIZE]);
@@ -539,41 +333,43 @@ mod tests {
     fn test_orphan_list_writes_reserved_pages() {
         // GIVEN: 2 root pages with PageId 0 and PageId 1
         let mut page_manager = PageManager::new_anon(20, 0).unwrap();
-        let page0 = page_manager.allocate(42).unwrap();
-        assert_eq!(page0.id(), 0);
-        let mut root_page = RootPageMut::new(page0, B256::default(), 0, 0);
+        let mut root_page = page_manager.allocate(42).and_then(RootPageMut::try_from).unwrap();
+        assert_eq!(root_page.id(), 0);
 
         let page1 = page_manager.allocate(42).unwrap();
         assert_eq!(page1.id(), 1);
 
-        let first_reserved_page_for_orphan_ids = page_manager.allocate(42).unwrap();
+        let first_reserved_page_for_orphan_ids =
+            page_manager.allocate(42).and_then(OrphanListPageMut::try_from).unwrap();
         assert_eq!(first_reserved_page_for_orphan_ids.id(), 2);
 
         // WHEN: The remainder of the root page is maxed out with orphan page ids
-        let orphan_page_ids = (1..MAX_ORPHANS + 1).map(|x| x as PageId).collect::<Vec<PageId>>();
-        root_page.add_orphaned_page_ids(&orphan_page_ids, 0, &mut page_manager).unwrap();
+        let orphan_page_ids = (1..MAX_ORPHANS as PageId + 1).collect::<Vec<PageId>>();
+        root_page.set_orphaned_page_ids(&orphan_page_ids, &mut page_manager).unwrap();
 
         // THEN: Adding more orphan page ids should spill over to page 2
-        let my_orphan_page_ids_for_page_2: &[PageId] = &[1012, 1013, 1014, 1015];
-        let total_new_page_ids: Vec<PageId> =
-            orphan_page_ids.iter().chain(my_orphan_page_ids_for_page_2.iter()).copied().collect();
-        root_page.add_orphaned_page_ids(&total_new_page_ids, 0, &mut page_manager).unwrap();
+        let my_orphan_page_ids_for_page_2 = [1012, 1013, 1014, 1015];
+        let total_new_page_ids = orphan_page_ids.iter().chain(&my_orphan_page_ids_for_page_2);
+        root_page.set_orphaned_page_ids(total_new_page_ids, &mut page_manager).unwrap();
 
-        let mut orphan_page_ids_page_2 = Vec::new();
-        root_page
-            .get_orphaned_page_ids_helper(
-                first_reserved_page_for_orphan_ids.contents(),
-                0,
-                &mut orphan_page_ids_page_2,
-                &page_manager,
-            )
-            .unwrap();
+        assert_eq!(
+            &root_page.data.orphaned_page_ids[..],
+            orphan_page_ids.iter().copied().map(NonZero::new).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            &first_reserved_page_for_orphan_ids.data.orphaned_page_ids[..4],
+            my_orphan_page_ids_for_page_2.iter().copied().map(NonZero::new).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            &first_reserved_page_for_orphan_ids.data.orphaned_page_ids[4..],
+            std::iter::repeat_n(None, 1017).collect::<Vec<_>>()
+        );
 
-        assert_eq!(orphan_page_ids_page_2, my_orphan_page_ids_for_page_2);
+        assert_eq!(root_page.data.next, NonZero::new(first_reserved_page_for_orphan_ids.id()));
+        assert_eq!(first_reserved_page_for_orphan_ids.data.next, None);
 
         let orphan_page_ids = root_page.get_orphaned_page_ids(&page_manager).unwrap();
-        let expected_orphan_page_ids: Vec<PageId> = (1..1016).map(|x| x as PageId).collect();
-        assert_eq!(orphan_page_ids, expected_orphan_page_ids);
+        assert_eq!(orphan_page_ids, (1..=1015).collect::<Vec<_>>());
     }
 
     #[test]
@@ -582,7 +378,7 @@ mod tests {
         let mut page_manager = PageManager::new_anon(257, 0).unwrap();
         let page = page_manager.allocate(42).unwrap();
         assert_eq!(page.id(), 0);
-        let mut root_page = RootPageMut::new(page, B256::default(), 0, 0);
+        let mut root_page = RootPageMut::try_from(page).unwrap();
 
         // page 0 allocated. allocate 255 more pages
         for _ in 1..256 {
@@ -595,8 +391,8 @@ mod tests {
         // can hold 1021 (remember the last 4 bytes are reserved for the next page id
         // and the first 8 bytes are the header).
         // So total orphan pages is MAX_ORPHANS + (1021 * 254) == 260345
-        let expected_orphan_page_ids: Vec<PageId> = (1..260346).map(|x| x as PageId).collect();
-        root_page.add_orphaned_page_ids(&expected_orphan_page_ids, 0, &mut page_manager).unwrap();
+        let expected_orphan_page_ids: Vec<PageId> = (1..260346).collect();
+        root_page.set_orphaned_page_ids(&expected_orphan_page_ids, &mut page_manager).unwrap();
 
         // THEN: Adding more orphan page ids should spill over to page 256, which
         // should only be allocated when the new orphan page ids are added
@@ -611,7 +407,7 @@ mod tests {
             .chain(my_orphan_page_ids_for_page_256.iter())
             .copied()
             .collect();
-        root_page.add_orphaned_page_ids(&total_new_page_ids, 0, &mut page_manager).unwrap();
+        root_page.set_orphaned_page_ids(&total_new_page_ids, &mut page_manager).unwrap();
 
         let page_256 = page_manager.get(42, 256 as PageId).unwrap();
         let page_256_contents = page_256.contents();
@@ -630,7 +426,7 @@ mod tests {
         let mut page_manager = PageManager::new_anon(257, 0).unwrap();
         let page = page_manager.allocate(42).unwrap();
         assert_eq!(page.id(), 0);
-        let mut root_page = RootPageMut::new(page, B256::default(), 0, 0);
+        let mut root_page = RootPageMut::try_from(page).unwrap();
 
         // page 0 allocated. allocate 255 more pages
         for _ in 1..256 {
@@ -644,17 +440,10 @@ mod tests {
         // can hold 1021 (remember the last 4 bytes are reserved for the next page id
         // and the first 8 bytes are the header).
         // So total orphan pages is MAX_ORPHANS + (1021 * 254) == 260345
-        let expected_orphan_page_ids: Vec<PageId> = (1..260346).map(|x| x as PageId).collect();
-        root_page.add_orphaned_page_ids(&expected_orphan_page_ids, 0, &mut page_manager).unwrap();
+        let expected_orphan_page_ids: Vec<PageId> = (1..260346).collect();
+        root_page.set_orphaned_page_ids(&expected_orphan_page_ids, &mut page_manager).unwrap();
 
-        let empty_new_orphan_ids = Vec::new();
-        root_page
-            .add_orphaned_page_ids(
-                &empty_new_orphan_ids,
-                expected_orphan_page_ids.len(),
-                &mut page_manager,
-            )
-            .unwrap();
+        root_page.set_orphaned_page_ids(&[], &mut page_manager).unwrap();
 
         // THEN: No orphan ids should be returned
         let orphan_page_ids = root_page.get_orphaned_page_ids(&page_manager).unwrap();
@@ -666,16 +455,13 @@ mod tests {
         // GIVEN: a root page with orphan ids
         let mut page_manager = PageManager::new_anon(20, 0).unwrap();
         let page = page_manager.allocate(42).unwrap();
-        let mut root_page = RootPageMut::new(page, B256::default(), 0, 0);
+        let mut root_page = RootPageMut::try_from(page).unwrap();
         let my_orphan_page_ids: &[PageId] = &[2, 3, 4, 5, 6, 7, 8, 9, 10];
-        root_page.add_orphaned_page_ids(my_orphan_page_ids, 0, &mut page_manager).unwrap();
+        root_page.set_orphaned_page_ids(my_orphan_page_ids, &mut page_manager).unwrap();
 
         // WHEN: more than half of the list is "given out"
-        let num_orphan_slots_used = 6;
         let orphan_page_ids_left = &[8, 9, 10];
-        root_page
-            .add_orphaned_page_ids(orphan_page_ids_left, num_orphan_slots_used, &mut page_manager)
-            .unwrap();
+        root_page.set_orphaned_page_ids(orphan_page_ids_left, &mut page_manager).unwrap();
 
         // THEN: vecdeque rotate_right should not panic given that the num_orphan_slots_used is
         // greater than the new list to add.

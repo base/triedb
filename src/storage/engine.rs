@@ -1656,22 +1656,13 @@ impl Inner {
             .unwrap();
         page_mut.set_snapshot_id(context.metadata.snapshot_id);
         // TODO: include the remaining metadata in the new root page.
-        let mut new_root_page = RootPageMut::new(
-            page_mut,
-            context.metadata.state_root,
-            context.metadata.root_subtrie_page_id,
-            context.metadata.max_page_number,
-        );
+        let mut new_root_page = RootPageMut::try_from(page_mut)?;
+        new_root_page.set_state_root(context.metadata.state_root);
+        new_root_page.set_root_subtrie_page_id(context.metadata.root_subtrie_page_id);
+        new_root_page.set_max_page_number(context.metadata.max_page_number);
         let orphaned_page_ids = self.orphan_manager.iter().copied().collect::<Vec<PageId>>();
-        let num_orphan_pages_used = self.orphan_manager.get_num_orphan_pages_used();
         self.orphan_manager.reset_num_orphan_pages_used();
-        new_root_page
-            .add_orphaned_page_ids(
-                &orphaned_page_ids,
-                num_orphan_pages_used,
-                &mut self.page_manager,
-            )
-            .unwrap();
+        new_root_page.set_orphaned_page_ids(&orphaned_page_ids, &mut self.page_manager).unwrap();
 
         // Second commit to ensure the new root page is written to disk.
         self.page_manager.commit(context.metadata.snapshot_id)?;

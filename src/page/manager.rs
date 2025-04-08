@@ -11,7 +11,7 @@ pub type PageId = u32;
 pub enum PageError {
     PageNotFound(PageId),
     OutOfBounds(PageId),
-    InvalidRootPage(PageId),
+    InvalidPageId(PageId),
     InvalidCellPointer,
     NoFreeCells,
     PageIsFull,

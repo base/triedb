@@ -1,5 +1,5 @@
 use crate::{page::PageId, snapshot::SnapshotId};
-use std::{fmt, mem, ops::Deref};
+use std::{mem, ops::Deref};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 // In order to support zero-copy access to the on-disk data, and to ensure the same serialization
@@ -10,28 +10,28 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 compile_error!("This code only supports little-endian platforms");
 
 #[repr(C)]
-#[derive(FromBytes, IntoBytes, Immutable, KnownLayout)]
-struct PageHeader {
-    snapshot_id: SnapshotId,
+#[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Debug)]
+pub(super) struct PageHeader {
+    pub(super) snapshot_id: SnapshotId,
 }
 
 #[repr(C, align(4096))]
-#[derive(FromBytes, IntoBytes, Immutable, KnownLayout)]
-struct PageData {
+#[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Debug)]
+pub(super) struct PageData {
     header: PageHeader,
     contents: [u8; Page::DATA_SIZE],
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct Page<'p> {
-    id: PageId,
-    data: &'p PageData,
+    pub(super) id: PageId,
+    pub(super) data: &'p PageData,
 }
 
+#[derive(Debug)]
 pub struct PageMut<'p> {
-    #[allow(dead_code)]
-    id: PageId,
-    data: &'p mut PageData,
+    pub(super) id: PageId,
+    pub(super) data: &'p mut PageData,
 }
 
 // Compile-time assertion to verify that `PageData` and `PageHeader` have the expected size,
@@ -63,14 +63,6 @@ const _: () = {
     assert!(offset_of!(Page<'_>, data) == offset_of!(PageMut<'_>, data));
 };
 
-fn fmt_page(name: &str, p: &Page<'_>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    f.debug_struct(name)
-        .field("id", &p.id())
-        .field("data", &"[...]")
-        .field("snapshot_id", &p.snapshot_id())
-        .finish()
-}
-
 impl<'p> Page<'p> {
     pub const SIZE: usize = 4096;
     pub const HEADER_SIZE: usize = 8;
@@ -98,12 +90,6 @@ impl<'p> Page<'p> {
     /// Returns the contents of the page without the header
     pub fn contents(&self) -> &[u8] {
         &self.data.contents
-    }
-}
-
-impl fmt::Debug for Page<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_page("Page", self, f)
     }
 }
 
@@ -147,12 +133,6 @@ impl<'p> Deref for PageMut<'p> {
         // has the only effect of downcasting a mutable reference to an immutable reference, which
         // is safe.
         unsafe { mem::transmute(self) }
-    }
-}
-
-impl fmt::Debug for PageMut<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_page("PageMut", self, f)
     }
 }
 
