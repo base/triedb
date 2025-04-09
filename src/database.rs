@@ -1,7 +1,7 @@
 use crate::{
     context::TransactionContext,
     metrics::DatabaseMetrics,
-    page::{MmapPageManager, OrphanPageManager, PageError, PageId, PageManager, RootPage},
+    page::{OrphanPageManager, PageError, PageId, PageManager, RootPage},
     snapshot::SnapshotId,
     storage::engine::{self, StorageEngine},
     transaction::{Transaction, TransactionError, TransactionManager, RO, RW},
@@ -11,15 +11,15 @@ use alloy_trie::EMPTY_ROOT_HASH;
 use std::sync::RwLock;
 
 #[derive(Debug)]
-pub struct Database<P: PageManager> {
-    pub(crate) inner: Inner<P>,
+pub struct Database {
+    pub(crate) inner: Inner,
     metrics: DatabaseMetrics,
 }
 
 #[derive(Debug)]
-pub(crate) struct Inner<P: PageManager> {
+pub(crate) struct Inner {
     pub(crate) metadata: RwLock<Metadata>,
-    pub(crate) storage_engine: RwLock<StorageEngine<P>>,
+    pub(crate) storage_engine: RwLock<StorageEngine>,
     pub(crate) transaction_manager: RwLock<TransactionManager>,
 }
 
@@ -50,10 +50,10 @@ pub enum Error {
     CloseError(engine::Error),
 }
 
-impl Database<MmapPageManager> {
+impl Database {
     pub fn create(file_path: &str) -> Result<Self, Error> {
         // TODO: handle the case where the file already exists.
-        let mut page_manager = MmapPageManager::open(file_path).map_err(Error::PageError)?;
+        let mut page_manager = PageManager::open(file_path).map_err(Error::PageError)?;
         // allocate the first 256 pages for the root, orphans, and root subtrie
         page_manager.resize(1000).map_err(Error::PageError)?;
         for i in 0..256 {
@@ -80,7 +80,7 @@ impl Database<MmapPageManager> {
     }
 
     pub fn open(file_path: &str) -> Result<Self, Error> {
-        let page_manager = MmapPageManager::open(file_path).map_err(Error::PageError)?;
+        let page_manager = PageManager::open(file_path).map_err(Error::PageError)?;
 
         let root_page_0 = page_manager.get(0, 0).map_err(Error::PageError)?;
         let root_page_1 = page_manager.get(0, 1).map_err(Error::PageError)?;
@@ -107,14 +107,14 @@ impl Database<MmapPageManager> {
     }
 }
 
-impl<P: PageManager> Drop for Database<P> {
+impl Drop for Database {
     fn drop(&mut self) {
         self.shrink_and_commit().expect("failed to close database")
     }
 }
 
-impl<P: PageManager> Database<P> {
-    pub fn new(metadata: Metadata, storage_engine: StorageEngine<P>) -> Self {
+impl Database {
+    pub fn new(metadata: Metadata, storage_engine: StorageEngine) -> Self {
         Self {
             inner: Inner {
                 metadata: RwLock::new(metadata),
@@ -125,7 +125,7 @@ impl<P: PageManager> Database<P> {
         }
     }
 
-    pub fn begin_rw(&self) -> Result<Transaction<'_, RW, P>, TransactionError> {
+    pub fn begin_rw(&self) -> Result<Transaction<'_, RW>, TransactionError> {
         let mut transaction_manager = self.inner.transaction_manager.write().unwrap();
         let storage_engine = self.inner.storage_engine.read().unwrap();
         let metadata = self.inner.metadata.read().unwrap().next();
@@ -137,7 +137,7 @@ impl<P: PageManager> Database<P> {
         Ok(Transaction::new(context, self, None))
     }
 
-    pub fn begin_ro(&self) -> Result<Transaction<'_, RO, P>, TransactionError> {
+    pub fn begin_ro(&self) -> Result<Transaction<'_, RO>, TransactionError> {
         let mut transaction_manager = self.inner.transaction_manager.write().unwrap();
         let storage_engine = self.inner.storage_engine.read().unwrap();
         let metadata = self.inner.metadata.read().unwrap().clone();

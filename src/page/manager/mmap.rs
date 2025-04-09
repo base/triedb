@@ -1,20 +1,20 @@
 use std::{fs::File, path::Path};
 
 use crate::{
-    page::{Page, PageError, PageId, PageManager, PageMut},
+    page::{Page, PageError, PageId, PageMut},
     snapshot::SnapshotId,
 };
 use memmap2::{Advice, MmapMut};
 
 // Manages pages in a memory mapped file.
 #[derive(Debug)]
-pub struct MmapPageManager {
+pub struct PageManager {
     mmap: MmapMut,
     file: Option<File>,
     next_page_id: PageId,
 }
 
-impl MmapPageManager {
+impl PageManager {
     pub fn open(file_path: impl AsRef<Path>) -> Result<Self, PageError> {
         let file = File::options()
             .read(true)
@@ -29,7 +29,7 @@ impl MmapPageManager {
         Self::new(mmap, Some(file), None)
     }
 
-    /// Creates a new `MmapPageManager` with the given memory mapped file.
+    /// Creates a new `PageManager` with the given memory mapped file.
     pub fn new(
         mmap: MmapMut,
         file: Option<File>,
@@ -46,7 +46,7 @@ impl MmapPageManager {
         Ok(Self { mmap, file, next_page_id })
     }
 
-    /// Creates a new `MmapPageManager` with an anonymous memory map.
+    /// Creates a new `PageManager` with an anonymous memory map.
     #[cfg(test)]
     pub(crate) fn new_anon(capacity: PageId, next_page_id: PageId) -> Result<Self, PageError> {
         let mmap = memmap2::MmapMut::map_anon(capacity as usize * Page::SIZE)
@@ -80,15 +80,19 @@ impl MmapPageManager {
     }
 }
 
-impl PageManager for MmapPageManager {
-    // Retrieves a page from the memory mapped file.
-    fn get<'p>(&self, _snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'p>, PageError> {
+impl PageManager {
+    /// Retrieves a page from the memory mapped file.
+    pub fn get<'p>(
+        &self,
+        _snapshot_id: SnapshotId,
+        page_id: PageId,
+    ) -> Result<Page<'p>, PageError> {
         let page_data = self.page_data(page_id)?;
         Ok(Page::new(page_id, page_data))
     }
 
-    // Retrieves a mutable page from the memory mapped file.
-    fn get_mut<'p>(
+    /// Retrieves a mutable page from the memory mapped file.
+    pub fn get_mut<'p>(
         &mut self,
         _snapshot_id: SnapshotId,
         page_id: PageId,
@@ -97,16 +101,19 @@ impl PageManager for MmapPageManager {
         Ok(PageMut::new(page_id, page_data))
     }
 
-    // Allocates a new page in the memory mapped file.
-    fn allocate<'p>(&mut self, snapshot_id: SnapshotId) -> Result<PageMut<'p>, PageError> {
+    /// Adds a new page.
+    ///
+    /// Returns an error if the memory map is not large enough.
+    pub fn allocate<'p>(&mut self, snapshot_id: SnapshotId) -> Result<PageMut<'p>, PageError> {
         let (page_id, page_data) = self.allocate_page_data()?;
         Ok(PageMut::with_snapshot(page_id, snapshot_id, page_data))
     }
 
-    // Resizes the memory mapped file to the given number of pages.
-    // If the file size is reduced, the file is truncated and the next page is is lowered to match
-    // the new file size.
-    fn resize(&mut self, new_page_count: PageId) -> Result<(), PageError> {
+    /// Resizes the memory mapped file to the given number of pages.
+    ///
+    /// If the file size is reduced, the file is truncated and the next page is is lowered to match
+    /// the new file size.
+    pub fn resize(&mut self, new_page_count: PageId) -> Result<(), PageError> {
         // SAFETY: This is currently unsafe, but so was the previous implementation
         unsafe {
             let old_len = self.mmap.len();
@@ -150,12 +157,13 @@ impl PageManager for MmapPageManager {
         Ok(())
     }
 
-    fn size(&self) -> u32 {
+    /// Returns the maximum number of pages that may be allocated.
+    pub fn size(&self) -> u32 {
         (self.mmap.len() / Page::SIZE) as u32
     }
 
-    // Commits the memory mapped file to disk.
-    fn commit(&mut self, _snapshot_id: SnapshotId) -> Result<(), PageError> {
+    /// Syncs pages to the backing file.
+    pub fn commit(&mut self, _snapshot_id: SnapshotId) -> Result<(), PageError> {
         self.mmap.flush().map_err(PageError::IO)
     }
 }
@@ -167,7 +175,7 @@ mod tests {
 
     #[test]
     fn test_allocate_get() {
-        let mut manager = MmapPageManager::new_anon(10, 0).unwrap();
+        let mut manager = PageManager::new_anon(10, 0).unwrap();
 
         for i in 0..10 {
             let err = manager.get(42, i).unwrap_err();
@@ -190,7 +198,7 @@ mod tests {
 
     #[test]
     fn test_allocate_get_mut() {
-        let mut manager = MmapPageManager::new_anon(10, 0).unwrap();
+        let mut manager = PageManager::new_anon(10, 0).unwrap();
 
         let mut page = manager.allocate(42).unwrap();
         assert_eq!(page.id(), 0);
@@ -233,7 +241,7 @@ mod tests {
         // remove the existing file if it already exists
         let _ = std::fs::remove_file("test.mmap");
 
-        let mut manager = MmapPageManager::open("test.mmap").unwrap();
+        let mut manager = PageManager::open("test.mmap").unwrap();
         assert_eq!(manager.next_page_id, 0);
 
         // attempt to allocate, expect error because the file is empty
@@ -317,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_resize_anon() {
-        let mut manager = MmapPageManager::new_anon(10, 0).unwrap();
+        let mut manager = PageManager::new_anon(10, 0).unwrap();
 
         // allocate 10 times
         for i in 0..10 {

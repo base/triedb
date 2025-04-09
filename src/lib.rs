@@ -12,4 +12,4 @@ pub mod storage;
 pub mod transaction;
 
 pub use database::Database;
-pub use page::MmapPageManager;
+pub use page::PageManager;
