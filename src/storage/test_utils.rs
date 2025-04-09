@@ -5,27 +5,24 @@ use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
 use rand::{rngs::StdRng, RngCore};
 
 use crate::{
-    account::Account, context::TransactionContext, database::Metadata, page::OrphanPageManager,
+    account::Account, context::TransactionContext, meta::MetadataManager,
     storage::engine::StorageEngine, PageManager,
 };
 
 pub(crate) fn create_test_engine(max_pages: u32) -> (StorageEngine, TransactionContext) {
+    let mut meta_manager =
+        MetadataManager::from_file(tempfile::tempfile().expect("failed to create temporary file"))
+            .expect("failed to open metadata file");
+    meta_manager.dirty_slot_mut().set_page_count(256);
+
     let mut page_manager = PageManager::options().max_pages(max_pages).open_temp_file().unwrap();
     for _ in 0..256 {
         page_manager.allocate(0).unwrap();
     }
 
-    let orphan_manager = OrphanPageManager::new();
-    let metadata = Metadata {
-        snapshot_id: 1,
-        root_page_id: 0,
-        max_page_number: 255,
-        root_subtrie_page_id: 0,
-        state_root: EMPTY_ROOT_HASH,
-    };
-    let storage_engine = StorageEngine::new(page_manager, orphan_manager);
-
-    (storage_engine, TransactionContext::new(metadata))
+    let storage_engine = StorageEngine::new(page_manager, meta_manager);
+    let context = storage_engine.write_context();
+    (storage_engine, context)
 }
 
 pub(crate) fn random_test_account(rng: &mut StdRng) -> Account {
