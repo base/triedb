@@ -62,12 +62,12 @@ impl TransactionMetrics {
     }
 
     /// Increment the cache storage read hit
-    pub fn inc_cache_storage_read_hit(&self) {
+    pub(crate) fn inc_cache_storage_read_hit(&self) {
         self.inner.borrow_mut().cache_storage_read_hit += 1;
     }
 
     /// Increment the cache storage read miss
-    pub fn inc_cache_storage_read_miss(&self) {
+    pub(crate) fn inc_cache_storage_read_miss(&self) {
         self.inner.borrow_mut().cache_storage_read_miss += 1;
     }
 
@@ -92,7 +92,7 @@ impl TransactionMetrics {
     }
 
     /// Take the cache storage read hit and miss
-    pub fn take_cache_storage_read(&self) -> (u32, u32) {
+    pub(crate) fn take_cache_storage_read(&self) -> (u32, u32) {
         let mut inner = self.inner.borrow_mut();
         let cache_storage_read_hit = mem::take(&mut inner.cache_storage_read_hit);
         let cache_storage_read_miss = mem::take(&mut inner.cache_storage_read_miss);
@@ -120,7 +120,7 @@ impl TransactionMetrics {
     }
 
     #[cfg(test)]
-    pub fn get_cache_storage_read(&self) -> (u32, u32) {
+    pub(crate) fn get_cache_storage_read(&self) -> (u32, u32) {
         let metrics = self.inner.borrow();
         (metrics.cache_storage_read_hit, metrics.cache_storage_read_miss)
     }

@@ -8,15 +8,12 @@ alloy-primitives = { version = "0.8.21", features = ["arbitrary", "rand"] }
 alloy-rlp = "0.3.11"
 alloy-trie = { version = "0.7.6", features = ["arbitrary", "ethereum"] }
 arrayvec = "0.7.6"
-log = "0.4.25"
 memmap2 = "0.9.5"
 proptest = "1.6.0"
 proptest-derive = "0.5.1"
 sealed = "0.6.0"
-pprof = { version = "0.14", features = ["criterion", "protobuf-codec"] }
 metrics-derive = "0.1.0"
 metrics = "0.24.1"
-dashmap = "6.1.0"
 zerocopy = { version = "0.8.24", features = ["derive"] }
 reth-trie-common = { git = "https://github.com/paradigmxyz/reth", tag = "v1.2.2" }
 

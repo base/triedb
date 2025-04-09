@@ -1,13 +1,13 @@
 use super::{Page, PageError, PageMut};
 use crate::storage::value::{Value, ValueRef};
+use cell_pointer::CellPointer;
 use std::{
     cmp::{max, Ordering},
     fmt, mem,
     ops::Deref,
 };
 
-pub mod cell_pointer;
-use cell_pointer::CellPointer;
+pub(crate) mod cell_pointer;
 
 const MAX_NUM_CELLS: u8 = 255; // With 1 byte for the number of cells, the maximum number of cells is 255.
 pub const CELL_POINTER_SIZE: usize = 3;

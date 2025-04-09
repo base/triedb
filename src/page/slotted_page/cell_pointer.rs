@@ -4,7 +4,7 @@ use crate::page::{Page, PageError};
 pub(crate) struct CellPointer<'p>(&'p [u8; 3]);
 
 #[derive(Debug)]
-pub enum CellPointerError {
+pub(crate) enum CellPointerError {
     InvalidLength,
 }
 
@@ -18,7 +18,7 @@ impl From<CellPointerError> for PageError {
 
 impl<'p> CellPointer<'p> {
     // Creates a new cell pointer and writes it to the given data.
-    pub fn new(offset: u16, length: u16, data: &'p mut [u8; 3]) -> Self {
+    pub(crate) fn new(offset: u16, length: u16, data: &'p mut [u8; 3]) -> Self {
         assert!(offset < Page::DATA_SIZE as u16);
         assert!(length < Page::DATA_SIZE as u16);
         assert!(offset >= length);
@@ -30,17 +30,17 @@ impl<'p> CellPointer<'p> {
     }
 
     // Returns the offset of the cell pointer (0-4095), derived from the first 12 bits.
-    pub fn offset(&self) -> u16 {
+    pub(crate) fn offset(&self) -> u16 {
         ((self.0[0] as u16) << 4) | (self.0[1] >> 4) as u16
     }
 
     // Returns the length of the cell pointer, derived from the last 12 bits.
-    pub fn length(&self) -> u16 {
+    pub(crate) fn length(&self) -> u16 {
         ((self.0[1] as u16 & 0b1111) << 8) | self.0[2] as u16
     }
 
     // Returns true if the cell pointer is deleted (all bytes are 0).
-    pub fn is_deleted(&self) -> bool {
+    pub(crate) fn is_deleted(&self) -> bool {
         (self.0[0] | self.0[1] | self.0[2]) == 0
     }
 }

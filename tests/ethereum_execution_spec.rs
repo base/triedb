@@ -166,8 +166,8 @@ fn run_ethereum_execution_spec_state_tests() {
             assert_eq!(
                 expected_state_root,
                 test_database.state_root(),
-                "{}",
-                format!("failed test: {}", test_case_name)
+                "failed test: {}",
+                test_case_name
             );
 
             tmp_dir.close().unwrap();

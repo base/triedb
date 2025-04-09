@@ -49,9 +49,7 @@ impl PageManager {
     /// Creates a new `PageManager` with an anonymous memory map.
     #[cfg(test)]
     pub(crate) fn new_anon(capacity: PageId, next_page_id: PageId) -> Result<Self, PageError> {
-        let mmap = memmap2::MmapMut::map_anon(capacity as usize * Page::SIZE)
-            .map_err(PageError::IO)?
-            .into();
+        let mmap = MmapMut::map_anon(capacity as usize * Page::SIZE).map_err(PageError::IO)?;
         Self::new(mmap, None, Some(next_page_id))
     }
 
@@ -259,7 +257,7 @@ mod tests {
         assert_eq!(manager.next_page_id, 1);
 
         // write some data to the page
-        page.contents_mut().write(b"abc").expect("write failed");
+        page.contents_mut().write_all(b"abc").expect("write failed");
         manager.commit(42).unwrap();
 
         // attempt to allocate again, expect error because the file is full
@@ -274,7 +272,7 @@ mod tests {
         let page = manager.get(42, 0).unwrap();
         assert_eq!(page.id(), 0);
         let mut expected_contents = [0; Page::DATA_SIZE];
-        (&mut expected_contents[..]).write(b"abc").expect("write failed");
+        (&mut expected_contents[..]).write_all(b"abc").expect("write failed");
         assert_eq!(page.contents(), &expected_contents);
         assert_eq!(page.snapshot_id(), 42);
         assert_eq!(manager.next_page_id, 1);
