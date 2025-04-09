@@ -1,5 +1,4 @@
-use std::env;
-use std::fs::File;
+use std::{env, fs::File};
 use triedb::Database;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

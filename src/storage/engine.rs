@@ -265,7 +265,9 @@ impl<P: PageManager> StorageEngine<P> {
                 storage_root,
             } => {
                 let output_string = format!("{}Account leaf: {:?}\n", indent, val);
-                let _ = file_writer.write(&output_string.as_bytes());
+                file_writer
+                    .write(&output_string.as_bytes())
+                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
                 let mut new_indent = indent.clone();
                 new_indent.push_str("\t");
 
@@ -280,7 +282,9 @@ impl<P: PageManager> StorageEngine<P> {
                     )
                 } else {
                     let output_string = format!("{}No direct child\n", new_indent);
-                    let _ = file_writer.write(&output_string.as_bytes());
+                    file_writer
+                        .write(&output_string.as_bytes())
+                        .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
                     return Ok(())
                 }
             }
@@ -288,7 +292,9 @@ impl<P: PageManager> StorageEngine<P> {
             Node::Branch { prefix: _, children } => {
                 let output_string =
                     format!("{}Branch, Page ID: {:?} \n", indent, slotted_page.id());
-                let _ = file_writer.write(&output_string.as_bytes());
+                file_writer
+                    .write(&output_string.as_bytes())
+                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
                 for child in children {
                     if let Some(child_ptr) = child {
                         let mut new_indent = indent.clone();
@@ -312,7 +318,9 @@ impl<P: PageManager> StorageEngine<P> {
                                     "{}Child on new page: {:?}\n",
                                     new_indent, child_page_id
                                 );
-                                let _ = file_writer.write(&output_string.as_bytes());
+                                file_writer
+                                    .write(&output_string.as_bytes())
+                                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
 
                                 let child_slotted_page = SlottedPage::try_from(child_page)?;
                                 self.print_page_traverse(
@@ -329,7 +337,9 @@ impl<P: PageManager> StorageEngine<P> {
                                     "{}Child on new page: {:?}\n",
                                     new_indent, child_page_id
                                 );
-                                let _ = file_writer.write(&output_string.as_bytes());
+                                file_writer
+                                    .write(&output_string.as_bytes())
+                                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
                             }
                         }
                     }
