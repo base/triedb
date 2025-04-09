@@ -21,6 +21,8 @@ use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
 use std::{
     cmp::{max, Ordering},
     fmt::Debug,
+    fs::File,
+    io::{BufWriter, Write},
     sync::{Arc, RwLock},
 };
 
@@ -201,6 +203,163 @@ impl StorageEngine {
         )? {
             Some(TrieValue::Storage(storage_value)) => Ok(Some(storage_value)),
             _ => Ok(None),
+        }
+    }
+
+    pub fn print_page(
+        &self,
+        context: &TransactionContext,
+        output_file: &File,
+        page_id: Option<u32>,
+    ) -> Result<(), Error> {
+        if context.metadata.root_subtrie_page_id == 0 {
+            return Ok(());
+        }
+
+        let mut file_writer = BufWriter::new(output_file);
+
+        let (page_res, print_whole_db) = match page_id {
+            Some(id) => (self.get_page(context, id), false),
+            None => (self.get_page(context, context.metadata.root_subtrie_page_id), true),
+        };
+
+        let page = page_res?;
+
+        let slotted_page = SlottedPage::try_from(page)?;
+        self.print_page_traverse(
+            context,
+            slotted_page,
+            0,
+            String::from(""),
+            &mut file_writer,
+            print_whole_db,
+        )
+    }
+
+    fn get_slotted_page_and_index<'p>(
+        &self,
+        context: &TransactionContext,
+        pointer: &Pointer,
+        current_slotted_page: SlottedPage<'p>,
+    ) -> Result<(SlottedPage<'p>, u8), Error> {
+        if let Some(page_id) = pointer.location().page_id() {
+            let page = self.get_page(context, page_id)?;
+            let slotted_page = SlottedPage::try_from(page)?;
+            Ok((slotted_page, 0))
+        } else {
+            let cell_index = pointer.location().cell_index().unwrap();
+            Ok((current_slotted_page, cell_index))
+        }
+    }
+
+    fn print_page_traverse(
+        &self,
+        context: &TransactionContext,
+        slotted_page: SlottedPage<'_>,
+        cell_index: u8,
+        indent: String,
+        file_writer: &mut BufWriter<&File>,
+        print_whole_db: bool,
+    ) -> Result<(), Error> {
+        let node: Node = slotted_page.get_value(cell_index)?;
+
+        let val = match node.value() {
+            Ok(TrieValue::Account(acct)) => {
+                format!("nonce: {:?}, balance: {:?}", acct.nonce, acct.balance)
+            }
+            Ok(TrieValue::Storage(strg)) => strg.to_string(),
+            _ => "".to_string(),
+        };
+
+        match node {
+            Node::AccountLeaf {
+                prefix: _,
+                nonce_rlp: _,
+                balance_rlp: _,
+                code_hash: _,
+                storage_root,
+            } => {
+                let output_string = format!("{}Account leaf: {:?}\n", indent, val);
+                file_writer
+                    .write(output_string.as_bytes())
+                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                let mut new_indent = indent.clone();
+                new_indent.push('\t');
+
+                if let Some(direct_child) = storage_root {
+                    let (new_slotted_page, cell_index) =
+                        self.get_slotted_page_and_index(context, &direct_child, slotted_page)?;
+                    // child is on different page, and we are only printing the current page
+                    if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
+                        let child_page_id = direct_child.location().page_id().unwrap();
+                        let output_string =
+                            format!("{}Child on new page: {:?}\n", new_indent, child_page_id);
+                        file_writer
+                            .write(output_string.as_bytes())
+                            .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                        Ok(())
+                    } else {
+                        self.print_page_traverse(
+                            context,
+                            new_slotted_page,
+                            cell_index,
+                            new_indent,
+                            file_writer,
+                            print_whole_db,
+                        )
+                    }
+                } else {
+                    let output_string = format!("{}No direct child\n", new_indent);
+                    file_writer
+                        .write(output_string.as_bytes())
+                        .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                    Ok(())
+                }
+            }
+
+            Node::Branch { prefix: _, children } => {
+                let output_string =
+                    format!("{}Branch, Page ID: {:?} \n", indent, slotted_page.id());
+                file_writer
+                    .write(output_string.as_bytes())
+                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                for child in children.into_iter().flatten() {
+                    let mut new_indent = indent.clone();
+                    new_indent.push('\t');
+
+                    //check if child is on same page
+                    let (new_slotted_page, cell_index) =
+                        self.get_slotted_page_and_index(context, &child, slotted_page)?;
+                    // child is on new page, and we are only printing the current page
+                    if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
+                        let child_page_id = child.location().page_id().unwrap();
+                        let output_string =
+                            format!("{}Child on new page: {:?}\n", new_indent, child_page_id);
+                        file_writer
+                            .write(output_string.as_bytes())
+                            .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                        return Ok(())
+                    } else {
+                        self.print_page_traverse(
+                            context,
+                            new_slotted_page,
+                            cell_index,
+                            new_indent,
+                            file_writer,
+                            print_whole_db,
+                        )?
+                    }
+                }
+                file_writer.flush().map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                Ok(())
+            }
+            Node::StorageLeaf { prefix: _, value_rlp: _ } => {
+                let output_string = format!("{}Storage leaf: {:?}\n", indent, val);
+                file_writer
+                    .write(output_string.as_bytes())
+                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                Ok(())
+            }
         }
     }
 

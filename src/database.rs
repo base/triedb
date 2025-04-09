@@ -8,7 +8,7 @@ use crate::{
 };
 use alloy_primitives::B256;
 use alloy_trie::EMPTY_ROOT_HASH;
-use std::sync::RwLock;
+use std::{fs::File, sync::RwLock};
 
 #[derive(Debug)]
 pub struct Database {
@@ -104,6 +104,15 @@ impl Database {
         // TODO: make this configurable
         database.resize(max_page_count + 1000).unwrap();
         Ok(database)
+    }
+
+    pub fn print_page(self, output_file: &File, page_id: Option<u32>) -> Result<(), Error> {
+        let metadata = self.inner.metadata.read().unwrap().clone();
+
+        let context = TransactionContext::new(metadata);
+        let storage_engine = self.inner.storage_engine.read().unwrap();
+        let _ = storage_engine.print_page(&context, output_file, page_id);
+        Ok(())
     }
 }
 
@@ -344,7 +353,7 @@ mod tests {
     fn test_data_persistence() {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
-        let db = Database::create(file_path.as_str()).unwrap();
+        let db = Database::create(&file_path).unwrap();
 
         let address1 = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
@@ -370,7 +379,7 @@ mod tests {
         tx.commit().unwrap();
         db.close().unwrap();
 
-        let db = Database::open(file_path.as_str()).unwrap();
+        let db = Database::open(&file_path).unwrap();
         let tx = db.begin_ro().unwrap();
 
         let account = tx.get_account(AddressPath::for_address(address1)).unwrap().unwrap();
