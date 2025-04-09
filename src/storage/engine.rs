@@ -219,16 +219,14 @@ impl<P: PageManager> StorageEngine<P> {
 
         let mut file_writer = BufWriter::new(output_file);
 
-        let (page, print_whole_db) = match page_id {
+        let (page_res, print_whole_db) = match page_id {
             Some(id) => (self.get_page(context, id), false),
             None => (self.get_page(context, context.metadata.root_subtrie_page_id), true),
         };
 
-        if page.is_err() {
-            println!("page not found");
-            return Ok(())
-        }
-        let slotted_page = SlottedPage::try_from(page.unwrap())?;
+        let page = page_res?;
+
+        let slotted_page = SlottedPage::try_from(page)?;
         self.print_page_traverse(
             context,
             slotted_page,
@@ -298,14 +296,14 @@ impl<P: PageManager> StorageEngine<P> {
 
                         //check if child is on same page
                         if child_ptr.location().page_id().is_none() {
-                            let _ = self.print_page_traverse(
+                            self.print_page_traverse(
                                 context,
                                 slotted_page,
                                 child_ptr.location().cell_index().unwrap(),
                                 new_indent,
                                 file_writer,
                                 print_whole_db,
-                            );
+                            )?
                         } else {
                             if print_whole_db {
                                 let child_page_id = child_ptr.location().page_id().unwrap();
@@ -317,14 +315,14 @@ impl<P: PageManager> StorageEngine<P> {
                                 let _ = file_writer.write(&output_string.as_bytes());
 
                                 let child_slotted_page = SlottedPage::try_from(child_page)?;
-                                let _ = self.print_page_traverse(
+                                self.print_page_traverse(
                                     context,
                                     child_slotted_page,
                                     0,
                                     new_indent,
                                     file_writer,
                                     print_whole_db,
-                                );
+                                )?
                             } else {
                                 let child_page_id = child_ptr.location().page_id().unwrap();
                                 let output_string = format!(

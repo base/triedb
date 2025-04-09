@@ -10,11 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "print" => {
             let db_path = args.get(2).ok_or("Usage: cargo run print <db path> <page id>")?;
             let page_id_str = args.get(3);
-            let page_id = if page_id_str.is_none() {
-                None
-            } else {
-                Some(page_id_str.unwrap().parse::<u32>()?)
-            };
+            let page_id = page_id_str.map(|p| p.parse::<u32>().expect("page id must be u32"));
 
             let output_path = "./printed_page";
             print_page(db_path, page_id, output_path);
