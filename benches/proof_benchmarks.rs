@@ -1,13 +1,12 @@
 mod benchmark_common;
 
-use alloy_primitives::{StorageKey, U256};
 use benchmark_common::{
     generate_random_address, generate_storage_paths, setup_database, setup_database_with_storage,
     BATCH_SIZE,
 };
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::prelude::*;
-use triedb::path::{AddressPath, StoragePath};
+use triedb::path::AddressPath;
 
 const SIZES: &[usize] = &[1_000_000, 3_000_000];
 

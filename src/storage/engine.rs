@@ -1577,7 +1577,7 @@ mod tests {
         account::Account,
         storage::{
             engine::PageError,
-            test_utils::test_utils::{
+            test_utils::{
                 assert_metrics, create_test_account, create_test_engine, random_test_account,
             },
         },

@@ -25,7 +25,6 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - uses: rui314/setup-mold@v1
     - uses: dtolnay/rust-toolchain@nightly
       with:
         components: rustfmt
@@ -37,6 +36,14 @@ jobs:
           cargo +nightly fmt --all -- --check
           exit 1
         fi
+
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Lint
+      run: cargo clippy --all-targets -- --deny=warnings
 
   unit-tests:
     strategy:
