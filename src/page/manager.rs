@@ -1,7 +1,6 @@
-use super::page::{Page, PageMut};
-use crate::snapshot::SnapshotId;
-use std::fmt::Debug;
-pub mod mmap;
+mod mmap;
+
+pub use mmap::PageManager;
 
 /// Type alias for page ids.
 /// Currently we use 4 bytes for page ids, which implies a maximum of 16TB of data.
@@ -21,53 +20,4 @@ pub enum PageError {
     InvalidValue,
     InvalidPageContents(PageId),
     // TODO: add more errors here for other cases.
-}
-
-/// Core trait that manages pages in trie db.
-pub trait PageManager: Debug {
-    /// Retrieves a page from the given snapshot.
-    fn get<'p>(&self, snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'p>, PageError>;
-
-    /// Retrieves a mutable page from the given snapshot.
-    fn get_mut<'p>(
-        &mut self,
-        snapshot_id: SnapshotId,
-        page_id: PageId,
-    ) -> Result<PageMut<'p>, PageError>;
-
-    /// Allocates a new page in the given snapshot.
-    fn allocate<'p>(&mut self, snapshot_id: SnapshotId) -> Result<PageMut<'p>, PageError>;
-
-    /// Resizes the page manager to the given number of pages.
-    fn resize(&mut self, new_page_count: PageId) -> Result<(), PageError>;
-
-    /// Returns the total number of pages
-    fn size(&self) -> u32;
-
-    // /// Merges two pages into a new page.
-    // fn merge(
-    //     &mut self,
-    //     snapshot_id: SnapshotId,
-    //     page_a: PageId,
-    //     page_b: PageId,
-    //     page_out: PageId,
-    // ) -> Result<(), PageError>;
-
-    // /// Splits a page into two new pages.
-    // fn split(
-    //     &mut self,
-    //     snapshot_id: SnapshotId,
-    //     page_id: PageId,
-    // ) -> Result<(PageId, PageId), PageError>;
-
-    // /// Writes data to a page.
-    // fn write(
-    //     &mut self,
-    //     snapshot_id: SnapshotId,
-    //     page_id: PageId,
-    //     data: &[u8],
-    // ) -> Result<(), PageError>;
-
-    /// Commits pages associated with a snapshot to durable storage.
-    fn commit(&mut self, snapshot_id: SnapshotId) -> Result<(), PageError>;
 }
