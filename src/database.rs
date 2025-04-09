@@ -115,16 +115,13 @@ impl Database<MmapPageManager> {
         Ok(())
     }
 
-    pub fn get_account_or_storage(self, output_file: &File, account_path: &[u8]) -> Result<(), Error> {
+    pub fn get_account_or_storage(self, output_file: &File, path: Nibbles) -> Result<(), Error> {
         let metadata = self.inner.metadata.read().unwrap().clone();
 
         let context = TransactionContext::new(metadata);
         let storage_engine = self.inner.storage_engine.read().unwrap();
 
-        let nibbles = if valid_nibbles(account_path) {
-            Nibbles::from_nibbles(account_path)
-        };
-        let _ = storage_engine.print_page(&context, output_file, page_id);
+        //let _ = storage_engine.print_page(&context, output_file, page_id);
         Ok(())
     }
 }

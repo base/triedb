@@ -7,3 +7,5 @@ edition = "2021"
 triedb = { path = ".." }
 clap = { version = "4.4", features = ["derive"] }
 hex = "0.4"
+alloy-trie = { version = "0.7.6", features = ["arbitrary", "ethereum"] }
+
