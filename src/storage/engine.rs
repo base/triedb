@@ -24,7 +24,6 @@ use std::{
     fs::File,
     io::{BufWriter, Write},
     sync::{Arc, RwLock},
-    u32,
 };
 
 use super::value::Value;
@@ -325,7 +324,6 @@ impl StorageEngine {
                     .write(output_string.as_bytes())
                     .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
                 for child in children.into_iter().flatten() {
-                    
                     let mut new_indent = indent.clone();
                     new_indent.push('\t');
 
@@ -351,7 +349,6 @@ impl StorageEngine {
                             print_whole_db,
                         )?
                     }
-                    
                 }
                 file_writer.flush().map_err(|e| Error::Other(format!("IO error: {}", e)))?;
                 Ok(())
