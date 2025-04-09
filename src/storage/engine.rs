@@ -19,6 +19,7 @@ use crate::{
 use alloy_primitives::StorageValue;
 use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
 use std::{
+    cell,
     cmp::{max, Ordering},
     fmt::Debug,
     fs::File,
@@ -237,6 +238,22 @@ impl<P: PageManager> StorageEngine<P> {
         )
     }
 
+    fn get_slotted_page_and_index<'p>(
+        &self,
+        context: &TransactionContext,
+        pointer: &Pointer,
+        current_slotted_page: SlottedPage<'p>,
+    ) -> Result<(SlottedPage<'p>, u8), Error> {
+        if let Some(page_id) = pointer.location().page_id() {
+            let page = self.get_page(context, page_id)?;
+            let slotted_page = SlottedPage::try_from(page)?;
+            Ok((slotted_page, 0))
+        } else {
+            let cell_index = pointer.location().cell_index().unwrap();
+            Ok((current_slotted_page, cell_index))
+        }
+    }
+
     fn print_page_traverse(
         &self,
         context: &TransactionContext,
@@ -272,14 +289,27 @@ impl<P: PageManager> StorageEngine<P> {
                 new_indent.push_str("\t");
 
                 if let Some(direct_child) = storage_root {
-                    self.print_page_traverse(
-                        context,
-                        slotted_page,
-                        direct_child.location().cell_index().unwrap(),
-                        new_indent,
-                        file_writer,
-                        print_whole_db,
-                    )
+                    let (new_slotted_page, cell_index) =
+                        self.get_slotted_page_and_index(context, &direct_child, slotted_page)?;
+                    // child is on different page, and we are only printing the current page
+                    if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
+                        let child_page_id = direct_child.location().page_id().unwrap();
+                        let output_string =
+                            format!("{}Child on new page: {:?}\n", new_indent, child_page_id);
+                        file_writer
+                            .write(&output_string.as_bytes())
+                            .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                        return Ok(())
+                    } else {
+                        self.print_page_traverse(
+                            context,
+                            new_slotted_page,
+                            cell_index,
+                            new_indent,
+                            file_writer,
+                            print_whole_db,
+                        )
+                    }
                 } else {
                     let output_string = format!("{}No direct child\n", new_indent);
                     file_writer
@@ -301,46 +331,26 @@ impl<P: PageManager> StorageEngine<P> {
                         new_indent.push_str("\t");
 
                         //check if child is on same page
-                        if child_ptr.location().page_id().is_none() {
+                        let (new_slotted_page, cell_index) =
+                            self.get_slotted_page_and_index(context, &child_ptr, slotted_page)?;
+                        // child is on new page, and we are only printing the current page
+                        if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
+                            let child_page_id = child_ptr.location().page_id().unwrap();
+                            let output_string =
+                                format!("{}Child on new page: {:?}\n", new_indent, child_page_id);
+                            file_writer
+                                .write(&output_string.as_bytes())
+                                .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                            return Ok(())
+                        } else {
                             self.print_page_traverse(
                                 context,
-                                slotted_page,
-                                child_ptr.location().cell_index().unwrap(),
+                                new_slotted_page,
+                                cell_index,
                                 new_indent,
                                 file_writer,
                                 print_whole_db,
                             )?
-                        } else {
-                            if print_whole_db {
-                                let child_page_id = child_ptr.location().page_id().unwrap();
-                                let child_page = self.get_page(context, child_page_id)?;
-                                let output_string = format!(
-                                    "{}Child on new page: {:?}\n",
-                                    new_indent, child_page_id
-                                );
-                                file_writer
-                                    .write(&output_string.as_bytes())
-                                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-
-                                let child_slotted_page = SlottedPage::try_from(child_page)?;
-                                self.print_page_traverse(
-                                    context,
-                                    child_slotted_page,
-                                    0,
-                                    new_indent,
-                                    file_writer,
-                                    print_whole_db,
-                                )?
-                            } else {
-                                let child_page_id = child_ptr.location().page_id().unwrap();
-                                let output_string = format!(
-                                    "{}Child on new page: {:?}\n",
-                                    new_indent, child_page_id
-                                );
-                                file_writer
-                                    .write(&output_string.as_bytes())
-                                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-                            }
                         }
                     }
                 }
