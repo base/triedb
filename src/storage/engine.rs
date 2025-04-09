@@ -1495,6 +1495,105 @@ impl<P: PageManager> StorageEngine<P> {
 
         Ok(())
     }
+
+    pub fn traverse_path(
+        &self,
+        context: &TransactionContext,
+        path: &Nibbles,
+        file_writer: &mut BufWriter<&File>,
+    ) -> Result<Option<TrieValue>, Error> {
+        let page_id = context.metadata.root_subtrie_page_id;
+        let page = self.get_page(context, page_id)?;
+        let slotted_page = SlottedPage::try_from(page)?;
+        
+        self.traverse_path_helper(
+            context,
+            path,
+            0,
+            slotted_page,
+            0,
+            file_writer,
+        )
+    }
+
+    fn traverse_path_helper(
+        &self,
+        context: &TransactionContext,
+        path: &Nibbles,
+        path_offset: usize,
+        slotted_page: SlottedPage<'_>,
+        page_index: u8,
+        file_writer: &mut BufWriter<&File>,
+    ) -> Result<Option<TrieValue>, Error> {
+        let node: Node = slotted_page.get_value(page_index)?;
+        
+        // Write node information to file
+        match &node {
+            Node::Branch { prefix: _, children } => {
+                let output_string = format!("Branch: Page ID: {}\n", slotted_page.id());
+                file_writer.write_all(output_string.as_bytes())
+                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+            }
+            Node::AccountLeaf { prefix: _, nonce_rlp: _, balance_rlp: _, code_hash: _, storage_root } => {
+                let val = match node.value() {
+                    Ok(TrieValue::Account(acct)) => {
+                        format!("nonce: {:?}, balance: {:?}", acct.nonce, acct.balance)
+                    }
+                    _ => "".to_string(),
+                };
+                let output_string = format!("AccountLeaf: {}\n", val);
+                file_writer.write_all(output_string.as_bytes())
+                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+            }
+            Node::StorageLeaf { prefix: _, value_rlp: _ } => {
+                let val = match node.value() {
+                    Ok(TrieValue::Storage(strg)) => strg.to_string(),
+                    _ => "".to_string(),
+                };
+                let output_string = format!("StorageLeaf: {}\n", val);
+                file_writer.write_all(output_string.as_bytes())
+                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+            }
+        }
+        
+        let (common_prefix_length, _) = find_shortest_common_prefix(&[(path.clone(), ())], path_offset as u8, &node);
+        
+        if common_prefix_length == node.prefix().len() {
+            let remaining_path = &path[path_offset + common_prefix_length..];
+            
+            if remaining_path.is_empty() {
+                return Ok(node.value().ok());
+            }
+            
+            let next_nibble = remaining_path[0];
+            if let Ok(Some(child_pointer)) = node.child(next_nibble) {
+                if let Some(child_cell_index) = child_pointer.location().cell_index() {
+                    return self.traverse_path_helper(
+                        context,
+                        path,
+                        path_offset + common_prefix_length + 1,
+                        slotted_page,
+                        child_cell_index,
+                        file_writer,
+                    );
+                } else {
+                    let child_page_id = child_pointer.location().page_id().unwrap();
+                    let child_page = self.get_page(context, child_page_id)?;
+                    let child_slotted_page = SlottedPage::try_from(child_page)?;
+                    return self.traverse_path_helper(
+                        context,
+                        path,
+                        path_offset + common_prefix_length + 1,
+                        child_slotted_page,
+                        0,
+                        file_writer,
+                    );
+                }
+            }
+        }
+        
+        Ok(None)
+    }
 }
 
 fn node_location(page_id: PageId, page_index: u8) -> Location {
