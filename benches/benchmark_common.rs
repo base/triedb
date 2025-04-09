@@ -5,7 +5,7 @@ use tempdir::TempDir;
 use triedb::{
     account::Account,
     path::{AddressPath, StoragePath},
-    Database, MmapPageManager,
+    Database,
 };
 
 pub const BATCH_SIZE: usize = 10_000;
@@ -15,7 +15,7 @@ pub fn generate_random_address(rng: &mut StdRng) -> AddressPath {
     AddressPath::for_address(addr)
 }
 
-pub fn setup_database(size: usize) -> (TempDir, Database<MmapPageManager>) {
+pub fn setup_database(size: usize) -> (TempDir, Database) {
     let dir = TempDir::new("triedb_bench").unwrap();
     let db_path = dir.path().join("db");
     let db = Database::create(db_path.to_str().unwrap()).unwrap();
@@ -38,7 +38,7 @@ pub fn setup_database(size: usize) -> (TempDir, Database<MmapPageManager>) {
     (dir, db)
 }
 
-pub fn setup_database_with_storage(size: usize) -> (TempDir, Database<MmapPageManager>) {
+pub fn setup_database_with_storage(size: usize) -> (TempDir, Database) {
     let dir = TempDir::new("triedb_bench_storage").unwrap();
     let db_path = dir.path().join("db");
     let db = Database::create(db_path.to_str().unwrap()).unwrap();

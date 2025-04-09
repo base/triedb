@@ -8,7 +8,6 @@ use crate::{
     context::TransactionContext,
     database::Database,
     node::TrieValue,
-    page::PageManager,
     path::{AddressPath, StoragePath},
     storage::engine::StorageEngine,
 };
@@ -36,20 +35,20 @@ pub struct RO {}
 impl TransactionKind for RO {}
 
 #[derive(Debug)]
-pub struct Transaction<'tx, K: TransactionKind, P: PageManager> {
+pub struct Transaction<'tx, K: TransactionKind> {
     committed: bool,
     context: TransactionContext,
-    database: &'tx Database<P>,
+    database: &'tx Database,
     pending_changes: HashMap<Nibbles, Option<TrieValue>>,
-    _lock: Option<RwLockReadGuard<'tx, StorageEngine<P>>>,
+    _lock: Option<RwLockReadGuard<'tx, StorageEngine>>,
     _marker: std::marker::PhantomData<K>,
 }
 
-impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
+impl<'tx, K: TransactionKind> Transaction<'tx, K> {
     pub(crate) fn new(
         context: TransactionContext,
-        database: &'tx Database<P>,
-        lock: Option<RwLockReadGuard<'tx, StorageEngine<P>>>,
+        database: &'tx Database,
+        lock: Option<RwLockReadGuard<'tx, StorageEngine>>,
     ) -> Self {
         Self {
             committed: false,
@@ -107,7 +106,7 @@ impl<'tx, K: TransactionKind, P: PageManager> Transaction<'tx, K, P> {
     }
 }
 
-impl<P: PageManager> Transaction<'_, RW, P> {
+impl Transaction<'_, RW> {
     pub fn set_account(
         &mut self,
         address_path: AddressPath,
@@ -177,7 +176,7 @@ impl<P: PageManager> Transaction<'_, RW, P> {
     }
 }
 
-impl<P: PageManager> Transaction<'_, RO, P> {
+impl Transaction<'_, RO> {
     pub fn commit(mut self) -> Result<(), TransactionError> {
         let mut transaction_manager = self.database.inner.transaction_manager.write().unwrap();
         transaction_manager.remove_transaction(self.context.metadata.snapshot_id, false)?;
@@ -187,7 +186,7 @@ impl<P: PageManager> Transaction<'_, RO, P> {
     }
 }
 
-impl<K: TransactionKind, P: PageManager> Drop for Transaction<'_, K, P> {
+impl<K: TransactionKind> Drop for Transaction<'_, K> {
     fn drop(&mut self) {
         // TODO: panic if the transaction is not committed
     }

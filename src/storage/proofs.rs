@@ -6,7 +6,7 @@ use crate::{
         Node::{self, AccountLeaf, Branch},
         TrieValue,
     },
-    page::{PageManager, SlottedPage},
+    page::SlottedPage,
     path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH},
     pointer::Pointer,
 };
@@ -21,7 +21,7 @@ use super::engine::Error;
 
 use super::engine::StorageEngine;
 
-impl<P: PageManager> StorageEngine<P> {
+impl StorageEngine {
     /// Retrieves a [(Account, MultiProof)] from the storage engine, identified by the given
     /// [AddressPath]. Returns [None] if the path is not found.
     pub fn get_account_with_proof(
@@ -309,10 +309,10 @@ impl<P: PageManager> StorageEngine<P> {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{address, b256, hex, U256};
-    use alloy_trie::{TrieMask, EMPTY_ROOT_HASH, KECCAK_EMPTY};
+    use alloy_trie::{TrieMask, KECCAK_EMPTY};
 
     use super::*;
-    use crate::storage::test_utils::test_utils::{create_test_account, create_test_engine};
+    use crate::storage::test_utils::{create_test_account, create_test_engine};
 
     #[test]
     fn test_get_nonexistent_proof() {

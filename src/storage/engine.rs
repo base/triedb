@@ -38,13 +38,13 @@ use super::value::Value;
 ///
 /// All operations are thread-safe through the use of a read-write lock around the inner state.
 #[derive(Debug)]
-pub struct StorageEngine<P: PageManager> {
-    inner: Arc<RwLock<Inner<P>>>,
+pub struct StorageEngine {
+    inner: Arc<RwLock<Inner>>,
 }
 
 #[derive(Debug)]
-struct Inner<P: PageManager> {
-    page_manager: P,
+struct Inner {
+    page_manager: PageManager,
     orphan_manager: OrphanPageManager,
 }
 
@@ -54,9 +54,9 @@ enum PointerChange {
     Delete,
 }
 
-impl<P: PageManager> StorageEngine<P> {
+impl StorageEngine {
     /// Creates a new [StorageEngine] with the given [PageManager] and [OrphanPageManager].
-    pub fn new(page_manager: P, orphan_manager: OrphanPageManager) -> Self {
+    pub fn new(page_manager: PageManager, orphan_manager: OrphanPageManager) -> Self {
         Self { inner: Arc::new(RwLock::new(Inner { page_manager, orphan_manager })) }
     }
 
@@ -204,6 +204,163 @@ impl<P: PageManager> StorageEngine<P> {
         )? {
             Some(TrieValue::Storage(storage_value)) => Ok(Some(storage_value)),
             _ => Ok(None),
+        }
+    }
+
+    pub fn print_page(
+        &self,
+        context: &TransactionContext,
+        output_file: &File,
+        page_id: Option<u32>,
+    ) -> Result<(), Error> {
+        if context.metadata.root_subtrie_page_id == 0 {
+            return Ok(());
+        }
+
+        let mut file_writer = BufWriter::new(output_file);
+
+        let (page_res, print_whole_db) = match page_id {
+            Some(id) => (self.get_page(context, id), false),
+            None => (self.get_page(context, context.metadata.root_subtrie_page_id), true),
+        };
+
+        let page = page_res?;
+
+        let slotted_page = SlottedPage::try_from(page)?;
+        self.print_page_traverse(
+            context,
+            slotted_page,
+            0,
+            String::from(""),
+            &mut file_writer,
+            print_whole_db,
+        )
+    }
+
+    fn get_slotted_page_and_index<'p>(
+        &self,
+        context: &TransactionContext,
+        pointer: &Pointer,
+        current_slotted_page: SlottedPage<'p>,
+    ) -> Result<(SlottedPage<'p>, u8), Error> {
+        if let Some(page_id) = pointer.location().page_id() {
+            let page = self.get_page(context, page_id)?;
+            let slotted_page = SlottedPage::try_from(page)?;
+            Ok((slotted_page, 0))
+        } else {
+            let cell_index = pointer.location().cell_index().unwrap();
+            Ok((current_slotted_page, cell_index))
+        }
+    }
+
+    fn print_page_traverse(
+        &self,
+        context: &TransactionContext,
+        slotted_page: SlottedPage<'_>,
+        cell_index: u8,
+        indent: String,
+        file_writer: &mut BufWriter<&File>,
+        print_whole_db: bool,
+    ) -> Result<(), Error> {
+        let node: Node = slotted_page.get_value(cell_index)?;
+
+        let val = match node.value() {
+            Ok(TrieValue::Account(acct)) => {
+                format!("nonce: {:?}, balance: {:?}", acct.nonce, acct.balance)
+            }
+            Ok(TrieValue::Storage(strg)) => strg.to_string(),
+            _ => "".to_string(),
+        };
+
+        match node {
+            Node::AccountLeaf {
+                prefix: _,
+                nonce_rlp: _,
+                balance_rlp: _,
+                code_hash: _,
+                storage_root,
+            } => {
+                let output_string = format!("{}Account leaf: {:?}\n", indent, val);
+                file_writer
+                    .write(output_string.as_bytes())
+                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                let mut new_indent = indent.clone();
+                new_indent.push('\t');
+
+                if let Some(direct_child) = storage_root {
+                    let (new_slotted_page, cell_index) =
+                        self.get_slotted_page_and_index(context, &direct_child, slotted_page)?;
+                    // child is on different page, and we are only printing the current page
+                    if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
+                        let child_page_id = direct_child.location().page_id().unwrap();
+                        let output_string =
+                            format!("{}Child on new page: {:?}\n", new_indent, child_page_id);
+                        file_writer
+                            .write(output_string.as_bytes())
+                            .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                        Ok(())
+                    } else {
+                        self.print_page_traverse(
+                            context,
+                            new_slotted_page,
+                            cell_index,
+                            new_indent,
+                            file_writer,
+                            print_whole_db,
+                        )
+                    }
+                } else {
+                    let output_string = format!("{}No direct child\n", new_indent);
+                    file_writer
+                        .write(output_string.as_bytes())
+                        .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                    Ok(())
+                }
+            }
+
+            Node::Branch { prefix: _, children } => {
+                let output_string =
+                    format!("{}Branch, Page ID: {:?} \n", indent, slotted_page.id());
+                file_writer
+                    .write(output_string.as_bytes())
+                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                for child in children.into_iter().flatten() {
+                    let mut new_indent = indent.clone();
+                    new_indent.push('\t');
+
+                    //check if child is on same page
+                    let (new_slotted_page, cell_index) =
+                        self.get_slotted_page_and_index(context, &child, slotted_page)?;
+                    // child is on new page, and we are only printing the current page
+                    if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
+                        let child_page_id = child.location().page_id().unwrap();
+                        let output_string =
+                            format!("{}Child on new page: {:?}\n", new_indent, child_page_id);
+                        file_writer
+                            .write(output_string.as_bytes())
+                            .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                        return Ok(())
+                    } else {
+                        self.print_page_traverse(
+                            context,
+                            new_slotted_page,
+                            cell_index,
+                            new_indent,
+                            file_writer,
+                            print_whole_db,
+                        )?
+                    }
+                }
+                file_writer.flush().map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                Ok(())
+            }
+            Node::StorageLeaf { prefix: _, value_rlp: _ } => {
+                let output_string = format!("{}Storage leaf: {:?}\n", indent, val);
+                file_writer
+                    .write(output_string.as_bytes())
+                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                Ok(())
+            }
         }
     }
 
@@ -1711,7 +1868,7 @@ fn move_subtrie_nodes(
     Ok(node_location(target_page.id(), new_index))
 }
 
-impl<P: PageManager> Inner<P> {
+impl Inner {
     fn allocate_page<'p>(
         &mut self,
         context: &mut TransactionContext,
@@ -1826,7 +1983,7 @@ mod tests {
         account::Account,
         storage::{
             engine::PageError,
-            test_utils::test_utils::{
+            test_utils::{
                 assert_metrics, create_test_account, create_test_engine, random_test_account,
             },
         },
