@@ -8,7 +8,8 @@ use crate::{
 };
 use alloy_primitives::B256;
 use alloy_trie::EMPTY_ROOT_HASH;
-use std::{fs::File, sync::RwLock};
+use parking_lot::RwLock;
+use std::fs::File;
 
 #[derive(Debug)]
 pub struct Database {
@@ -107,10 +108,10 @@ impl Database {
     }
 
     pub fn print_page(self, output_file: &File, page_id: Option<u32>) -> Result<(), Error> {
-        let metadata = self.inner.metadata.read().unwrap().clone();
+        let metadata = self.inner.metadata.read().clone();
 
         let context = TransactionContext::new(metadata);
-        let storage_engine = self.inner.storage_engine.read().unwrap();
+        let storage_engine = self.inner.storage_engine.read();
         let _ = storage_engine.print_page(&context, output_file, page_id);
         Ok(())
     }
@@ -135,9 +136,9 @@ impl Database {
     }
 
     pub fn begin_rw(&self) -> Result<Transaction<'_, RW>, TransactionError> {
-        let mut transaction_manager = self.inner.transaction_manager.write().unwrap();
-        let storage_engine = self.inner.storage_engine.read().unwrap();
-        let metadata = self.inner.metadata.read().unwrap().next();
+        let mut transaction_manager = self.inner.transaction_manager.write();
+        let storage_engine = self.inner.storage_engine.read();
+        let metadata = self.inner.metadata.read().next();
         let min_snapshot_id = transaction_manager.begin_rw(metadata.snapshot_id)?;
         if min_snapshot_id > 0 {
             storage_engine.unlock(min_snapshot_id - 1);
@@ -147,21 +148,21 @@ impl Database {
     }
 
     pub fn begin_ro(&self) -> Result<Transaction<'_, RO>, TransactionError> {
-        let mut transaction_manager = self.inner.transaction_manager.write().unwrap();
-        let storage_engine = self.inner.storage_engine.read().unwrap();
-        let metadata = self.inner.metadata.read().unwrap().clone();
+        let mut transaction_manager = self.inner.transaction_manager.write();
+        let storage_engine = self.inner.storage_engine.read();
+        let metadata = self.inner.metadata.read().clone();
         transaction_manager.begin_ro(metadata.snapshot_id)?;
         let context = TransactionContext::new(metadata);
         Ok(Transaction::new(context, self, Some(storage_engine)))
     }
 
     pub fn state_root(&self) -> B256 {
-        let metadata = self.inner.metadata.read().unwrap();
+        let metadata = self.inner.metadata.read();
         metadata.state_root
     }
 
     pub(crate) fn resize(&self, new_page_count: PageId) -> Result<(), TransactionError> {
-        let mut storage_engine = self.inner.storage_engine.write().unwrap();
+        let mut storage_engine = self.inner.storage_engine.write();
         storage_engine.resize(new_page_count).unwrap();
         Ok(())
     }
@@ -171,15 +172,15 @@ impl Database {
     }
 
     fn shrink_and_commit(&mut self) -> Result<(), Error> {
-        let metadata = self.inner.metadata.read().unwrap();
+        let metadata = self.inner.metadata.read();
         let context = TransactionContext::new(metadata.clone());
-        let storage_engine = self.inner.storage_engine.read().unwrap();
+        let storage_engine = self.inner.storage_engine.read();
         storage_engine.shrink_and_commit(&context).map_err(Error::CloseError)?;
         Ok(())
     }
 
     pub fn size(&self) -> u32 {
-        let storage_engine = self.inner.storage_engine.read().unwrap();
+        let storage_engine = self.inner.storage_engine.read();
         storage_engine.size()
     }
 
