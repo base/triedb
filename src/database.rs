@@ -7,12 +7,9 @@ use crate::{
     transaction::{Transaction, TransactionError, TransactionManager, RO, RW},
 };
 use alloy_primitives::B256;
-<<<<<<< HEAD
 use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
-=======
-use alloy_trie::EMPTY_ROOT_HASH;
->>>>>>> main
 use std::{fs::File, sync::RwLock};
+
 
 #[derive(Debug)]
 pub struct Database {
@@ -115,22 +112,42 @@ impl Database {
 
         let context = TransactionContext::new(metadata);
         let storage_engine = self.inner.storage_engine.read().unwrap();
-        let _ = storage_engine.print_page(&context, output_file, page_id);
-        Ok(())
+        storage_engine.print_page(&context, output_file, page_id)
+            .map_err(Error::CloseError)
     }
-<<<<<<< HEAD
 
-    pub fn get_account_or_storage(self, output_file: &File, path: Nibbles) -> Result<(), Error> {
+    pub fn get_account_or_storage(
+        &self,
+        output_file: Option<&File>,
+        nibbles: Nibbles,
+        verbosity: Option<String>,
+    ) -> Result<(), Error> {
         let metadata = self.inner.metadata.read().unwrap().clone();
-
         let context = TransactionContext::new(metadata);
         let storage_engine = self.inner.storage_engine.read().unwrap();
-
-        //let _ = storage_engine.print_page(&context, output_file, page_id);
+        
+        match verbosity {
+            None => {
+                //just printing the node here, not writing anything to file
+                storage_engine.print_path(&context, &nibbles, output_file)
+                    .map_err(Error::CloseError)?;
+            },
+            Some(verbosity) => {
+                //must be output file for both verbose and extra verbose options
+                if verbosity == "v" {
+                storage_engine.print_path_verbose(&context, &nibbles, &output_file.unwrap(), false)
+                    .map_err(Error::CloseError)?;
+                } else if verbosity == "ev" {
+                    storage_engine.print_path_verbose(&context, &nibbles, &output_file.unwrap(), true)
+                        .map_err(Error::CloseError)?;
+                } else {
+                    //KALEY TODO better error?
+                    return Err(Error::CloseError(engine::Error::EngineClosed));
+                }
+            }
+        }
         Ok(())
     }
-=======
->>>>>>> main
 }
 
 impl Drop for Database {

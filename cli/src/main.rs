@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ArgAction, ValueEnum};
 use alloy_trie::Nibbles;
 use std::fs::File;
 use triedb::Database;
@@ -8,6 +8,13 @@ enum AccountIdentifier {
     FullHash(String),                // 0x + 64 or 128 chars
     Address(String),                 // 0x + 40 chars
     AddressWithSlot(String, String), // 0x + 40 chars + 0x + variable length
+}
+
+#[derive(ValueEnum, Clone, Debug)]
+enum VerbosityLevel {
+    Normal,
+    Verbose,
+    ExtraVerbose,
 }
 
 #[derive(Parser)]
@@ -50,6 +57,10 @@ enum Commands {
         /// Output filepath (optional)
         #[arg(short = 'o', long = "output", default_value = "./account_info")]
         output_path: String,
+
+        /// Verbosity level for output
+        #[arg(short = 'v', long = "verbose", value_enum, default_value_t = VerbosityLevel::Normal)]
+        verbosity: VerbosityLevel,
     },
     // /// Get statistics about the database
     // Stats {
@@ -129,8 +140,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Print { db_path, page_id, output_path } => {
             print_page(&db_path, page_id, &output_path);
         }
-        Commands::Account { db_path, identifier, output_path } => {
-            get_account(&db_path, &identifier, &output_path);
+        Commands::Account { db_path, identifier, output_path, verbosity } => {
+            get_account(&db_path, &identifier, &output_path, verbosity)?;
         } /* Commands::Stats { path } => {
            *     get_stats(&path)?;
            * } */
@@ -152,12 +163,12 @@ fn print_page(db_path: &str, page_id: Option<u32>, output_path: &str) {
     }
 }
 
-fn get_account(db_path: &str, identifier: &str, output_path: &str) {
+//KALEY TODO change error return
+fn get_account(db_path: &str, identifier: &str, output_path: &str, verbosity: VerbosityLevel) -> Result<(), Box<dyn std::error::Error>> {
     let db = match Database::open(db_path) {
         Ok(db) => db,
         Err(e) => panic!("Could not open database: {:?}", e),
     };
-    //let mut context = db.start_read_only_transaction()?;
 
     // Parse the identifier into the appropriate format
     let account_id = parse_account_identifier(identifier)?;
@@ -165,11 +176,19 @@ fn get_account(db_path: &str, identifier: &str, output_path: &str) {
     // Convert to nibbles
     let nibbles = identifier_to_nibbles(&account_id)?;
 
-    // TODO: Use nibbles to look up account
-    println!("Looking up account with identifier: {:?}", account_id);
-    println!("Nibbles: {:?}", nibbles);
+    let output_file = File::create(output_path)?;
+    
+    // Convert verbosity level to string
+    let verbosity_str = match verbosity {
+        VerbosityLevel::Normal => None,
+        VerbosityLevel::Verbose => Some("v".to_string()),
+        VerbosityLevel::ExtraVerbose => Some("ev".to_string()),
+    };
 
-    db.get_account_or_storage(output_path, nibbles);
+    match db.get_account_or_storage(Some(&output_file), nibbles, verbosity_str) {
+        Ok(_) => println!("Path info printed to {}", output_path),
+        Err(e) => println!("Error printing path: {:?}", e),
+    }
 
     Ok(())
 }
