@@ -555,8 +555,7 @@ impl StorageEngine {
     /// - `page_index`: Index of the current node in the page
     ///
     /// # Returns
-    /// - `Ok(Some(Pointer))`: Pointer to the modified node
-    /// - `Ok(None)`: Node was deleted
+    /// - `Ok(PointerChange)`: PointerChange to the possibly modified node
     /// - `Err(Error)`: Operation failed, possibly due to page split
     fn set_values_in_cloned_page(
         &self,
