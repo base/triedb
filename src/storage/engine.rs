@@ -1009,33 +1009,134 @@ impl StorageEngine {
                 continue;
             }
 
-            // Get the child pointer for this index
-            let child_pointer = node.child(child_index)?;
+            self.handle_branch_node_with_changes(
+                context,
+                matching_changes,
+                path_offset,
+                slotted_page,
+                page_index,
+                node,
+                common_prefix_length,
+                child_index,
+            )?;
+        }
 
-            match child_pointer {
-                Some(child_pointer) => {
-                    // Child exists, traverse it
-                    let child_location = child_pointer.location();
-                    let child_pointer_change =
-                        if let Some(child_cell_index) = child_location.cell_index() {
-                            // Local child node
-                            self.set_values_in_cloned_page(
-                                context,
-                                matching_changes,
-                                path_offset + common_prefix_length as u8 + 1,
-                                slotted_page,
-                                child_cell_index,
-                            )?
-                        } else {
-                            // Remote child node
-                            let child_page_id = child_location.page_id().unwrap();
-                            self.set_values_in_page(
-                                context,
-                                matching_changes,
-                                path_offset + common_prefix_length as u8 + 1,
-                                child_page_id,
-                            )?
-                        };
+        // Check if the branch node should be deleted or merged
+        self.handle_branch_node_cleanup(context, slotted_page, page_index, node)
+    }
+
+    fn handle_branch_node_with_changes(
+        &self,
+        context: &mut TransactionContext,
+        matching_changes: &[(Nibbles, Option<TrieValue>)],
+        path_offset: u8,
+        slotted_page: &mut SlottedPageMut<'_>,
+        page_index: u8,
+        node: &mut Node,
+        common_prefix_length: usize,
+        child_index: u8,
+    ) -> Result<(), Error> {
+        // Get the child pointer for this index
+        let child_pointer = node.child(child_index)?;
+
+        match child_pointer {
+            Some(child_pointer) => {
+                // Child exists, traverse it
+                let child_location = child_pointer.location();
+                let child_pointer_change =
+                    if let Some(child_cell_index) = child_location.cell_index() {
+                        // Local child node
+                        self.set_values_in_cloned_page(
+                            context,
+                            matching_changes,
+                            path_offset + common_prefix_length as u8 + 1,
+                            slotted_page,
+                            child_cell_index,
+                        )?
+                    } else {
+                        // Remote child node
+                        let child_page_id = child_location.page_id().unwrap();
+                        self.set_values_in_page(
+                            context,
+                            matching_changes,
+                            path_offset + common_prefix_length as u8 + 1,
+                            child_page_id,
+                        )?
+                    };
+
+                match child_pointer_change {
+                    PointerChange::Update(new_child_pointer) => {
+                        self.update_node_child(
+                            node,
+                            slotted_page,
+                            page_index,
+                            Some(new_child_pointer),
+                            child_index,
+                        )?;
+                    }
+                    PointerChange::Delete => {
+                        self.update_node_child(node, slotted_page, page_index, None, child_index)?;
+                    }
+                    PointerChange::None => {}
+                }
+            }
+            None => {
+                // the child node does not exist, so we need to create a new leaf node with the
+                // remaining path.
+
+                // in this case, if the change(s) we want to make are deletes, they should be
+                // ignored as the child node already doesn't exist.
+                let index_of_first_non_delete_change =
+                    matching_changes.iter().position(|(_, value)| value.is_some());
+
+                let matching_changes_without_leading_deletes =
+                    match index_of_first_non_delete_change {
+                        Some(index) => &matching_changes[index..],
+                        None => &[],
+                    };
+
+                if matching_changes_without_leading_deletes.is_empty() {
+                    return Ok(());
+                }
+
+                let ((path, value), matching_changes) =
+                    matching_changes_without_leading_deletes.split_first().unwrap();
+                let remaining_path: Nibbles =
+                    path.slice(path_offset as usize + common_prefix_length + 1..);
+
+                let value = value.as_ref().unwrap();
+
+                // ensure that the page has enough space to insert a new leaf node.
+                let node_size_incr = node.size_incr_with_new_child();
+                let new_node = Node::new_leaf(remaining_path, value)?;
+
+                // if the page doesn't have enough space to
+                // 1. insert the new leaf node
+                // 2. and the node (branch) size increase
+                // 3. and add new cell pointer for the new leaf node (3 bytes)
+                // when adding the new child, split the page.
+                // FIXME: is it safe to split the page here if we've already modified the page?
+                if slotted_page.num_free_bytes() <
+                    node_size_incr + new_node.size() + CELL_POINTER_SIZE
+                {
+                    self.split_page(context, slotted_page)?;
+                    return Err(Error::PageSplit);
+                }
+
+                let rlp_node = new_node.as_rlp_node();
+                let location = Location::for_cell(slotted_page.insert_value(&new_node)?);
+                node.set_child(child_index, Pointer::new(location, rlp_node))?;
+                slotted_page.set_value(page_index, node)?;
+
+                // If there are more matching changes, recurse
+                if !matching_changes.is_empty() {
+                    let child_pointer_change = self.set_values_in_cloned_page(
+                        context,
+                        matching_changes,
+                        path_offset + common_prefix_length as u8 + 1,
+                        slotted_page,
+                        location.cell_index().unwrap(),
+                    )?;
 
                     match child_pointer_change {
                         PointerChange::Update(new_child_pointer) => {
@@ -1059,92 +1160,9 @@ impl StorageEngine {
                         PointerChange::None => {}
                     }
                 }
-                None => {
-                    // the child node does not exist, so we need to create a new leaf node with the
-                    // remaining path.
-
-                    // in this case, if the change(s) we want to make are deletes, they should be
-                    // ignored as the child node already doesn't exist.
-                    let index_of_first_non_delete_change =
-                        matching_changes.iter().position(|(_, value)| value.is_some());
-
-                    let matching_changes_without_leading_deletes =
-                        match index_of_first_non_delete_change {
-                            Some(index) => &matching_changes[index..],
-                            None => &[],
-                        };
-
-                    if matching_changes_without_leading_deletes.is_empty() {
-                        continue;
-                    }
-
-                    let ((path, value), matching_changes) =
-                        matching_changes_without_leading_deletes.split_first().unwrap();
-                    let remaining_path: Nibbles =
-                        path.slice(path_offset as usize + common_prefix_length + 1..);
-
-                    let value = value.as_ref().unwrap();
-
-                    // ensure that the page has enough space to insert a new leaf node.
-                    let node_size_incr = node.size_incr_with_new_child();
-                    let new_node = Node::new_leaf(remaining_path, value)?;
-
-                    // if the page doesn't have enough space to
-                    // 1. insert the new leaf node
-                    // 2. and the node (branch) size increase
-                    // 3. and add new cell pointer for the new leaf node (3 bytes)
-                    // when adding the new child, split the page.
-                    // FIXME: is it safe to split the page here if we've already modified the page?
-                    if slotted_page.num_free_bytes() <
-                        node_size_incr + new_node.size() + CELL_POINTER_SIZE
-                    {
-                        self.split_page(context, slotted_page)?;
-                        return Err(Error::PageSplit);
-                    }
-
-                    let rlp_node = new_node.as_rlp_node();
-                    let location = Location::for_cell(slotted_page.insert_value(&new_node)?);
-                    node.set_child(child_index, Pointer::new(location, rlp_node))?;
-                    slotted_page.set_value(page_index, node)?;
-
-                    // If there are more matching changes, recurse
-                    if !matching_changes.is_empty() {
-                        let child_pointer_change = self.set_values_in_cloned_page(
-                            context,
-                            matching_changes,
-                            path_offset + common_prefix_length as u8 + 1,
-                            slotted_page,
-                            location.cell_index().unwrap(),
-                        )?;
-
-                        match child_pointer_change {
-                            PointerChange::Update(new_child_pointer) => {
-                                self.update_node_child(
-                                    node,
-                                    slotted_page,
-                                    page_index,
-                                    Some(new_child_pointer),
-                                    child_index,
-                                )?;
-                            }
-                            PointerChange::Delete => {
-                                self.update_node_child(
-                                    node,
-                                    slotted_page,
-                                    page_index,
-                                    None,
-                                    child_index,
-                                )?;
-                            }
-                            PointerChange::None => {}
-                        }
-                    }
-                }
             }
         }
-
-        // Check if the branch node should be deleted or merged
-        self.handle_branch_node_cleanup(context, slotted_page, page_index, node)
+        Ok(())
     }
 
     /// Handles cleanup of branch nodes (deletion or merging)
