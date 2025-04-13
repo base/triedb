@@ -39,6 +39,7 @@ use super::value::Value;
 #[derive(Debug)]
 pub struct StorageEngine {
     inner: Arc<RwLock<Inner>>,
+    threadpool: rayon::ThreadPool,
 }
 
 #[derive(Debug)]
@@ -56,7 +57,10 @@ enum PointerChange {
 impl StorageEngine {
     /// Creates a new [StorageEngine] with the given [PageManager] and [OrphanPageManager].
     pub fn new(page_manager: PageManager, orphan_manager: OrphanPageManager) -> Self {
-        Self { inner: Arc::new(RwLock::new(Inner { page_manager, orphan_manager })) }
+        Self {
+            inner: Arc::new(RwLock::new(Inner { page_manager, orphan_manager })),
+            threadpool: rayon::ThreadPoolBuilder::new().num_threads(8).build().unwrap(),
+        }
     }
 
     /// Unlocks any orphaned pages as of the given [SnapshotId] for reuse.
