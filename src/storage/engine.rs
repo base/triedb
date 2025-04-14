@@ -27,6 +27,7 @@ use std::{
 };
 
 use super::value::Value;
+use rayon::prelude::*;
 
 /// The [StorageEngine] is responsible for managing the storage of data in the database.
 /// It handles reading and writing account and storage values, as well as managing the lifecycle of
@@ -584,6 +585,10 @@ impl StorageEngine {
         let value = first_change.1.as_ref();
         let common_prefix = path.slice(0..common_prefix_length);
 
+        // run the following code, if error SplitPage, retry. Retry at this stage will not retry all
+        // previous changes
+        // todo
+
         // Case 1: The path does not match the node prefix, create a new branch node as the parent
         // of the current node except when deleting as we don't want to expand nodes into branches
         // when removing values.
@@ -998,6 +1003,7 @@ impl StorageEngine {
         // Partition changes by child index
         let mut remaining_changes = changes;
 
+        let mut change_groups = Vec::with_capacity(16);
         for child_index in 0..16 {
             let matching_changes;
             (matching_changes, remaining_changes) =
@@ -1005,10 +1011,12 @@ impl StorageEngine {
                     path[path_offset as usize + common_prefix_length] == child_index
                 }));
 
-            if matching_changes.is_empty() {
-                continue;
+            if !matching_changes.is_empty() {
+                change_groups.push((child_index, matching_changes));
             }
+        }
 
+        for (child_index, matching_changes) in change_groups {
             self.handle_branch_node_with_changes(
                 context,
                 matching_changes,
@@ -1020,6 +1028,27 @@ impl StorageEngine {
                 child_index,
             )?;
         }
+
+        // let results: Result<Vec<_>, Error> = self.threadpool.install(|| {
+        //     change_groups
+        //         .into_par_iter()
+        //         .map(|(child_index, matching_changes)| {
+        //             // let ctx = context.clone();
+        //             let mut node_clone = node.clone();
+        //             // how to handle context and slotted_page?
+        //             self.handle_branch_node_with_changes(
+        //                 context,
+        //                 matching_changes,
+        //                 path_offset,
+        //                 slotted_page,
+        //                 page_index,
+        //                 node,
+        //                 common_prefix_length,
+        //                 child_index,
+        //             )
+        //         })
+        //         .collect()
+        // });
 
         // Check if the branch node should be deleted or merged
         self.handle_branch_node_cleanup(context, slotted_page, page_index, node)
