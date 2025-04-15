@@ -76,7 +76,7 @@ enum Commands {
         /// Output filepath (optional)
         #[arg(short = 'o', long = "output", default_value = "./root_page_info")]
         output_path: String,
-    }
+    },
 }
 
 fn parse_account_identifier(
@@ -153,7 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             get_account(&db_path, &identifier, &output_path, verbosity)?;
         }
         Commands::RootPage { db_path, output_path } => {
-            print_root_page(&db_path, &output_path);
+            root_page_info(&db_path, &output_path)?;
         }
     }
 
@@ -207,15 +207,16 @@ fn get_account(
     Ok(())
 }
 
-fn print_root_page(db_path: &str, output_path: &str) {
+fn root_page_info(db_path: &str, output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let db = match Database::open(db_path) {
         Ok(db) => db,
         Err(e) => panic!("Could not open database: {:?}", e),
     };
 
     let output_file = File::create(output_path).unwrap();
-    match db.print_root_page(&output_file) {
-        Ok(_) => println!("Root page printed to {}", output_path),
-        Err(e) => println!("Error printing root page: {:?}", e),
+    match db.root_page_info(db_path, &output_file) {
+        Ok(_) => println!("Info written to {}", output_path),
+        Err(e) => println!("Error printing root page info: {:?}", e),
     }
+    Ok(())
 }

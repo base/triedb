@@ -9,7 +9,10 @@ use crate::{
 use alloy_primitives::B256;
 use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
 use parking_lot::RwLock;
-use std::fs::File;
+use std::{
+    fs::File,
+    io::{BufWriter, Write},
+};
 
 #[derive(Debug)]
 pub struct Database {
@@ -49,6 +52,12 @@ impl Metadata {
 pub enum Error {
     PageError(PageError),
     CloseError(engine::Error),
+}
+
+impl From<std::io::Error> for Error {
+    fn from(error: std::io::Error) -> Self {
+        Error::CloseError(engine::Error::Other(error.to_string()))
+    }
 }
 
 impl Database {
@@ -128,6 +137,41 @@ impl Database {
         storage_engine
             .print_path(&context, &nibbles, output_file, verbosity_level)
             .map_err(Error::CloseError)
+    }
+
+    pub fn root_page_info(self, file_path: &str, output_file: &File) -> Result<(), Error> {
+        let page_manager = PageManager::open(file_path).map_err(Error::PageError)?;
+
+        let root_page_0 = page_manager.get(0, 0).map_err(Error::PageError)?;
+        let root_page_1 = page_manager.get(0, 1).map_err(Error::PageError)?;
+
+        let root_0 = RootPage::try_from(root_page_0).map_err(Error::PageError)?;
+        let root_1 = RootPage::try_from(root_page_1).map_err(Error::PageError)?;
+
+        let root_page = if root_0.snapshot_id() > root_1.snapshot_id() { root_0 } else { root_1 };
+
+        let orphaned_page_ids =
+            root_page.get_orphaned_page_ids(&page_manager).map_err(Error::PageError)?;
+
+        let metadata: Metadata = root_page.into();
+
+        let mut writer = BufWriter::new(output_file);
+
+        //state root
+        writer.write_all(format!("State Root: {:?}\n", metadata.state_root).as_bytes())?;
+
+        //root subtrie pageID
+        writer.write_all(
+            format!("Root Subtrie Page ID: {:?}\n", metadata.root_subtrie_page_id).as_bytes(),
+        )?;
+
+        //orphaned pages list (grouped by page)
+        writer.write_all(format!("Orphaned Pages: {:?}\n", orphaned_page_ids).as_bytes())?;
+
+        //write to file
+        writer.flush()?;
+
+        Ok(())
     }
 }
 
