@@ -1,5 +1,5 @@
-use clap::{Parser, Subcommand, ArgAction, ValueEnum};
 use alloy_trie::Nibbles;
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use std::fs::File;
 use triedb::Database;
 
@@ -58,16 +58,14 @@ enum Commands {
         #[arg(short = 'o', long = "output", default_value = "./account_info")]
         output_path: String,
 
-        /// Verbosity level for output
+        /// Verbosity level for output. Options are:
+        /// - Normal: Print account information
+        /// - Verbose: Print account/storage information and node accessed along the path
+        /// - ExtraVerbose: Print pages accessed along the path, along with the "verbose"
+        ///   information
         #[arg(short = 'v', long = "verbose", value_enum, default_value_t = VerbosityLevel::Normal)]
         verbosity: VerbosityLevel,
     },
-    // /// Get statistics about the database
-    // Stats {
-    //     /// Path to the database file
-    //     #[arg(short, long)]
-    //     path: String,
-    // },
 }
 
 fn parse_account_identifier(
@@ -99,7 +97,7 @@ fn parse_account_identifier(
             }
             Ok(AccountIdentifier::AddressWithSlot(address.to_string(), slot.to_string()))
         },
-        _ => Err("Invalid identifier format. Expected either:\n- Single hex string\n- Address and storage slot separated by space".into()),
+        _ => Err(format!("Invalid identifier format. Expected either:\n- Single hex string\n- Address and storage slot separated by space").into()),
     }
 }
 
@@ -142,9 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Account { db_path, identifier, output_path, verbosity } => {
             get_account(&db_path, &identifier, &output_path, verbosity)?;
-        } /* Commands::Stats { path } => {
-           *     get_stats(&path)?;
-           * } */
+        }
     }
 
     Ok(())
@@ -163,8 +159,12 @@ fn print_page(db_path: &str, page_id: Option<u32>, output_path: &str) {
     }
 }
 
-//KALEY TODO change error return
-fn get_account(db_path: &str, identifier: &str, output_path: &str, verbosity: VerbosityLevel) -> Result<(), Box<dyn std::error::Error>> {
+fn get_account(
+    db_path: &str,
+    identifier: &str,
+    output_path: &str,
+    verbosity: VerbosityLevel,
+) -> Result<(), Box<dyn std::error::Error>> {
     let db = match Database::open(db_path) {
         Ok(db) => db,
         Err(e) => panic!("Could not open database: {:?}", e),
@@ -177,26 +177,18 @@ fn get_account(db_path: &str, identifier: &str, output_path: &str, verbosity: Ve
     let nibbles = identifier_to_nibbles(&account_id)?;
 
     let output_file = File::create(output_path)?;
-    
+
     // Convert verbosity level to string
-    let verbosity_str = match verbosity {
-        VerbosityLevel::Normal => None,
-        VerbosityLevel::Verbose => Some("v".to_string()),
-        VerbosityLevel::ExtraVerbose => Some("ev".to_string()),
+    let verbosity_level = match verbosity {
+        VerbosityLevel::Normal => 0,
+        VerbosityLevel::Verbose => 1,
+        VerbosityLevel::ExtraVerbose => 2,
     };
 
-    match db.get_account_or_storage(Some(&output_file), nibbles, verbosity_str) {
+    match db.get_account_or_storage(&output_file, nibbles, verbosity_level) {
         Ok(_) => println!("Path info printed to {}", output_path),
         Err(e) => println!("Error printing path: {:?}", e),
     }
 
     Ok(())
 }
-
-// fn get_stats(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-//     let db = Database::open(db_path)?;
-//     let mut context = db.start_read_only_transaction()?;
-//     // TODO: Implement stats collection
-//     println!("Getting database statistics");
-//     Ok(())
-// }

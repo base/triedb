@@ -10,7 +10,6 @@ use alloy_primitives::B256;
 use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
 use std::{fs::File, sync::RwLock};
 
-
 #[derive(Debug)]
 pub struct Database {
     pub(crate) inner: Inner,
@@ -112,40 +111,23 @@ impl Database {
 
         let context = TransactionContext::new(metadata);
         let storage_engine = self.inner.storage_engine.read().unwrap();
-        storage_engine.print_page(&context, output_file, page_id)
-            .map_err(Error::CloseError)
+        storage_engine.print_page(&context, output_file, page_id).map_err(Error::CloseError)
     }
 
     pub fn get_account_or_storage(
         &self,
-        output_file: Option<&File>,
+        output_file: &File,
         nibbles: Nibbles,
-        verbosity: Option<String>,
+        verbosity_level: u32,
     ) -> Result<(), Error> {
         let metadata = self.inner.metadata.read().unwrap().clone();
         let context = TransactionContext::new(metadata);
         let storage_engine = self.inner.storage_engine.read().unwrap();
-        
-        match verbosity {
-            None => {
-                //just printing the node here, not writing anything to file
-                storage_engine.print_path(&context, &nibbles, output_file)
-                    .map_err(Error::CloseError)?;
-            },
-            Some(verbosity) => {
-                //must be output file for both verbose and extra verbose options
-                if verbosity == "v" {
-                storage_engine.print_path_verbose(&context, &nibbles, &output_file.unwrap(), false)
-                    .map_err(Error::CloseError)?;
-                } else if verbosity == "ev" {
-                    storage_engine.print_path_verbose(&context, &nibbles, &output_file.unwrap(), true)
-                        .map_err(Error::CloseError)?;
-                } else {
-                    //KALEY TODO better error?
-                    return Err(Error::CloseError(engine::Error::EngineClosed));
-                }
-            }
-        }
+
+        storage_engine
+            .print_path(&context, &nibbles, output_file, verbosity_level)
+            .map_err(Error::CloseError)?;
+
         Ok(())
     }
 }
