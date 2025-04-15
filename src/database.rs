@@ -9,7 +9,7 @@ use crate::{
 use alloy_primitives::B256;
 use alloy_trie::EMPTY_ROOT_HASH;
 use parking_lot::RwLock;
-use std::fs::File;
+use std::{fs::File, sync::Arc};
 
 #[derive(Debug)]
 pub struct Database {
@@ -73,11 +73,12 @@ impl Database {
         };
 
         let db = Self::new(metadata, StorageEngine::new(page_manager, orphan_manager));
+        let db_arc = Arc::new(db);
 
-        let tx = db.begin_rw().unwrap();
+        let tx = db_arc.begin_rw().unwrap();
         tx.commit().unwrap();
 
-        Ok(db)
+        Ok(Arc::try_unwrap(db_arc).unwrap())
     }
 
     pub fn open(file_path: &str) -> Result<Self, Error> {
@@ -135,7 +136,7 @@ impl Database {
         }
     }
 
-    pub fn begin_rw(&self) -> Result<Transaction<'_, RW>, TransactionError> {
+    pub fn begin_rw(self: &Arc<Self>) -> Result<Transaction<RW>, TransactionError> {
         let mut transaction_manager = self.inner.transaction_manager.write();
         let storage_engine = self.inner.storage_engine.read();
         let metadata = self.inner.metadata.read().next();
@@ -144,16 +145,16 @@ impl Database {
             storage_engine.unlock(min_snapshot_id - 1);
         }
         let context = TransactionContext::new(metadata);
-        Ok(Transaction::new(context, self, None))
+        Ok(Transaction::new(context, Arc::clone(self), None))
     }
 
-    pub fn begin_ro(&self) -> Result<Transaction<'_, RO>, TransactionError> {
+    pub fn begin_ro(self: &Arc<Self>) -> Result<Transaction<RO>, TransactionError> {
         let mut transaction_manager = self.inner.transaction_manager.write();
-        let storage_engine = self.inner.storage_engine.read();
+        let storage_engine = self.inner.storage_engine.read().clone();
         let metadata = self.inner.metadata.read().clone();
         transaction_manager.begin_ro(metadata.snapshot_id)?;
         let context = TransactionContext::new(metadata);
-        Ok(Transaction::new(context, self, Some(storage_engine)))
+        Ok(Transaction::new(context, Arc::clone(self), Some(storage_engine)))
     }
 
     pub fn state_root(&self) -> B256 {
@@ -238,7 +239,7 @@ mod tests {
     fn test_set_get_account() {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
-        let db = Database::create(file_path.as_str()).unwrap();
+        let db = Arc::new(Database::create(file_path.as_str()).unwrap());
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
 
@@ -354,7 +355,7 @@ mod tests {
     fn test_data_persistence() {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db").to_str().unwrap().to_owned();
-        let db = Database::create(&file_path).unwrap();
+        let db = Arc::new(Database::create(&file_path).unwrap());
 
         let address1 = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
@@ -363,9 +364,9 @@ mod tests {
         tx.set_account(AddressPath::for_address(address1), Some(account1.clone())).unwrap();
 
         tx.commit().unwrap();
-        db.close().unwrap();
+        Arc::try_unwrap(db).unwrap().close().unwrap();
 
-        let db = Database::open(file_path.as_str()).unwrap();
+        let db = Arc::new(Database::open(file_path.as_str()).unwrap());
         let tx = db.begin_ro().unwrap();
         let account = tx.get_account(AddressPath::for_address(address1)).unwrap().unwrap();
         assert_eq!(account, account1);
@@ -378,9 +379,9 @@ mod tests {
         tx.set_account(AddressPath::for_address(address2), Some(account2.clone())).unwrap();
 
         tx.commit().unwrap();
-        db.close().unwrap();
+        Arc::try_unwrap(db).unwrap().close().unwrap();
 
-        let db = Database::open(&file_path).unwrap();
+        let db = Arc::new(Database::open(&file_path).unwrap());
         let tx = db.begin_ro().unwrap();
 
         let account = tx.get_account(AddressPath::for_address(address1)).unwrap().unwrap();
@@ -390,3 +391,4 @@ mod tests {
         assert_eq!(account, account2);
     }
 }
+

@@ -36,7 +36,7 @@ use super::value::Value;
 /// which could be memory-mapped files, in-memory storage, or other implementations.
 ///
 /// All operations are thread-safe through the use of a read-write lock around the inner state.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StorageEngine {
     inner: Arc<RwLock<Inner>>,
 }

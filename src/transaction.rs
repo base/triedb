@@ -13,10 +13,9 @@ use alloy_primitives::{StorageValue, B256};
 use alloy_trie::Nibbles;
 pub use error::TransactionError;
 pub use manager::TransactionManager;
-use parking_lot::RwLockReadGuard;
 use reth_trie_common::MultiProof;
 use sealed::sealed;
-use std::{collections::HashMap, fmt::Debug};
+use std::{collections::HashMap, fmt::Debug, sync::Arc};
 
 #[sealed]
 pub trait TransactionKind: Debug {}
@@ -36,25 +35,25 @@ impl TransactionKind for RO {}
 // Compile-time assertion to ensure that `Transaction` is `Send`
 const _: fn() = || {
     fn consumer<T: Send>() {}
-    consumer::<Transaction<'_, RO>>();
-    consumer::<Transaction<'_, RW>>();
+    consumer::<Transaction<RO>>();
+    consumer::<Transaction<RW>>();
 };
 
 #[derive(Debug)]
-pub struct Transaction<'tx, K: TransactionKind> {
+pub struct Transaction<K: TransactionKind> {
     committed: bool,
     context: TransactionContext,
-    database: &'tx Database,
+    database: Arc<Database>,
     pending_changes: HashMap<Nibbles, Option<TrieValue>>,
-    _lock: Option<RwLockReadGuard<'tx, StorageEngine>>,
+    _lock: Option<StorageEngine>,
     _marker: std::marker::PhantomData<K>,
 }
 
-impl<'tx, K: TransactionKind> Transaction<'tx, K> {
+impl<K: TransactionKind> Transaction<K> {
     pub(crate) fn new(
         context: TransactionContext,
-        database: &'tx Database,
-        lock: Option<RwLockReadGuard<'tx, StorageEngine>>,
+        database: Arc<Database>,
+        lock: Option<StorageEngine>,
     ) -> Self {
         Self {
             committed: false,
@@ -67,7 +66,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
     }
 
     pub fn get_account(
-        &'tx self,
+        &self,
         address_path: AddressPath,
     ) -> Result<Option<Account>, TransactionError> {
         let storage_engine = self.database.inner.storage_engine.read();
@@ -112,7 +111,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
     }
 }
 
-impl Transaction<'_, RW> {
+impl Transaction<RW> {
     pub fn set_account(
         &mut self,
         address_path: AddressPath,
@@ -182,7 +181,7 @@ impl Transaction<'_, RW> {
     }
 }
 
-impl Transaction<'_, RO> {
+impl Transaction<RO> {
     pub fn commit(mut self) -> Result<(), TransactionError> {
         let mut transaction_manager = self.database.inner.transaction_manager.write();
         transaction_manager.remove_transaction(self.context.metadata.snapshot_id, false)?;
@@ -192,7 +191,7 @@ impl Transaction<'_, RO> {
     }
 }
 
-impl<K: TransactionKind> Drop for Transaction<'_, K> {
+impl<K: TransactionKind> Drop for Transaction<K> {
     fn drop(&mut self) {
         // TODO: panic if the transaction is not committed
     }
