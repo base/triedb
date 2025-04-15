@@ -111,7 +111,7 @@ impl Database {
         let metadata = self.inner.metadata.read().clone();
 
         let context = TransactionContext::new(metadata);
-        let storage_engine = self.inner.storage_engine.read().unwrap();
+        let storage_engine = self.inner.storage_engine.read();
         storage_engine.print_page(&context, output_file, page_id).map_err(Error::CloseError)
     }
 
@@ -121,9 +121,9 @@ impl Database {
         nibbles: Nibbles,
         verbosity_level: u32,
     ) -> Result<(), Error> {
-        let metadata = self.inner.metadata.read().unwrap().clone();
+        let metadata = self.inner.metadata.read().clone();
         let context = TransactionContext::new(metadata);
-        let storage_engine = self.inner.storage_engine.read().unwrap();
+        let storage_engine = self.inner.storage_engine.read();
 
         storage_engine
             .print_path(&context, &nibbles, output_file, verbosity_level)
