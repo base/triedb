@@ -1529,7 +1529,7 @@ impl StorageEngine {
         
         if let Some(file) = output_file {
             let mut file_writer = BufWriter::new(file);
-            self.print_path_helper(
+            let node = self.print_path_helper(
                 context,
                 path,
                 0,
@@ -1537,11 +1537,27 @@ impl StorageEngine {
                 0,
                 &mut file_writer,
             )?;
+            if let Some(node) = node {
+                match node {
+                    TrieValue::Account(acct) => {
+                        println!("AccountLeaf: nonce: {:?}, balance: {:?}, code_hash: {:?}, storage_root: {:?}\n",
+                            acct.nonce,
+                            acct.balance,
+                            acct.code_hash,
+                            acct.storage_root)
+                    }
+                    TrieValue::Storage(strg) => {
+                        println!("StorageLeaf: {}\n", strg.to_string())
+                    }
+                    _ => {}
+                }
+            }
         }
         
         Ok(())
     }
-
+    
+    //Note: very similar to get_value_from_page(), but doesn't cache account
     fn print_path_helper(
         &self,
         context: &TransactionContext,
@@ -1554,33 +1570,10 @@ impl StorageEngine {
         let node: Node = slotted_page.get_value(page_index)?;
         
         // Write node information to file
-        match &node {
-            Node::Branch { prefix: _, children: _, } => {
-                let output_string = format!("Branch: Page ID: {}\n", slotted_page.id());
-                file_writer.write_all(output_string.as_bytes())
-                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-            }
-            Node::AccountLeaf { prefix: _, nonce_rlp: _, balance_rlp: _, code_hash: _, storage_root: _ } => {
-                let val = match node.value() {
-                    Ok(TrieValue::Account(acct)) => {
-                        format!("nonce: {:?}, balance: {:?}", acct.nonce, acct.balance)
-                    }
-                    _ => "".to_string(),
-                };
-                let output_string = format!("AccountLeaf: {}\n", val);
-                file_writer.write_all(output_string.as_bytes())
-                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-            }
-            Node::StorageLeaf { prefix: _, value_rlp: _ } => {
-                let val = match node.value() {
-                    Ok(TrieValue::Storage(strg)) => strg.to_string(),
-                    _ => "".to_string(),
-                };
-                let output_string = format!("StorageLeaf: {}\n", val);
-                file_writer.write_all(output_string.as_bytes())
-                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-            }
-        }
+        let node_string = self.node_value_to_string(&node, slotted_page.id());
+        file_writer.write_all(node_string.as_bytes())
+            .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+
         
         let (common_prefix_length, _) = find_shortest_common_prefix(&[(path.clone(), ())], path_offset as u8, &node);
         
@@ -1636,11 +1629,17 @@ impl StorageEngine {
         
         // If extra_verbose, print the root page first
         if extra_verbose {
-            let output_string = format!("\n\n\nNEW PAGE: {}\n", page_id);
-            writer.write_all(output_string.as_bytes())
+            writer.write_all(format!("PAGE: {}\n", page_id).as_bytes())
                 .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+            writer.flush().map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+
             self.print_page(context, output_file, Some(page_id))?;
         }
+
+        //print page ID 
+        writer.write_all(format!("\nNODES ACCESSED FROM PAGE {}\n",page_id).as_bytes())
+            .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+        writer.flush().map_err(|e| Error::Other(format!("IO error: {}", e)))?;
         
         self.print_path_verbose_helper(
             context,
@@ -1668,57 +1667,9 @@ impl StorageEngine {
         let node: Node = slotted_page.get_value(page_index)?;
         
         // Write node information with indentation
-        match &node {
-            Node::Branch { prefix, children } => {
-                let output_string = format!(
-                    "Branch Node:  Page ID: {}  Prefix: {:?}  Children: {:?}\n",
-                    slotted_page.id(),
-                    prefix,
-                    children.iter().enumerate()
-                        .filter(|(_, child)| child.is_some())
-                        .map(|(i, _)| format!("{}", i))
-                        .collect::<Vec<_>>()
-                );
-                writer.write_all(output_string.as_bytes())
-                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-            }
-            Node::AccountLeaf { prefix, nonce_rlp: _, balance_rlp: _, code_hash: _, storage_root: _ } => {
-                let val = match node.value() {
-                    Ok(TrieValue::Account(acct)) => {
-                        format!(
-                            "nonce: {:?}, balance: {:?}, code_hash: {:?}, storage_root: {:?}",
-                            acct.nonce,
-                            acct.balance,
-                            acct.code_hash,
-                            acct.storage_root
-                        )
-                    }
-                    _ => "".to_string(),
-                };
-                let output_string = format!(
-                    "Account Leaf Node:  Page ID: {}  Prefix: {:?}  Value: {}\n",
-                    slotted_page.id(),
-                    prefix,
-                    val
-                );
-                writer.write_all(output_string.as_bytes())
-                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-            }
-            Node::StorageLeaf { prefix, value_rlp: _ } => {
-                let val = match node.value() {
-                    Ok(TrieValue::Storage(strg)) => strg.to_string(),
-                    _ => "".to_string(),
-                };
-                let output_string = format!(
-                    "Storage Leaf Node:  Page ID: {}  Prefix: {:?}  Value: {}\n",
-                    slotted_page.id(),
-                    prefix,
-                    val
-                );
-                writer.write_all(output_string.as_bytes())
-                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-            }
-        }
+        let node_string = self.node_value_to_string(&node, slotted_page.id());
+        writer.write_all(node_string.as_bytes())
+            .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
         
         let (common_prefix_length, _) = find_shortest_common_prefix(&[(path.clone(), ())], path_offset as u8, &node);
         
@@ -1738,11 +1689,19 @@ impl StorageEngine {
                 )?;
                 
                 // If we're moving to a new page and extra_verbose is true, print the new page
-                if extra_verbose && child_slotted_page.id() != slotted_page.id() {
-                    let output_string = format!("\n\n\nNEW PAGE: {}\n", child_slotted_page.id());
-                    writer.write_all(output_string.as_bytes())
+                if child_slotted_page.id() != slotted_page.id() {
+                    if extra_verbose {
+                        writer.write_all(format!("\n\n\nNEW PAGE: {}\n", child_slotted_page.id()).as_bytes())
+                            .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                        writer.flush().map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                        self.print_page(context, output_file, Some(child_slotted_page.id()))?;
+                    }
+                    
+                    
+                    writer.write_all(format!("\nNODES ACCESSED FROM PAGE {}\n",child_slotted_page.id()).as_bytes())
                         .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-                    self.print_page(context, output_file, Some(child_slotted_page.id()))?;
+                    writer.flush().map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+
                 }
                 
                 return self.print_path_verbose_helper(
@@ -1759,6 +1718,40 @@ impl StorageEngine {
         }
         
         Ok(None)
+    }
+
+    // Helper function to convert node information to string for printing/writing to file
+    fn node_value_to_string(&self, node: &Node, page_id: u32) -> String {
+        match &node {
+            Node::Branch { prefix, children, } => {
+                format!("Branch Node:  Page ID: {}  Prefix: {:?}  Children: {:?}\n", page_id, prefix, children.iter().enumerate()
+                .filter(|(_, child)| child.is_some())
+                .map(|(i, _)| format!("{}", i))
+                .collect::<Vec<_>>())
+                
+            }
+            Node::AccountLeaf { prefix: _, nonce_rlp: _, balance_rlp: _, code_hash: _, storage_root: _ } => {
+                let val = match node.value() {
+                    Ok(TrieValue::Account(acct)) => {
+                        format!("AccountLeaf: nonce: {:?}, balance: {:?}, code_hash: {:?}, storage_root: {:?}\n",
+                            acct.nonce,
+                            acct.balance,
+                            acct.code_hash,
+                            acct.storage_root)
+                    }
+                    _ => "".to_string(),
+                };
+                format!("AccountLeaf: {}\n", val)
+            }
+            Node::StorageLeaf { prefix: _, value_rlp: _ } => {
+                let val = match node.value() {
+                    Ok(TrieValue::Storage(strg)) => format!("StorageLeaf: {}\n", strg.to_string()),
+                    _ => "".to_string(),
+                };
+                format!("StorageLeaf: {}\n", val)
+            }
+        }
+    
     }
 
 }
