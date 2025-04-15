@@ -391,4 +391,3 @@ mod tests {
         assert_eq!(account, account2);
     }
 }
-

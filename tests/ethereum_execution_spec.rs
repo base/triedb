@@ -8,6 +8,7 @@ use std::{
     cmp::min,
     collections::{HashMap, HashSet},
     str::FromStr,
+    sync::Arc,
 };
 use tempdir::TempDir;
 use triedb::{
@@ -15,7 +16,6 @@ use triedb::{
     path::{AddressPath, StoragePath},
     Database,
 };
-use std::sync::Arc;
 use walkdir::WalkDir;
 
 #[test]
