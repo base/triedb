@@ -15,15 +15,15 @@ use crate::{
     pointer::Pointer,
     snapshot::SnapshotId,
 };
-
 use alloy_primitives::StorageValue;
 use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
+use parking_lot::RwLock;
 use std::{
     cmp::{max, Ordering},
     fmt::Debug,
     fs::File,
     io::{BufWriter, Write},
-    sync::{Arc, RwLock},
+    sync::Arc,
 };
 
 use super::value::Value;
@@ -61,14 +61,14 @@ impl StorageEngine {
 
     /// Unlocks any orphaned pages as of the given [SnapshotId] for reuse.
     pub(crate) fn unlock(&self, snapshot_id: SnapshotId) {
-        self.inner.write().unwrap().orphan_manager.unlock(snapshot_id);
+        self.inner.write().orphan_manager.unlock(snapshot_id);
     }
 
     /// Allocates a new page from the underlying page manager.
     /// If there is an orphaned page available as of the given [SnapshotId],
     /// it is used to allocate a new page instead.
     fn allocate_page<'p>(&self, context: &mut TransactionContext) -> Result<PageMut<'p>, Error> {
-        self.inner.write().unwrap().allocate_page(context)
+        self.inner.write().allocate_page(context)
     }
 
     /// Retrieves a mutable clone of a [Page] from the underlying [PageManager].
@@ -79,7 +79,7 @@ impl StorageEngine {
         context: &mut TransactionContext,
         page_id: PageId,
     ) -> Result<PageMut<'p>, Error> {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write();
         let original_page = inner.get_page_mut(context, page_id)?;
 
         // if the page already has the correct snapshot id, return it without cloning.
@@ -110,7 +110,7 @@ impl StorageEngine {
         context: &TransactionContext,
         page_id: PageId,
     ) -> Result<Page<'p>, Error> {
-        self.inner.read().unwrap().get_page(context, page_id)
+        self.inner.read().get_page(context, page_id)
     }
 
     /// Retrieves a mutable [Page] from the underlying [PageManager].
@@ -120,7 +120,7 @@ impl StorageEngine {
         context: &TransactionContext,
         page_id: PageId,
     ) -> Result<PageMut<'p>, Error> {
-        self.inner.write().unwrap().get_page_mut(context, page_id)
+        self.inner.write().get_page_mut(context, page_id)
     }
 
     /// Retrieves an [Account] from the storage engine, identified by the given [AddressPath].
@@ -370,7 +370,6 @@ impl StorageEngine {
                 Ok(PointerChange::Delete) => {
                     self.inner
                         .write()
-                        .unwrap()
                         .orphan_manager
                         .add_orphaned_page_id(context.metadata.snapshot_id, page_id);
                     return Ok(PointerChange::Delete);
@@ -1151,7 +1150,6 @@ impl StorageEngine {
         if page_index == 0 {
             self.inner
                 .write()
-                .unwrap()
                 .orphan_manager
                 .add_orphaned_page_id(context.metadata.snapshot_id, branch_page_id);
         }
@@ -1260,7 +1258,6 @@ impl StorageEngine {
         {
             self.inner
                 .write()
-                .unwrap()
                 .orphan_manager
                 .add_orphaned_page_ids(context.metadata.snapshot_id, orphaned_page_ids)
         }
@@ -1306,7 +1303,7 @@ impl StorageEngine {
 
     /// Commits all outstanding data to disk.
     pub fn commit(&self, context: &TransactionContext) -> Result<(), Error> {
-        self.inner.write().unwrap().commit(context)
+        self.inner.write().commit(context)
     }
 
     /// Rolls back all outstanding data to disk. Currently unimplemented.
@@ -1326,7 +1323,7 @@ impl StorageEngine {
     ) -> Result<(), Error> {
         assert!(grow_by > 1.0, "grow_by must be greater than 1.0");
 
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write();
         let current_page_count = inner.page_manager.size();
         let unallocated_page_count = current_page_count - context.metadata.max_page_number - 1;
         let unlocked_page_count = inner.orphan_manager.unlocked_page_count();
@@ -1348,18 +1345,18 @@ impl StorageEngine {
 
     /// Resizes the storage engine to the given number of pages.
     pub(crate) fn resize(&mut self, new_page_count: PageId) -> Result<(), Error> {
-        self.inner.write().unwrap().resize(new_page_count)
+        self.inner.write().resize(new_page_count)
     }
 
     /// Returns the total number of pages in the storage engine.
     pub fn size(&self) -> u32 {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
         inner.page_manager.size()
     }
 
     /// Shrinks the storage to its minimum size and commits all outstanding data to disk.
     pub fn shrink_and_commit(&self, context: &TransactionContext) -> Result<(), Error> {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write();
 
         // there will always be a minimum of 256 pages (root pages + reserved orphan pages).
         let max_page_count = max(context.metadata.max_page_number + 1, 256);

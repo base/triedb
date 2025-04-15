@@ -1,8 +1,6 @@
 mod error;
 mod manager;
 
-use std::{fmt::Debug, sync::RwLockReadGuard};
-
 use crate::{
     account::Account,
     context::TransactionContext,
@@ -15,9 +13,10 @@ use alloy_primitives::{StorageValue, B256};
 use alloy_trie::Nibbles;
 pub use error::TransactionError;
 pub use manager::TransactionManager;
+use parking_lot::RwLockReadGuard;
 use reth_trie_common::MultiProof;
 use sealed::sealed;
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Debug};
 
 #[sealed]
 pub trait TransactionKind: Debug {}
@@ -33,6 +32,13 @@ pub struct RO {}
 
 #[sealed]
 impl TransactionKind for RO {}
+
+// Compile-time assertion to ensure that `Transaction` is `Send`
+const _: fn() = || {
+    fn consumer<T: Send>() {}
+    consumer::<Transaction<'_, RO>>();
+    consumer::<Transaction<'_, RW>>();
+};
 
 #[derive(Debug)]
 pub struct Transaction<'tx, K: TransactionKind> {
@@ -64,7 +70,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         &'tx self,
         address_path: AddressPath,
     ) -> Result<Option<Account>, TransactionError> {
-        let storage_engine = self.database.inner.storage_engine.read().unwrap();
+        let storage_engine = self.database.inner.storage_engine.read();
         let account = storage_engine.get_account(&self.context, address_path).unwrap();
 
         self.database.update_metrics_ro(&self.context);
@@ -76,7 +82,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         &self,
         storage_path: StoragePath,
     ) -> Result<Option<StorageValue>, TransactionError> {
-        let storage_engine = self.database.inner.storage_engine.read().unwrap();
+        let storage_engine = self.database.inner.storage_engine.read();
         let storage_slot = storage_engine.get_storage(&self.context, storage_path).unwrap();
 
         self.database.update_metrics_ro(&self.context);
@@ -91,7 +97,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         &self,
         address_path: AddressPath,
     ) -> Result<Option<(Account, MultiProof)>, TransactionError> {
-        let storage_engine = self.database.inner.storage_engine.read().unwrap();
+        let storage_engine = self.database.inner.storage_engine.read();
         let result = storage_engine.get_account_with_proof(&self.context, address_path).unwrap();
         Ok(result)
     }
@@ -100,7 +106,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         &self,
         storage_path: StoragePath,
     ) -> Result<Option<(StorageValue, MultiProof)>, TransactionError> {
-        let storage_engine = self.database.inner.storage_engine.read().unwrap();
+        let storage_engine = self.database.inner.storage_engine.read();
         let result = storage_engine.get_storage_with_proof(&self.context, storage_path).unwrap();
         Ok(result)
     }
@@ -126,7 +132,7 @@ impl Transaction<'_, RW> {
     }
 
     pub fn commit(mut self) -> Result<(), TransactionError> {
-        let storage_engine = self.database.inner.storage_engine.read().unwrap();
+        let storage_engine = self.database.inner.storage_engine.read();
         let mut changes =
             self.pending_changes.drain().collect::<Vec<(Nibbles, Option<TrieValue>)>>();
 
@@ -145,11 +151,11 @@ impl Transaction<'_, RW> {
             storage_engine.set_values(&mut self.context, changes.as_mut()).unwrap();
         }
 
-        let mut transaction_manager = self.database.inner.transaction_manager.write().unwrap();
-        let storage_engine = self.database.inner.storage_engine.read().unwrap();
+        let mut transaction_manager = self.database.inner.transaction_manager.write();
+        let storage_engine = self.database.inner.storage_engine.read();
         storage_engine.commit(&self.context).unwrap();
 
-        let mut metadata = self.database.inner.metadata.write().unwrap();
+        let mut metadata = self.database.inner.metadata.write();
         *metadata = self.context.metadata.clone();
 
         self.database.update_metrics_rw(&self.context);
@@ -161,11 +167,11 @@ impl Transaction<'_, RW> {
     }
 
     pub fn rollback(mut self) -> Result<(), TransactionError> {
-        let mut transaction_manager = self.database.inner.transaction_manager.write().unwrap();
-        let storage_engine = self.database.inner.storage_engine.read().unwrap();
+        let mut transaction_manager = self.database.inner.transaction_manager.write();
+        let storage_engine = self.database.inner.storage_engine.read();
         // TODO: this is temperorary until we actually implement rollback.
         // we need to update the metadata to the next snapshot id.
-        let mut metadata = self.database.inner.metadata.write().unwrap();
+        let mut metadata = self.database.inner.metadata.write();
         *metadata = self.context.metadata.clone();
 
         storage_engine.rollback(&self.context).unwrap();
@@ -178,7 +184,7 @@ impl Transaction<'_, RW> {
 
 impl Transaction<'_, RO> {
     pub fn commit(mut self) -> Result<(), TransactionError> {
-        let mut transaction_manager = self.database.inner.transaction_manager.write().unwrap();
+        let mut transaction_manager = self.database.inner.transaction_manager.write();
         transaction_manager.remove_transaction(self.context.metadata.snapshot_id, false)?;
 
         self.committed = true;
