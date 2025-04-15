@@ -66,6 +66,17 @@ enum Commands {
         #[arg(short = 'v', long = "verbose", value_enum, default_value_t = VerbosityLevel::Normal)]
         verbosity: VerbosityLevel,
     },
+
+    /// Print database information derived from RootPage
+    RootPage {
+        /// Path to the database file
+        #[arg(short = 'd', long = "database")]
+        db_path: String,
+
+        /// Output filepath (optional)
+        #[arg(short = 'o', long = "output", default_value = "./root_page_info")]
+        output_path: String,
+    }
 }
 
 fn parse_account_identifier(
@@ -141,6 +152,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Account { db_path, identifier, output_path, verbosity } => {
             get_account(&db_path, &identifier, &output_path, verbosity)?;
         }
+        Commands::RootPage { db_path, output_path } => {
+            print_root_page(&db_path, &output_path);
+        }
     }
 
     Ok(())
@@ -191,4 +205,17 @@ fn get_account(
     }
 
     Ok(())
+}
+
+fn print_root_page(db_path: &str, output_path: &str) {
+    let db = match Database::open(db_path) {
+        Ok(db) => db,
+        Err(e) => panic!("Could not open database: {:?}", e),
+    };
+
+    let output_file = File::create(output_path).unwrap();
+    match db.print_root_page(&output_file) {
+        Ok(_) => println!("Root page printed to {}", output_path),
+        Err(e) => println!("Error printing root page: {:?}", e),
+    }
 }
