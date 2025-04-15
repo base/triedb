@@ -1,6 +1,7 @@
 use alloy_primitives::{Address, StorageKey, StorageValue, U256};
 use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
 use rand::prelude::*;
+use std::sync::Arc;
 use tempdir::TempDir;
 use triedb::{
     account::Account,
@@ -15,10 +16,10 @@ pub fn generate_random_address(rng: &mut StdRng) -> AddressPath {
     AddressPath::for_address(addr)
 }
 
-pub fn setup_database(size: usize) -> (TempDir, Database) {
+pub fn setup_database(size: usize) -> (TempDir, Arc<Database>) {
     let dir = TempDir::new("triedb_bench").unwrap();
     let db_path = dir.path().join("db");
-    let db = Database::create(db_path.to_str().unwrap()).unwrap();
+    let db = Arc::new(Database::create(db_path.to_str().unwrap()).unwrap());
 
     // Populate database with initial accounts
     let mut rng = StdRng::seed_from_u64(42);
@@ -38,10 +39,10 @@ pub fn setup_database(size: usize) -> (TempDir, Database) {
     (dir, db)
 }
 
-pub fn setup_database_with_storage(size: usize) -> (TempDir, Database) {
+pub fn setup_database_with_storage(size: usize) -> (TempDir, Arc<Database>) {
     let dir = TempDir::new("triedb_bench_storage").unwrap();
     let db_path = dir.path().join("db");
-    let db = Database::create(db_path.to_str().unwrap()).unwrap();
+    let db = Arc::new(Database::create(db_path.to_str().unwrap()).unwrap());
 
     // Populate database with initial accounts
     let mut rng = StdRng::seed_from_u64(42);
