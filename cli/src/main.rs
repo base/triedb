@@ -1,5 +1,5 @@
 use alloy_trie::Nibbles;
-use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::fs::File;
 use triedb::Database;
 
@@ -80,7 +80,7 @@ fn parse_account_identifier(
             match hex_str.len() {
                 40 => Ok(AccountIdentifier::Address(parts[0].to_string())),
                 64 | 128 => Ok(AccountIdentifier::FullHash(parts[0].to_string())),
-                _ => Err(format!("Invalid identifier length. Must be either:\n- 40 hex chars for address\n- 64 or 128 hex chars for full hash\n- 40 hex chars + space + variable length for address with slot").into()),
+                _ => Err("Invalid identifier length. Must be either:\n- 40 hex chars for address\n- 64 or 128 hex chars for full hash\n- 40 hex chars + space + variable length for address with slot".into()),
             }
         },
         2 => {
@@ -97,7 +97,7 @@ fn parse_account_identifier(
             }
             Ok(AccountIdentifier::AddressWithSlot(address.to_string(), slot.to_string()))
         },
-        _ => Err(format!("Invalid identifier format. Expected either:\n- Single hex string\n- Address and storage slot separated by space").into()),
+        _ => Err("Invalid identifier format. Expected either:\n- Single hex string\n- Address and storage slot separated by space".into()),
     }
 }
 

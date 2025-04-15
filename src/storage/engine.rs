@@ -1513,7 +1513,7 @@ impl StorageEngine {
         path: &Nibbles,
         output_file: &File,
         verbosity_level: u32,
-    ) -> Result<Option<TrieValue>, Error> {
+    ) -> Result<(), Error> {
         let page_id = context.metadata.root_subtrie_page_id;
         let page = self.get_page(context, page_id)?;
         let slotted_page = SlottedPage::try_from(page)?;
@@ -1570,7 +1570,7 @@ impl StorageEngine {
         writer: &mut BufWriter<&File>,
         output_file: &File,
         verbosity_level: u32,
-    ) -> Result<Option<TrieValue>, Error> {
+    ) -> Result<(), Error> {
         let node: Node = slotted_page.get_value(page_index)?;
 
         if verbosity_level > 0 {
@@ -1595,7 +1595,7 @@ impl StorageEngine {
                         .write_all(node_string.as_bytes())
                         .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
                 }
-                return Ok(node.value().ok());
+                return Ok(());
             }
 
             let next_nibble = remaining_path[0];
@@ -1640,7 +1640,7 @@ impl StorageEngine {
             }
         }
 
-        Ok(None)
+        Ok(())
     }
 
     // Helper function to convert node information to string for printing/writing to file

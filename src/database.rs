@@ -127,9 +127,7 @@ impl Database {
 
         storage_engine
             .print_path(&context, &nibbles, output_file, verbosity_level)
-            .map_err(Error::CloseError)?;
-
-        Ok(())
+            .map_err(Error::CloseError)
     }
 }
 
