@@ -18,40 +18,35 @@ impl TransactionManager {
         Self { has_writer: false, open_txs: Vec::new() }
     }
 
+    pub fn min_snapshot_id(&self) -> Option<SnapshotId> {
+        self.open_txs.iter().copied().min()
+    }
+
     pub fn begin_rw(&mut self, snapshot_id: SnapshotId) -> Result<SnapshotId, TransactionError> {
         // only allow one writable transaction at a time
         if self.has_writer {
             return Err(TransactionError);
         }
         self.has_writer = true;
-        self.add_tx_handle(snapshot_id - 1)
+        self.open_txs.push(snapshot_id - 1);
+        Ok(self.min_snapshot_id().unwrap())
     }
 
-    pub fn begin_ro(&mut self, snapshot_id: SnapshotId) -> Result<SnapshotId, TransactionError> {
-        self.add_tx_handle(snapshot_id)
-    }
-
-    fn add_tx_handle(&mut self, snapshot_id: SnapshotId) -> Result<SnapshotId, TransactionError> {
+    pub fn begin_ro(&mut self, snapshot_id: SnapshotId) {
         self.open_txs.push(snapshot_id);
-        self.open_txs.sort_unstable();
-        Ok(*self.open_txs.first().unwrap())
     }
 
     // Removes a transaction from the list of open transactions
-    pub(crate) fn remove_transaction(
-        &mut self,
-        snapshot_id: SnapshotId,
-        is_writer: bool,
-    ) -> Result<(), TransactionError> {
-        let index: usize;
+    pub(crate) fn remove_tx(&mut self, snapshot_id: SnapshotId, is_writer: bool) {
         if is_writer {
-            index = self.open_txs.binary_search(&(snapshot_id - 1)).unwrap();
+            debug_assert!(self.has_writer);
             self.has_writer = false;
-        } else {
-            index = self.open_txs.binary_search(&snapshot_id).unwrap();
         }
-        self.open_txs.remove(index);
-        Ok(())
+
+        let snapshot_id = if is_writer { snapshot_id - 1 } else { snapshot_id };
+        let index =
+            self.open_txs.iter().position(|&s| s == snapshot_id).expect("snapshot not found");
+        self.open_txs.swap_remove(index);
     }
 }
 
@@ -62,13 +57,16 @@ mod tests {
     #[test]
     fn test_begin() {
         let mut manager = TransactionManager::new();
-        let ro_snapshot_id = manager.begin_ro(1).unwrap();
-        let rw_snapshot_id = manager.begin_rw(1).unwrap();
-        assert_eq!(ro_snapshot_id, 1);
-        assert_eq!(rw_snapshot_id, 0);
+        assert_eq!(manager.min_snapshot_id(), None);
 
-        let ro_snapshot_id = manager.begin_ro(2).unwrap();
-        assert_eq!(ro_snapshot_id, 0);
+        manager.begin_ro(1);
+        assert_eq!(manager.min_snapshot_id(), Some(1));
+
+        assert_eq!(manager.begin_rw(1).unwrap(), 0);
+        assert_eq!(manager.min_snapshot_id(), Some(0));
+
+        manager.begin_ro(2);
+        assert_eq!(manager.min_snapshot_id(), Some(0));
     }
 
     #[test]
@@ -82,27 +80,44 @@ mod tests {
     #[test]
     fn test_remove_transaction() {
         let mut manager = TransactionManager::new();
+        assert_eq!(manager.min_snapshot_id(), None);
+
         assert_eq!(manager.begin_rw(1).unwrap(), 0);
-        assert_eq!(manager.begin_ro(2).unwrap(), 0);
-        assert_eq!(manager.begin_ro(3).unwrap(), 0);
+        assert_eq!(manager.min_snapshot_id(), Some(0));
 
-        assert!(manager.remove_transaction(1, true).is_ok());
-        assert_eq!(manager.begin_ro(4).unwrap(), 2);
+        manager.begin_ro(2);
+        assert_eq!(manager.min_snapshot_id(), Some(0));
+        manager.begin_ro(3);
+        assert_eq!(manager.min_snapshot_id(), Some(0));
+
+        manager.remove_tx(1, true);
+        assert_eq!(manager.min_snapshot_id(), Some(2));
+
+        manager.begin_ro(4);
+        assert_eq!(manager.min_snapshot_id(), Some(2));
+
         assert_eq!(manager.begin_rw(5).unwrap(), 2);
+        assert_eq!(manager.min_snapshot_id(), Some(2));
 
-        assert!(manager.remove_transaction(2, false).is_ok());
-        assert!(manager.remove_transaction(3, false).is_ok());
-        assert!(manager.remove_transaction(4, false).is_ok());
-        assert!(manager.remove_transaction(5, true).is_ok());
+        manager.remove_tx(2, false);
+        assert_eq!(manager.min_snapshot_id(), Some(3));
+        manager.remove_tx(3, false);
+        assert_eq!(manager.min_snapshot_id(), Some(4));
+        manager.remove_tx(4, false);
+        assert_eq!(manager.min_snapshot_id(), Some(4));
+        manager.remove_tx(5, true);
+        assert_eq!(manager.min_snapshot_id(), None);
 
-        assert_eq!(manager.begin_ro(6).unwrap(), 6);
-        assert!(manager.remove_transaction(6, false).is_ok());
+        manager.begin_ro(6);
+        assert_eq!(manager.min_snapshot_id(), Some(6));
+        manager.remove_tx(6, false);
+        assert_eq!(manager.min_snapshot_id(), None);
     }
 
     #[test]
     #[should_panic]
     fn test_remove_nonexistent_transaction() {
         let mut manager = TransactionManager::new();
-        manager.remove_transaction(1, true).unwrap();
+        manager.remove_tx(1, true);
     }
 }
