@@ -49,6 +49,7 @@ struct Inner {
     orphan_manager: OrphanPageManager,
 }
 
+#[derive(Debug)]
 enum PointerChange {
     None,
     Update(Pointer),
@@ -500,12 +501,25 @@ impl StorageEngine {
         let mut split_count = 0;
 
         loop {
+            println!(
+                "set_values_in_page loop begin, page_id: {}, changes size: {}, split_count: {}",
+                page_id,
+                changes.len(),
+                split_count
+            );
             let result = self.set_values_in_cloned_page(
                 context,
                 changes,
                 path_offset,
                 &mut new_slotted_page,
                 0,
+            );
+            println!(
+                "set_values_in_page loop end, page_id: {}, changes size: {}, split_count: {}, result: {:?}",
+                page_id,
+                changes.len(),
+                split_count,
+                result
             );
 
             match result {
@@ -529,6 +543,12 @@ impl StorageEngine {
                 Err(Error::PageSplit) => {
                     context.transaction_metrics.inc_pages_split();
                     split_count += 1;
+                    println!(
+                        "\tPageSplit error, page_id: {}, changes size: {}, split_count: {}",
+                        page_id,
+                        changes.len(),
+                        split_count
+                    );
                     // FIXME: this is a temporary limit to prevent infinite loops.
                     if split_count > 20 {
                         return Err(Error::PageError(PageError::PageSplitLimitReached));
@@ -688,9 +708,44 @@ impl StorageEngine {
 
         Ok(Pointer::new(Location::for_page(slotted_page.id()), rlp_node))
     }
+    fn handle_missing_parent_branch(
+        &self,
+        context: &mut TransactionContext,
+        changes: &[(Nibbles, Option<TrieValue>)],
+        path_offset: u8,
+        slotted_page: &mut SlottedPageMut<'_>,
+        page_index: u8,
+        node: &mut Node,
+        common_prefix: Nibbles,
+        common_prefix_length: usize,
+    ) -> Result<PointerChange, Error> {
+        let mut split_count = 0;
+        loop {
+            let result = self.handle_missing_parent_branch_1(
+                context,
+                changes,
+                path_offset,
+                slotted_page,
+                page_index,
+                node,
+                common_prefix.clone(),
+                common_prefix_length,
+            );
+            if let Err(Error::PageSplit) = result {
+                println!("PageSplit error @handle_missing_parent_branch, page_id: {}, changes size: {}, split_count: {}", 
+                slotted_page.id(), changes.len(), split_count);
+                split_count += 1;
+                if split_count > 5 {
+                    return result
+                }
+            } else {
+                return result;
+            }
+        }
+    }
 
     /// Handles the case when the path does not match the node prefix
-    fn handle_missing_parent_branch(
+    fn handle_missing_parent_branch_1(
         &self,
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
@@ -705,6 +760,11 @@ impl StorageEngine {
         // TODO: use a more accurate threshold
         if slotted_page.num_free_bytes() < 1000 {
             self.split_page(context, slotted_page)?;
+            println!(
+                "\tPageSplit error @handle_missing_parent_branch_1, page_id: {}, changes size: {}",
+                slotted_page.id(),
+                changes.len(),
+            );
             return Err(Error::PageSplit);
         }
 
@@ -787,6 +847,11 @@ impl StorageEngine {
             let node_size_incr = new_node_size - old_node_size;
             if slotted_page.num_free_bytes() < node_size_incr {
                 self.split_page(context, slotted_page)?;
+                println!(
+                    "\tPageSplit error @handle_exact_prefix_match, page_id: {}, changes size: {}",
+                    slotted_page.id(),
+                    changes.len()
+                );
                 return Err(Error::PageSplit);
             }
         }
@@ -842,26 +907,33 @@ impl StorageEngine {
         let child_pointer = node.direct_child()?;
 
         if let Some(child_pointer) = child_pointer {
-            let child_pointer_change =
-                if let Some(child_cell_index) = child_pointer.location().cell_index() {
-                    // Handle local child node (on same page)
-                    self.set_values_in_cloned_page(
-                        context,
-                        changes,
-                        path_offset + common_prefix_length as u8,
-                        slotted_page,
-                        child_cell_index,
-                    )?
-                } else {
-                    // Handle remote child node (on different page)
-                    let child_page_id = child_pointer.location().page_id().unwrap();
-                    self.set_values_in_page(
-                        context,
-                        changes,
-                        path_offset + common_prefix_length as u8,
-                        child_page_id,
-                    )?
-                };
+            let child_pointer_change = if let Some(child_cell_index) =
+                child_pointer.location().cell_index()
+            {
+                // Handle local child node (on same page)
+                self.set_values_in_cloned_page(
+                    context,
+                    changes,
+                    path_offset + common_prefix_length as u8,
+                    slotted_page,
+                    child_cell_index,
+                )?
+            } else {
+                // Handle remote child node (on different page)
+                let child_page_id = child_pointer.location().page_id().unwrap();
+                println!(
+                    "\thandle_account_node_traversal to set_values_in_page, page_id: {}, changes size: {}, child_page_id: {}",
+                    slotted_page.id(),
+                    changes.len(),
+                    child_page_id
+                );
+                self.set_values_in_page(
+                    context,
+                    changes,
+                    path_offset + common_prefix_length as u8,
+                    child_page_id,
+                )?
+            };
 
             match child_pointer_change {
                 PointerChange::Update(new_child_pointer) => {
@@ -942,6 +1014,11 @@ impl StorageEngine {
         // when adding the new child, split the page.
         if slotted_page.num_free_bytes() < node_size_incr + new_node.size() + CELL_POINTER_SIZE {
             self.split_page(context, slotted_page)?;
+            println!(
+                "\tPageSplit error @create_first_storage_node, page_id: {}, changes size: {}",
+                slotted_page.id(),
+                changes.len()
+            );
             return Err(Error::PageSplit);
         }
 
@@ -1072,26 +1149,33 @@ impl StorageEngine {
             Some(child_pointer) => {
                 // Child exists, traverse it
                 let child_location = child_pointer.location();
-                let child_pointer_change =
-                    if let Some(child_cell_index) = child_location.cell_index() {
-                        // Local child node
-                        self.set_values_in_cloned_page(
-                            context,
-                            matching_changes,
-                            path_offset + common_prefix_length as u8 + 1,
-                            slotted_page,
-                            child_cell_index,
-                        )?
-                    } else {
-                        // Remote child node
-                        let child_page_id = child_location.page_id().unwrap();
-                        self.set_values_in_page(
-                            context,
-                            matching_changes,
-                            path_offset + common_prefix_length as u8 + 1,
-                            child_page_id,
-                        )?
-                    };
+                let child_pointer_change = if let Some(child_cell_index) =
+                    child_location.cell_index()
+                {
+                    // Local child node
+                    self.set_values_in_cloned_page(
+                        context,
+                        matching_changes,
+                        path_offset + common_prefix_length as u8 + 1,
+                        slotted_page,
+                        child_cell_index,
+                    )?
+                } else {
+                    // Remote child node
+                    let child_page_id = child_location.page_id().unwrap();
+                    println!(
+                            "\thandle_branch_node_with_changes to set_values_in_page, page_id: {}, changes size: {}, child_page_id: {}",
+                            slotted_page.id(),
+                            matching_changes.len(),
+                            child_page_id
+                        );
+                    self.set_values_in_page(
+                        context,
+                        matching_changes,
+                        path_offset + common_prefix_length as u8 + 1,
+                        child_page_id,
+                    )?
+                };
 
                 match child_pointer_change {
                     PointerChange::Update(new_child_pointer) => {
@@ -1149,6 +1233,11 @@ impl StorageEngine {
                     node_size_incr + new_node.size() + CELL_POINTER_SIZE
                 {
                     self.split_page(context, slotted_page)?;
+                    println!(
+                        "\tPageSplit error @handle_branch_node_with_changes, page_id: {}, changes size: {}",
+                        slotted_page.id(),
+                        matching_changes.len()
+                    );
                     return Err(Error::PageSplit);
                 }
 
