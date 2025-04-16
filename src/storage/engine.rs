@@ -127,7 +127,7 @@ impl StorageEngine {
     /// Returns [None] if the path is not found.
     pub fn get_account(
         &self,
-        context: &TransactionContext,
+        context: &mut TransactionContext,
         address_path: AddressPath,
     ) -> Result<Option<Account>, Error> {
         if context.metadata.root_subtrie_page_id == 0 {
@@ -148,7 +148,7 @@ impl StorageEngine {
     /// Returns [None] if the path is not found.
     pub fn get_storage(
         &self,
-        context: &TransactionContext,
+        context: &mut TransactionContext,
         storage_path: StoragePath,
     ) -> Result<Option<StorageValue>, Error> {
         if context.metadata.root_subtrie_page_id == 0 {
@@ -367,7 +367,7 @@ impl StorageEngine {
     /// Returns [None] if the path is not found.
     fn get_value_from_page(
         &self,
-        context: &TransactionContext,
+        context: &mut TransactionContext,
         original_path_slice: &[u8],
         path_offset: usize,
         slotted_page: SlottedPage<'_>,
@@ -1865,7 +1865,7 @@ mod tests {
         for (address, account) in &test_cases {
             let path = AddressPath::for_address(*address);
 
-            let read_account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let read_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(read_account, None);
 
             storage_engine
@@ -1878,8 +1878,9 @@ mod tests {
 
         // Verify all accounts exist after insertion
         for (address, account) in test_cases {
-            let read_account =
-                storage_engine.get_account(&context, AddressPath::for_address(address)).unwrap();
+            let read_account = storage_engine
+                .get_account(&mut context, AddressPath::for_address(address))
+                .unwrap();
             assert_eq!(read_account, Some(account));
         }
     }
@@ -2052,14 +2053,14 @@ mod tests {
         // check that all of the values are correct
         for (address, account, storage) in accounts.clone() {
             let read_account = storage_engine
-                .get_account(&context, AddressPath::for_address(address))
+                .get_account(&mut context, AddressPath::for_address(address))
                 .unwrap()
                 .unwrap();
             assert_eq!(read_account.balance, account.balance);
 
             for (slot, value) in storage {
                 let read_value = storage_engine
-                    .get_storage(&context, StoragePath::for_address_and_slot(address, slot))
+                    .get_storage(&mut context, StoragePath::for_address_and_slot(address, slot))
                     .unwrap();
                 assert_eq!(read_value, Some(value));
             }
@@ -2129,7 +2130,7 @@ mod tests {
         // check that all of the values are correct
         for (address, account, storage) in accounts.clone() {
             let read_account = storage_engine
-                .get_account(&context, AddressPath::for_address(address))
+                .get_account(&mut context, AddressPath::for_address(address))
                 .unwrap()
                 .unwrap();
             assert_eq!(read_account.balance, account.balance);
@@ -2137,7 +2138,7 @@ mod tests {
             assert_eq!(read_account.storage_root, expected_account_storage_roots[&address]);
             for (slot, value) in storage {
                 let read_value = storage_engine
-                    .get_storage(&context, StoragePath::for_address_and_slot(address, slot))
+                    .get_storage(&mut context, StoragePath::for_address_and_slot(address, slot))
                     .unwrap();
                 assert_eq!(read_value, Some(value));
             }
@@ -2173,7 +2174,7 @@ mod tests {
         // Verify all accounts exist
         for (nibbles, account) in test_accounts {
             let path = AddressPath::new(Nibbles::from_nibbles(nibbles));
-            let read_account = storage_engine.get_account(&context, path).unwrap();
+            let read_account = storage_engine.get_account(&mut context, path).unwrap();
             assert_eq!(read_account, Some(account));
         }
     }
@@ -2209,7 +2210,7 @@ mod tests {
         // Verify all accounts still exist after split
         for (nibbles, account) in test_accounts {
             let path = AddressPath::new(Nibbles::from_nibbles(nibbles));
-            let read_account = storage_engine.get_account(&context, path).unwrap();
+            let read_account = storage_engine.get_account(&mut context, path).unwrap();
             assert_eq!(read_account, Some(account));
         }
     }
@@ -2233,7 +2234,7 @@ mod tests {
 
         for i in 0..1000 {
             let path = address_path_for_idx(i);
-            let account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(account, Some(create_test_account(i, i)));
         }
     }
@@ -2279,7 +2280,7 @@ mod tests {
             context = TransactionContext::new(context.metadata.next());
 
             let read_account =
-                storage_engine.get_account(&context, address_path.clone()).unwrap().unwrap();
+                storage_engine.get_account(&mut context, address_path.clone()).unwrap().unwrap();
             assert_eq!(read_account, account);
             let cached_location = context.contract_account_loc_cache.get(address_path.to_nibbles());
             assert!(cached_location.is_none());
@@ -2332,7 +2333,7 @@ mod tests {
 
             context = TransactionContext::new(context.metadata.next());
             let read_account = storage_engine
-                .get_account(&context, AddressPath::for_address(address))
+                .get_account(&mut context, AddressPath::for_address(address))
                 .unwrap()
                 .unwrap();
             assert_eq!(read_account.balance, account.balance);
@@ -2349,7 +2350,7 @@ mod tests {
             // getting the storage slot should hit the cache
             let storage_path = StoragePath::for_address_and_slot(address, test_cases[0].0);
             let read_storage_slot =
-                storage_engine.get_storage(&context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
             assert_eq!(
                 read_storage_slot,
                 Some(StorageValue::from_be_slice(
@@ -2399,7 +2400,7 @@ mod tests {
 
             context = TransactionContext::new(context.metadata.next());
             storage_engine
-                .get_account(&context, AddressPath::for_address(address))
+                .get_account(&mut context, AddressPath::for_address(address))
                 .unwrap()
                 .unwrap();
 
@@ -2477,7 +2478,7 @@ mod tests {
         for (storage_key, _) in &test_cases {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
             let read_storage_slot =
-                storage_engine.get_storage(&context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
             assert_eq!(read_storage_slot, None);
         }
         storage_engine
@@ -2499,7 +2500,7 @@ mod tests {
         // Verify all storage slots exist after insertion
         for (storage_key, storage_value) in &test_cases {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
-            let read_storage_slot = storage_engine.get_storage(&context, storage_path).unwrap();
+            let read_storage_slot = storage_engine.get_storage(&mut context, storage_path).unwrap();
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
             assert_eq!(read_storage_slot, Some(storage_value));
         }
@@ -2548,7 +2549,7 @@ mod tests {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
             let read_storage_slot =
-                storage_engine.get_storage(&context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
             assert_eq!(read_storage_slot, None);
 
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
@@ -2570,7 +2571,7 @@ mod tests {
         }));
 
         let account = storage_engine
-            .get_account(&context, AddressPath::for_address(address))
+            .get_account(&mut context, AddressPath::for_address(address))
             .unwrap()
             .unwrap();
 
@@ -2623,7 +2624,7 @@ mod tests {
             let expected_root = storage_root_unsorted(keys_values.into_iter());
 
             // check the storage root of the account
-            let account = storage_engine.get_account(&context, path).unwrap().unwrap();
+            let account = storage_engine.get_account(&mut context, path).unwrap().unwrap();
 
             assert_eq!(account.storage_root, expected_root);
         }
@@ -2719,7 +2720,7 @@ mod tests {
 
         // Verify all accounts exist with correct values
         for (path, expected_account) in &accounts {
-            let retrieved_account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let retrieved_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(
                 retrieved_account,
                 Some(expected_account.clone()),
@@ -2747,7 +2748,7 @@ mod tests {
 
         // Verify all accounts still exist with correct values after splits
         for (path, expected_account) in &accounts {
-            let retrieved_account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let retrieved_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(
                 retrieved_account,
                 Some(expected_account.clone()),
@@ -2788,7 +2789,7 @@ mod tests {
 
         // Verify all original accounts still exist
         for (path, expected_account) in &accounts {
-            let retrieved_account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let retrieved_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(
                 retrieved_account,
                 Some(expected_account.clone()),
@@ -2798,7 +2799,7 @@ mod tests {
 
         // Verify all new accounts exist
         for (path, expected_account) in &additional_accounts {
-            let retrieved_account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let retrieved_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(retrieved_account, Some(expected_account.clone()), "New account not found");
         }
         // Verify the pages split metric
@@ -2846,7 +2847,7 @@ mod tests {
 
         // Verify all accounts exist with correct values
         for (path, expected_account) in &accounts {
-            let retrieved_account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let retrieved_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(retrieved_account, Some(expected_account.clone()));
         }
 
@@ -2882,7 +2883,7 @@ mod tests {
 
         // Verify all accounts still exist with correct values after splits
         for (path, expected_account) in &accounts {
-            let retrieved_account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let retrieved_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(
                 retrieved_account,
                 Some(expected_account.clone()),
@@ -2921,7 +2922,7 @@ mod tests {
 
         // Verify all accounts have correct values after updates
         for (path, expected_account) in &accounts {
-            let retrieved_account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let retrieved_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(
                 retrieved_account,
                 Some(expected_account.clone()),
@@ -2947,7 +2948,7 @@ mod tests {
 
         // Check that the account exists
         let read_account =
-            storage_engine.get_account(&context, AddressPath::for_address(address)).unwrap();
+            storage_engine.get_account(&mut context, AddressPath::for_address(address)).unwrap();
         assert_eq!(read_account, Some(account.clone()));
 
         // Reset the context metrics
@@ -2962,7 +2963,7 @@ mod tests {
 
         // Verify the account is deleted
         let read_account =
-            storage_engine.get_account(&context, AddressPath::for_address(address)).unwrap();
+            storage_engine.get_account(&mut context, AddressPath::for_address(address)).unwrap();
         assert_eq!(read_account, None);
     }
 
@@ -2998,7 +2999,7 @@ mod tests {
         for (address, account) in &test_cases {
             let path = AddressPath::for_address(*address);
 
-            let read_account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let read_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(read_account, None);
 
             storage_engine
@@ -3011,8 +3012,9 @@ mod tests {
 
         // Verify all accounts exist after insertion
         for (address, account) in &test_cases {
-            let read_account =
-                storage_engine.get_account(&context, AddressPath::for_address(*address)).unwrap();
+            let read_account = storage_engine
+                .get_account(&mut context, AddressPath::for_address(*address))
+                .unwrap();
             assert_eq!(read_account, Some(account.clone()));
         }
 
@@ -3028,8 +3030,9 @@ mod tests {
 
         // Verify that the accounts don't exist anymore
         for (address, _) in &test_cases {
-            let read_account =
-                storage_engine.get_account(&context, AddressPath::for_address(*address)).unwrap();
+            let read_account = storage_engine
+                .get_account(&mut context, AddressPath::for_address(*address))
+                .unwrap();
             assert_eq!(read_account, None);
         }
     }
@@ -3066,7 +3069,7 @@ mod tests {
         for (address, account) in &test_cases {
             let path = AddressPath::for_address(*address);
 
-            let read_account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let read_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(read_account, None);
 
             storage_engine
@@ -3079,8 +3082,9 @@ mod tests {
 
         // Verify all accounts exist after insertion
         for (address, account) in &test_cases {
-            let read_account =
-                storage_engine.get_account(&context, AddressPath::for_address(*address)).unwrap();
+            let read_account = storage_engine
+                .get_account(&mut context, AddressPath::for_address(*address))
+                .unwrap();
             assert_eq!(read_account, Some(account.clone()));
         }
 
@@ -3096,15 +3100,17 @@ mod tests {
 
         // Verify that the accounts don't exist anymore
         for (address, _) in &test_cases[0..2] {
-            let read_account =
-                storage_engine.get_account(&context, AddressPath::for_address(*address)).unwrap();
+            let read_account = storage_engine
+                .get_account(&mut context, AddressPath::for_address(*address))
+                .unwrap();
             assert_eq!(read_account, None);
         }
 
         // Verify that the non-deleted accounts still exist
         for (address, account) in &test_cases[2..] {
-            let read_account =
-                storage_engine.get_account(&context, AddressPath::for_address(*address)).unwrap();
+            let read_account = storage_engine
+                .get_account(&mut context, AddressPath::for_address(*address))
+                .unwrap();
             assert_eq!(read_account, Some(account.clone()));
         }
     }
@@ -3152,7 +3158,7 @@ mod tests {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
             let read_storage_slot =
-                storage_engine.get_storage(&context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
             assert_eq!(read_storage_slot, None);
 
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
@@ -3174,7 +3180,7 @@ mod tests {
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             let read_storage_slot =
-                storage_engine.get_storage(&context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
             assert_eq!(read_storage_slot, Some(storage_value));
         }
 
@@ -3188,7 +3194,7 @@ mod tests {
             .collect();
         let expected_root = storage_root_unhashed(keys_values.clone());
         let account = storage_engine
-            .get_account(&context, AddressPath::for_address(address))
+            .get_account(&mut context, AddressPath::for_address(address))
             .unwrap()
             .unwrap();
 
@@ -3205,7 +3211,7 @@ mod tests {
                 .unwrap();
 
             let read_storage_slot =
-                storage_engine.get_storage(&context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
 
             assert_eq!(read_storage_slot, None);
 
@@ -3213,7 +3219,7 @@ mod tests {
             keys_values.remove(0);
             let expected_root = storage_root_unhashed(keys_values.clone());
             let account = storage_engine
-                .get_account(&context, AddressPath::for_address(address))
+                .get_account(&mut context, AddressPath::for_address(address))
                 .unwrap()
                 .unwrap();
 
@@ -3264,7 +3270,7 @@ mod tests {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
             let read_storage_slot =
-                storage_engine.get_storage(&context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
             assert_eq!(read_storage_slot, None);
 
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
@@ -3286,7 +3292,7 @@ mod tests {
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             let read_storage_slot =
-                storage_engine.get_storage(&context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
             assert_eq!(read_storage_slot, Some(storage_value));
         }
 
@@ -3299,14 +3305,15 @@ mod tests {
             .unwrap();
 
         // Verify the account no longer exists
-        let res = storage_engine.get_account(&context, AddressPath::for_address(address)).unwrap();
+        let res =
+            storage_engine.get_account(&mut context, AddressPath::for_address(address)).unwrap();
         assert_eq!(res, None);
 
         // Verify all the storage slots don't exist
         for (storage_key, _) in &test_cases {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
-            let res = storage_engine.get_storage(&context, storage_path.clone()).unwrap();
+            let res = storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
             assert_eq!(res, None);
         }
 
@@ -3323,7 +3330,8 @@ mod tests {
         for (storage_key, _) in &test_cases {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
-            let read_storage = storage_engine.get_storage(&context, storage_path.clone()).unwrap();
+            let read_storage =
+                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
             assert_eq!(read_storage, None);
         }
     }
@@ -3383,12 +3391,12 @@ mod tests {
         //
         // first verify the deleted account is gone and the remaining account exists
         let read_account1 = storage_engine
-            .get_account(&context, AddressPath::new(Nibbles::from_nibbles(account_1_nibbles)))
+            .get_account(&mut context, AddressPath::new(Nibbles::from_nibbles(account_1_nibbles)))
             .unwrap();
         assert_eq!(read_account1, None);
 
         let read_account2 = storage_engine
-            .get_account(&context, AddressPath::new(Nibbles::from_nibbles(account_2_nibbles)))
+            .get_account(&mut context, AddressPath::new(Nibbles::from_nibbles(account_2_nibbles)))
             .unwrap();
         assert_eq!(read_account2, Some(account2));
 
@@ -3516,11 +3524,11 @@ mod tests {
         let child_1_nibbles = Nibbles::from_nibbles(child_1_full_path);
         let child_2_nibbles = Nibbles::from_nibbles(child_2_full_path);
         let read_account1 = storage_engine
-            .get_account(&context, AddressPath::new(child_1_nibbles.clone()))
+            .get_account(&mut context, AddressPath::new(child_1_nibbles.clone()))
             .unwrap();
         assert_eq!(read_account1, Some(test_account.clone()));
         let read_account2 = storage_engine
-            .get_account(&context, AddressPath::new(child_2_nibbles.clone()))
+            .get_account(&mut context, AddressPath::new(child_2_nibbles.clone()))
             .unwrap();
         assert_eq!(read_account2, Some(test_account.clone()));
 
@@ -3545,10 +3553,10 @@ mod tests {
 
         // test that we can get child 2 and not child 1
         let read_account2 =
-            storage_engine.get_account(&context, AddressPath::new(child_2_nibbles)).unwrap();
+            storage_engine.get_account(&mut context, AddressPath::new(child_2_nibbles)).unwrap();
         assert_eq!(read_account2, Some(test_account.clone()));
         let read_account1 =
-            storage_engine.get_account(&context, AddressPath::new(child_1_nibbles)).unwrap();
+            storage_engine.get_account(&mut context, AddressPath::new(child_1_nibbles)).unwrap();
         assert_eq!(read_account1, None);
     }
 
@@ -3622,11 +3630,11 @@ mod tests {
         let child_1_nibbles = Nibbles::from_nibbles(child_1_full_path);
         let child_2_nibbles = Nibbles::from_nibbles(child_2_full_path);
         let read_account1 = storage_engine
-            .get_account(&context, AddressPath::new(child_1_nibbles.clone()))
+            .get_account(&mut context, AddressPath::new(child_1_nibbles.clone()))
             .unwrap();
         assert_eq!(read_account1, Some(test_account.clone()));
         let read_account2 = storage_engine
-            .get_account(&context, AddressPath::new(child_2_nibbles.clone()))
+            .get_account(&mut context, AddressPath::new(child_2_nibbles.clone()))
             .unwrap();
         assert_eq!(read_account2, Some(test_account.clone()));
 
@@ -3652,10 +3660,10 @@ mod tests {
 
         // test that we can get child 2 and not child 1
         let read_account2 =
-            storage_engine.get_account(&context, AddressPath::new(child_2_nibbles)).unwrap();
+            storage_engine.get_account(&mut context, AddressPath::new(child_2_nibbles)).unwrap();
         assert_eq!(read_account2, Some(test_account.clone()));
         let read_account1 =
-            storage_engine.get_account(&context, AddressPath::new(child_1_nibbles)).unwrap();
+            storage_engine.get_account(&mut context, AddressPath::new(child_1_nibbles)).unwrap();
         assert_eq!(read_account1, None);
     }
 
@@ -3773,7 +3781,7 @@ mod tests {
 
         // THEN: the updated account should be updated
         let account_in_database = storage_engine
-            .get_account(&context, AddressPath::new(address_nibbles_original_account))
+            .get_account(&mut context, AddressPath::new(address_nibbles_original_account))
             .unwrap()
             .unwrap();
         assert_eq!(account_in_database, updated_account);
@@ -3809,7 +3817,7 @@ mod tests {
 
             for (address, account) in accounts {
                 let read_account = storage_engine
-                    .get_account(&context, AddressPath::for_address(address))
+                    .get_account(&mut context, AddressPath::for_address(address))
                     .unwrap();
                 assert_eq!(read_account, Some(Account::new(account.nonce, account.balance, EMPTY_ROOT_HASH, account.code_hash)));
             }
@@ -3841,7 +3849,7 @@ mod tests {
 
             for (address, account, storage) in accounts {
                 let read_account = storage_engine
-                    .get_account(&context, AddressPath::for_address(address))
+                    .get_account(&mut context, AddressPath::for_address(address))
                     .unwrap();
                 let read_account = read_account.unwrap();
                 assert_eq!(read_account.nonce, account.nonce);
@@ -3850,7 +3858,7 @@ mod tests {
 
                 for (key, value) in storage {
                     let read_storage = storage_engine
-                        .get_storage(&context, StoragePath::for_address_and_slot(address, key))
+                        .get_storage(&mut context, StoragePath::for_address_and_slot(address, key))
                         .unwrap();
                     assert_eq!(read_storage, Some(value));
                 }
@@ -3886,7 +3894,7 @@ mod tests {
             for (address, revisions) in &account_revisions {
                 let last_revision = revisions.last().unwrap();
                 let read_account = storage_engine
-                    .get_account(&context, AddressPath::for_address(*address))
+                    .get_account(&mut context, AddressPath::for_address(*address))
                     .unwrap();
                 let read_account = read_account.unwrap();
                 assert_eq!(read_account.nonce, last_revision.nonce);

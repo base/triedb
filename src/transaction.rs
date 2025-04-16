@@ -67,11 +67,11 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
     }
 
     pub fn get_account(
-        &'tx self,
+        &mut self,
         address_path: AddressPath,
     ) -> Result<Option<Account>, TransactionError> {
         let storage_engine = self.database.inner.storage_engine.read();
-        let account = storage_engine.get_account(&self.context, address_path).unwrap();
+        let account = storage_engine.get_account(&mut self.context, address_path).unwrap();
 
         self.database.update_metrics_ro(&self.context);
 
@@ -79,11 +79,11 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
     }
 
     pub fn get_storage_slot(
-        &self,
+        &mut self,
         storage_path: StoragePath,
     ) -> Result<Option<StorageValue>, TransactionError> {
         let storage_engine = self.database.inner.storage_engine.read();
-        let storage_slot = storage_engine.get_storage(&self.context, storage_path).unwrap();
+        let storage_slot = storage_engine.get_storage(&mut self.context, storage_path).unwrap();
 
         self.database.update_metrics_ro(&self.context);
         Ok(storage_slot)
