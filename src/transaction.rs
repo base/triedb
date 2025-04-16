@@ -137,7 +137,7 @@ impl Transaction<'_, RW> {
 
         self.database.update_metrics_rw(&self.context);
 
-        transaction_manager.remove_transaction(self.context.snapshot_id, true)?;
+        transaction_manager.remove_tx(self.context.snapshot_id, true);
 
         self.committed = true;
         Ok(())
@@ -148,7 +148,7 @@ impl Transaction<'_, RW> {
         storage_engine.rollback(&self.context).unwrap();
 
         let mut transaction_manager = self.database.inner.transaction_manager.write();
-        transaction_manager.remove_transaction(self.context.snapshot_id, true)?;
+        transaction_manager.remove_tx(self.context.snapshot_id, true);
 
         self.committed = false;
         Ok(())
@@ -158,7 +158,7 @@ impl Transaction<'_, RW> {
 impl Transaction<'_, RO> {
     pub fn commit(mut self) -> Result<(), TransactionError> {
         let mut transaction_manager = self.database.inner.transaction_manager.write();
-        transaction_manager.remove_transaction(self.context.snapshot_id, false)?;
+        transaction_manager.remove_tx(self.context.snapshot_id, false);
 
         self.committed = true;
         Ok(())
