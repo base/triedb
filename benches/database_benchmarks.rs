@@ -536,6 +536,8 @@ fn bench_mixed_operations(c: &mut Criterion) {
 
                     tx.commit().unwrap();
 
+                    inserted_accounts.borrow_mut().clear();
+                    inserted_storage.borrow_mut().clear();
                     deleted_accounts.borrow_mut().clear();
                     deleted_storage.borrow_mut().clear();
                 },
