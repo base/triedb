@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn test_get_nonexistent_proof() {
-        let (storage_engine, mut context) = create_test_engine(2000);
+        let (mut storage_engine, mut context) = create_test_engine(2000);
 
         // the account and storage slot are not present in the trie
         let address = address!("0x0000000000000000000000000000000000000001");
@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn test_get_proof() {
-        let (storage_engine, mut context) = create_test_engine(2000);
+        let (mut storage_engine, mut context) = create_test_engine(2000);
 
         // 1. insert a single account
         let address = address!("0x0000000000000000000000000000000000000001");

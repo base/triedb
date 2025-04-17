@@ -7,13 +7,11 @@ use crate::{
     database::Database,
     node::TrieValue,
     path::{AddressPath, StoragePath},
-    storage::engine::StorageEngine,
 };
 use alloy_primitives::{StorageValue, B256};
 use alloy_trie::Nibbles;
 pub use error::TransactionError;
 pub use manager::TransactionManager;
-use parking_lot::RwLockReadGuard;
 use reth_trie_common::MultiProof;
 use sealed::sealed;
 use std::{collections::HashMap, fmt::Debug};
@@ -46,22 +44,16 @@ pub struct Transaction<'tx, K: TransactionKind> {
     context: TransactionContext,
     database: &'tx Database,
     pending_changes: HashMap<Nibbles, Option<TrieValue>>,
-    _lock: Option<RwLockReadGuard<'tx, StorageEngine>>,
     _marker: std::marker::PhantomData<K>,
 }
 
 impl<'tx, K: TransactionKind> Transaction<'tx, K> {
-    pub(crate) fn new(
-        context: TransactionContext,
-        database: &'tx Database,
-        lock: Option<RwLockReadGuard<'tx, StorageEngine>>,
-    ) -> Self {
+    pub(crate) fn new(context: TransactionContext, database: &'tx Database) -> Self {
         Self {
             committed: false,
             context,
             database,
             pending_changes: HashMap::new(),
-            _lock: lock,
             _marker: std::marker::PhantomData,
         }
     }
@@ -132,7 +124,7 @@ impl Transaction<'_, RW> {
     }
 
     pub fn commit(mut self) -> Result<(), TransactionError> {
-        let storage_engine = self.database.inner.storage_engine.read();
+        let mut storage_engine = self.database.inner.storage_engine.write();
         let mut changes =
             self.pending_changes.drain().collect::<Vec<(Nibbles, Option<TrieValue>)>>();
 
@@ -152,7 +144,6 @@ impl Transaction<'_, RW> {
         }
 
         let mut transaction_manager = self.database.inner.transaction_manager.write();
-        let storage_engine = self.database.inner.storage_engine.read();
         storage_engine.commit(&self.context).unwrap();
 
         let mut metadata = self.database.inner.metadata.write();

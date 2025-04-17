@@ -14,19 +14,15 @@ use crate::{
     path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH, STORAGE_PATH_LENGTH},
     pointer::Pointer,
     snapshot::SnapshotId,
+    storage::value::Value,
 };
 use alloy_primitives::StorageValue;
 use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
-use parking_lot::RwLock;
 use std::{
     cmp::{max, Ordering},
     fmt::Debug,
-    fs::File,
-    io::{BufWriter, Write},
-    sync::Arc,
+    io,
 };
-
-use super::value::Value;
 
 /// The [StorageEngine] is responsible for managing the storage of data in the database.
 /// It handles reading and writing account and storage values, as well as managing the lifecycle of
@@ -34,15 +30,8 @@ use super::value::Value;
 ///
 /// The storage engine uses a [PageManager] (`P`) to interact with the underlying storage medium,
 /// which could be memory-mapped files, in-memory storage, or other implementations.
-///
-/// All operations are thread-safe through the use of a read-write lock around the inner state.
 #[derive(Debug)]
 pub struct StorageEngine {
-    inner: Arc<RwLock<Inner>>,
-}
-
-#[derive(Debug)]
-struct Inner {
     page_manager: PageManager,
     orphan_manager: OrphanPageManager,
 }
@@ -56,40 +45,32 @@ enum PointerChange {
 impl StorageEngine {
     /// Creates a new [StorageEngine] with the given [PageManager] and [OrphanPageManager].
     pub fn new(page_manager: PageManager, orphan_manager: OrphanPageManager) -> Self {
-        Self { inner: Arc::new(RwLock::new(Inner { page_manager, orphan_manager })) }
+        Self { page_manager, orphan_manager }
     }
 
     /// Unlocks any orphaned pages as of the given [SnapshotId] for reuse.
-    pub(crate) fn unlock(&self, snapshot_id: SnapshotId) {
-        self.inner.write().orphan_manager.unlock(snapshot_id);
-    }
-
-    /// Allocates a new page from the underlying page manager.
-    /// If there is an orphaned page available as of the given [SnapshotId],
-    /// it is used to allocate a new page instead.
-    fn allocate_page<'p>(&self, context: &mut TransactionContext) -> Result<PageMut<'p>, Error> {
-        self.inner.write().allocate_page(context)
+    pub(crate) fn unlock(&mut self, snapshot_id: SnapshotId) {
+        self.orphan_manager.unlock(snapshot_id);
     }
 
     /// Retrieves a mutable clone of a [Page] from the underlying [PageManager].
     /// The original page is marked as orphaned and a new page is allocated, potentially from an
     /// orphaned page.
     fn get_mut_clone<'p>(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         page_id: PageId,
     ) -> Result<PageMut<'p>, Error> {
-        let mut inner = self.inner.write();
-        let original_page = inner.get_page_mut(context, page_id)?;
+        let original_page = self.get_mut_page(context, page_id)?;
 
         // if the page already has the correct snapshot id, return it without cloning.
         if original_page.snapshot_id() == context.metadata.snapshot_id {
             return Ok(original_page);
         }
 
-        let mut new_page = inner.allocate_page(context)?;
+        let mut new_page = self.allocate_page(context)?;
 
-        inner.orphan_manager.add_orphaned_page_id(context.metadata.snapshot_id, page_id);
+        self.orphan_manager.add_orphaned_page_id(context.metadata.snapshot_id, page_id);
         new_page.contents_mut().copy_from_slice(original_page.contents());
         Ok(new_page)
     }
@@ -102,25 +83,6 @@ impl StorageEngine {
     ) -> Result<SlottedPage<'p>, Error> {
         let page = self.get_page(context, page_id)?;
         Ok(SlottedPage::try_from(page)?)
-    }
-
-    /// Retrieves a read-only [Page] from the underlying [PageManager].
-    fn get_page<'p>(
-        &self,
-        context: &TransactionContext,
-        page_id: PageId,
-    ) -> Result<Page<'p>, Error> {
-        self.inner.read().get_page(context, page_id)
-    }
-
-    /// Retrieves a mutable [Page] from the underlying [PageManager].
-    #[cfg(test)]
-    fn get_mut_page<'p>(
-        &self,
-        context: &TransactionContext,
-        page_id: PageId,
-    ) -> Result<PageMut<'p>, Error> {
-        self.inner.write().get_page_mut(context, page_id)
     }
 
     /// Retrieves an [Account] from the storage engine, identified by the given [AddressPath].
@@ -206,17 +168,15 @@ impl StorageEngine {
         }
     }
 
-    pub fn print_page(
+    pub fn print_page<W: io::Write>(
         &self,
         context: &TransactionContext,
-        output_file: &File,
+        mut buf: W,
         page_id: Option<u32>,
     ) -> Result<(), Error> {
         if context.metadata.root_subtrie_page_id == 0 {
             return Ok(());
         }
-
-        let mut file_writer = BufWriter::new(output_file);
 
         let (page_res, print_whole_db) = match page_id {
             Some(id) => (self.get_page(context, id), false),
@@ -231,7 +191,7 @@ impl StorageEngine {
             slotted_page,
             0,
             String::from(""),
-            &mut file_writer,
+            buf.by_ref(),
             print_whole_db,
         )
     }
@@ -258,7 +218,7 @@ impl StorageEngine {
         slotted_page: SlottedPage<'_>,
         cell_index: u8,
         indent: String,
-        file_writer: &mut BufWriter<&File>,
+        buf: &mut impl io::Write,
         print_whole_db: bool,
     ) -> Result<(), Error> {
         let node: Node = slotted_page.get_value(cell_index)?;
@@ -279,10 +239,7 @@ impl StorageEngine {
                 code_hash: _,
                 storage_root,
             } => {
-                let output_string = format!("{}Account leaf: {:?}\n", indent, val);
-                file_writer
-                    .write(output_string.as_bytes())
-                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                writeln!(buf, "{}Account leaf: {:?}", indent, val)?;
                 let mut new_indent = indent.clone();
                 new_indent.push('\t');
 
@@ -292,11 +249,7 @@ impl StorageEngine {
                     // child is on different page, and we are only printing the current page
                     if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
                         let child_page_id = direct_child.location().page_id().unwrap();
-                        let output_string =
-                            format!("{}Child on new page: {:?}\n", new_indent, child_page_id);
-                        file_writer
-                            .write(output_string.as_bytes())
-                            .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                        writeln!(buf, "{}Child on new page: {:?}", new_indent, child_page_id)?;
                         Ok(())
                     } else {
                         self.print_page_traverse(
@@ -304,25 +257,18 @@ impl StorageEngine {
                             new_slotted_page,
                             cell_index,
                             new_indent,
-                            file_writer,
+                            buf,
                             print_whole_db,
                         )
                     }
                 } else {
-                    let output_string = format!("{}No direct child\n", new_indent);
-                    file_writer
-                        .write(output_string.as_bytes())
-                        .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                    writeln!(buf, "{}No direct child", new_indent)?;
                     Ok(())
                 }
             }
 
             Node::Branch { prefix: _, children } => {
-                let output_string =
-                    format!("{}Branch, Page ID: {:?} \n", indent, slotted_page.id());
-                file_writer
-                    .write(output_string.as_bytes())
-                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                writeln!(buf, "{}Branch, Page ID: {:?}", indent, slotted_page.id())?;
                 for child in children.into_iter().flatten() {
                     let mut new_indent = indent.clone();
                     new_indent.push('\t');
@@ -333,11 +279,7 @@ impl StorageEngine {
                     // child is on new page, and we are only printing the current page
                     if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
                         let child_page_id = child.location().page_id().unwrap();
-                        let output_string =
-                            format!("{}Child on new page: {:?}\n", new_indent, child_page_id);
-                        file_writer
-                            .write(output_string.as_bytes())
-                            .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                        writeln!(buf, "{}Child on new page: {:?}", new_indent, child_page_id)?;
                         return Ok(())
                     } else {
                         self.print_page_traverse(
@@ -345,19 +287,15 @@ impl StorageEngine {
                             new_slotted_page,
                             cell_index,
                             new_indent,
-                            file_writer,
+                            buf,
                             print_whole_db,
                         )?
                     }
                 }
-                file_writer.flush().map_err(|e| Error::Other(format!("IO error: {}", e)))?;
                 Ok(())
             }
             Node::StorageLeaf { prefix: _, value_rlp: _ } => {
-                let output_string = format!("{}Storage leaf: {:?}\n", indent, val);
-                file_writer
-                    .write(output_string.as_bytes())
-                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+                writeln!(buf, "{}Storage leaf: {:?}", indent, val)?;
                 Ok(())
             }
         }
@@ -439,7 +377,7 @@ impl StorageEngine {
     }
 
     pub fn set_values(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         mut changes: &mut [(Nibbles, Option<TrieValue>)],
     ) -> Result<(), Error> {
@@ -484,7 +422,7 @@ impl StorageEngine {
     }
 
     fn set_values_in_page(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
@@ -509,10 +447,7 @@ impl StorageEngine {
                 // but this would require adding the page_id to a pending buffer. It would
                 // still be orphaned if unused by the end of the transaction.
                 Ok(PointerChange::Delete) => {
-                    self.inner
-                        .write()
-                        .orphan_manager
-                        .add_orphaned_page_id(context.metadata.snapshot_id, page_id);
+                    self.orphan_manager.add_orphaned_page_id(context.metadata.snapshot_id, page_id);
                     return Ok(PointerChange::Delete);
                 }
                 Ok(PointerChange::None) => return Ok(PointerChange::None),
@@ -559,7 +494,7 @@ impl StorageEngine {
     /// - `Ok(None)`: Node was deleted
     /// - `Err(Error)`: Operation failed, possibly due to page split
     fn set_values_in_cloned_page(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
@@ -683,7 +618,7 @@ impl StorageEngine {
 
     /// Handles the case when the path does not match the node prefix
     fn handle_missing_parent_branch(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
@@ -719,7 +654,7 @@ impl StorageEngine {
 
     /// Handles the case when the path matches the node prefix exactly
     fn handle_exact_prefix_match(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
@@ -822,7 +757,7 @@ impl StorageEngine {
 
     /// Handles traversal through an account leaf node with a child pointer
     fn handle_account_node_traversal(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
@@ -896,7 +831,7 @@ impl StorageEngine {
 
     /// Creates the first storage node for an account
     fn create_first_storage_node(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
@@ -983,7 +918,7 @@ impl StorageEngine {
 
     /// Handles traversal through a branch node
     fn handle_branch_node_traversal(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
@@ -1146,7 +1081,7 @@ impl StorageEngine {
 
     /// Handles cleanup of branch nodes (deletion or merging)
     fn handle_branch_node_cleanup(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
@@ -1180,7 +1115,7 @@ impl StorageEngine {
 
     /// Merges a branch node with its only child
     fn merge_branch_with_only_child(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
@@ -1267,7 +1202,7 @@ impl StorageEngine {
 
     // Handles merging a branch with a child on a different page
     fn merge_with_child_on_different_page(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
@@ -1289,10 +1224,7 @@ impl StorageEngine {
 
         // If we're the root node, orphan our page
         if page_index == 0 {
-            self.inner
-                .write()
-                .orphan_manager
-                .add_orphaned_page_id(context.metadata.snapshot_id, branch_page_id);
+            self.orphan_manager.add_orphaned_page_id(context.metadata.snapshot_id, branch_page_id);
         }
 
         Ok(PointerChange::Update(Pointer::new(node_location(child_slotted_page.id(), 0), rlp_node)))
@@ -1301,7 +1233,7 @@ impl StorageEngine {
     // Split the page into two, moving the largest immediate subtrie of the root node to a new child
     // page.
     fn split_page(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         page: &mut SlottedPageMut<'_>,
     ) -> Result<(), Error> {
@@ -1350,7 +1282,7 @@ impl StorageEngine {
     // Recursively deletes a subtrie from the page, orphaning any pages that become fully
     // unreferenced as a result.
     fn delete_subtrie(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         slotted_page: &mut SlottedPageMut<'_>,
         cell_index: u8,
@@ -1389,7 +1321,11 @@ impl StorageEngine {
 
     // Orphans a subtrie from the page, orphaning any pages that become fully unreferenced as a
     // result.
-    fn orphan_subtrie(&self, context: &mut TransactionContext, page_id: u32) -> Result<(), Error> {
+    fn orphan_subtrie(
+        &mut self,
+        context: &mut TransactionContext,
+        page_id: u32,
+    ) -> Result<(), Error> {
         let page = self.get_page(context, page_id)?;
         let slotted_page = SlottedPage::try_from(page)?;
 
@@ -1397,9 +1333,7 @@ impl StorageEngine {
         self.orphan_subtrie_helper(context, &slotted_page, 0, &mut orphaned_page_ids)?;
 
         {
-            self.inner
-                .write()
-                .orphan_manager
+            self.orphan_manager
                 .add_orphaned_page_ids(context.metadata.snapshot_id, orphaned_page_ids)
         }
 
@@ -1442,11 +1376,6 @@ impl StorageEngine {
         Ok(())
     }
 
-    /// Commits all outstanding data to disk.
-    pub fn commit(&self, context: &TransactionContext) -> Result<(), Error> {
-        self.inner.write().commit(context)
-    }
-
     /// Rolls back all outstanding data to disk. Currently unimplemented.
     pub fn rollback(&self, _context: &TransactionContext) -> Result<(), Error> {
         Ok(())
@@ -1457,17 +1386,16 @@ impl StorageEngine {
     // are unlocked. If the buffer is insufficient, the storage engine will be scaled by
     // `grow_by` until it has at least `min_buffer_size` pages.
     pub(crate) fn ensure_page_buffer(
-        &self,
+        &mut self,
         context: &TransactionContext,
         min_buffer_size: u32,
         grow_by: f64,
     ) -> Result<(), Error> {
         assert!(grow_by > 1.0, "grow_by must be greater than 1.0");
 
-        let mut inner = self.inner.write();
-        let current_page_count = inner.page_manager.size();
+        let current_page_count = self.page_manager.size();
         let unallocated_page_count = current_page_count - context.metadata.max_page_number - 1;
-        let unlocked_page_count = inner.orphan_manager.unlocked_page_count();
+        let unlocked_page_count = self.orphan_manager.unlocked_page_count();
 
         let mut free_page_count = unlocked_page_count + unallocated_page_count;
 
@@ -1478,33 +1406,25 @@ impl StorageEngine {
                 new_page_count = (new_page_count as f64 * grow_by) as u32;
                 free_page_count = new_page_count - unusable_page_count;
             }
-            inner.resize(new_page_count)?;
+            self.resize(new_page_count)?;
         }
 
         Ok(())
     }
 
-    /// Resizes the storage engine to the given number of pages.
-    pub(crate) fn resize(&mut self, new_page_count: PageId) -> Result<(), Error> {
-        self.inner.write().resize(new_page_count)
-    }
-
     /// Returns the total number of pages in the storage engine.
     pub fn size(&self) -> u32 {
-        let inner = self.inner.read();
-        inner.page_manager.size()
+        self.page_manager.size()
     }
 
     /// Shrinks the storage to its minimum size and commits all outstanding data to disk.
-    pub fn shrink_and_commit(&self, context: &TransactionContext) -> Result<(), Error> {
-        let mut inner = self.inner.write();
-
+    pub fn shrink_and_commit(&mut self, context: &TransactionContext) -> Result<(), Error> {
         // there will always be a minimum of 256 pages (root pages + reserved orphan pages).
         let max_page_count = max(context.metadata.max_page_number + 1, 256);
         // resize the page manager so that we only store the exact amount of pages we need.
-        inner.resize(max_page_count)?;
+        self.resize(max_page_count)?;
         // commit all outstanding data to disk.
-        inner.commit(context)?;
+        self.commit(context)?;
 
         Ok(())
     }
@@ -1618,14 +1538,17 @@ fn move_subtrie_nodes(
     Ok(node_location(target_page.id(), new_index))
 }
 
-impl Inner {
-    fn allocate_page<'p>(
+impl StorageEngine {
+    /// Allocates a new page from the underlying page manager.
+    /// If there is an orphaned page available as of the given [SnapshotId],
+    /// it is used to allocate a new page instead.
+    pub fn allocate_page<'p>(
         &mut self,
         context: &mut TransactionContext,
     ) -> Result<PageMut<'p>, Error> {
         let orphaned_page_id = self.orphan_manager.get_orphaned_page_id();
         let page_to_return = if let Some(orphaned_page_id) = orphaned_page_id {
-            let mut page = self.get_page_mut(context, orphaned_page_id)?;
+            let mut page = self.get_mut_page(context, orphaned_page_id)?;
             page.set_snapshot_id(context.metadata.snapshot_id);
             page.contents_mut().fill(0);
             context.transaction_metrics.inc_pages_reallocated();
@@ -1641,14 +1564,16 @@ impl Inner {
         Ok(page_to_return)
     }
 
-    fn resize(&mut self, new_page_count: PageId) -> Result<(), Error> {
+    /// Resizes the storage engine to the given number of pages.
+    pub(crate) fn resize(&mut self, new_page_count: PageId) -> Result<(), Error> {
         self.page_manager.resize(new_page_count)?;
         Ok(())
     }
 
-    fn commit(&mut self, context: &TransactionContext) -> Result<(), Error> {
+    /// Commits all outstanding data to disk.
+    pub fn commit(&mut self, context: &TransactionContext) -> Result<(), Error> {
         // First commit to ensure all changes are written before writing the new root page.
-        self.page_manager.commit(context.metadata.snapshot_id)?;
+        self.page_manager.commit()?;
 
         let mut page_mut = self
             .page_manager
@@ -1674,13 +1599,13 @@ impl Inner {
             .unwrap();
 
         // Second commit to ensure the new root page is written to disk.
-        self.page_manager.commit(context.metadata.snapshot_id)?;
+        self.page_manager.commit()?;
 
         Ok(())
     }
 
-    // a wrapper around the page manager get_mut that increments the pages read metric
-    fn get_page_mut<'p>(
+    /// Retrieves a mutable [Page] from the underlying [PageManager].
+    pub fn get_mut_page<'p>(
         &mut self,
         context: &TransactionContext,
         page_id: PageId,
@@ -1690,8 +1615,8 @@ impl Inner {
         Ok(page)
     }
 
-    // a wrapper around the page manager get that increments the pages read metric
-    fn get_page<'p>(
+    /// Retrieves a read-only [Page] from the underlying [PageManager].
+    pub fn get_page<'p>(
         &self,
         context: &TransactionContext,
         page_id: PageId,
@@ -1704,24 +1629,29 @@ impl Inner {
 
 #[derive(Debug)]
 pub enum Error {
+    IO(io::Error),
     NodeError(NodeError),
     PageError(PageError),
     InvalidCommonPrefixIndex,
     InvalidSnapshotId,
-    EngineClosed,
     PageSplit,
-    Other(String),
 }
 
 impl From<PageError> for Error {
     fn from(error: PageError) -> Self {
-        Error::PageError(error)
+        Self::PageError(error)
     }
 }
 
 impl From<NodeError> for Error {
     fn from(error: NodeError) -> Self {
-        Error::NodeError(error)
+        Self::NodeError(error)
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(error: io::Error) -> Self {
+        Self::IO(error)
     }
 }
 
@@ -1750,7 +1680,7 @@ mod tests {
 
     #[test]
     fn test_allocate_get_mut_clone() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         // Initial allocation
         let mut page = storage_engine.allocate_page(&mut context).unwrap();
@@ -1815,7 +1745,7 @@ mod tests {
 
     #[test]
     fn test_shared_page_mutability() {
-        let (storage_engine, context) = create_test_engine(300);
+        let (mut storage_engine, context) = create_test_engine(300);
 
         let page1 = storage_engine.get_page(&context, 1).unwrap();
         assert_eq!(page1.contents()[0], 0);
@@ -1834,7 +1764,7 @@ mod tests {
 
     #[test]
     fn test_set_get_account() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
@@ -1887,7 +1817,7 @@ mod tests {
 
     #[test]
     fn test_simple_trie_state_root_1() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let address1 = address!("0x8e64566b5eb8f595f7eb2b8d302f2e5613cb8bae");
         let account1 = create_test_account(1_000_000_000_000_000_000u64, 0);
@@ -1917,7 +1847,7 @@ mod tests {
 
     #[test]
     fn test_simple_trie_state_root_2() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let address1 = address!("0x000f3df6d732807ef1319fb7b8bb8522d0beac02");
         let account1 = Account::new(1, U256::from(0), EMPTY_ROOT_HASH, keccak256(hex!("0x3373fffffffffffffffffffffffffffffffffffffffe14604d57602036146024575f5ffd5b5f35801560495762001fff810690815414603c575f5ffd5b62001fff01545f5260205ff35b5f5ffd5b62001fff42064281555f359062001fff015500")));
@@ -2023,7 +1953,7 @@ mod tests {
             accounts.push((address, account, storage));
         }
 
-        let (storage_engine, mut context) = create_test_engine(30000);
+        let (mut storage_engine, mut context) = create_test_engine(30000);
 
         // insert accounts and storage in random order
         accounts.shuffle(&mut rng);
@@ -2068,7 +1998,7 @@ mod tests {
             expected_account_storage_roots.insert(address, read_account.storage_root);
         }
 
-        let (storage_engine, mut context) = create_test_engine(30000);
+        let (mut storage_engine, mut context) = create_test_engine(30000);
 
         // insert accounts in a different random order, but only after inserting different values
         // first
@@ -2150,7 +2080,7 @@ mod tests {
 
     #[test]
     fn test_set_get_account_common_prefix() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let test_accounts = vec![
             (hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001"), create_test_account(100, 1)),
@@ -2181,7 +2111,7 @@ mod tests {
 
     #[test]
     fn test_split_page() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let test_accounts = vec![
             (hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001"), create_test_account(100, 1)),
@@ -2217,7 +2147,7 @@ mod tests {
 
     #[test]
     fn test_insert_get_1000_accounts() {
-        let (storage_engine, mut context) = create_test_engine(5000);
+        let (mut storage_engine, mut context) = create_test_engine(5000);
 
         for i in 0..1000 {
             let path = address_path_for_idx(i);
@@ -2242,7 +2172,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_set_storage_slot_with_no_account_panics() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
 
         let storage_key =
@@ -2264,7 +2194,7 @@ mod tests {
 
     #[test]
     fn test_get_account_storage_cache() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
         {
             // An account with no storage should not be cached
             let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96555");
@@ -2438,7 +2368,7 @@ mod tests {
 
     #[test]
     fn test_set_get_account_storage_slots() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
@@ -2508,7 +2438,7 @@ mod tests {
 
     #[test]
     fn test_set_get_account_storage_roots() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
@@ -2580,7 +2510,7 @@ mod tests {
 
     #[test]
     fn test_set_get_many_accounts_storage_roots() {
-        let (storage_engine, mut context) = create_test_engine(2000);
+        let (mut storage_engine, mut context) = create_test_engine(2000);
 
         for i in 0..100 {
             let address =
@@ -2633,7 +2563,7 @@ mod tests {
     #[test]
     fn test_split_page_stress() {
         // Create a storage engine with limited pages to force splits
-        let (storage_engine, mut context) = create_test_engine(5000);
+        let (mut storage_engine, mut context) = create_test_engine(5000);
 
         // Create a large number of accounts with different patterns to stress the trie
 
@@ -2811,7 +2741,7 @@ mod tests {
         use rand::{rngs::StdRng, Rng, SeedableRng};
 
         // Create a storage engine
-        let (storage_engine, mut context) = create_test_engine(2000);
+        let (mut storage_engine, mut context) = create_test_engine(2000);
 
         // Use a seeded RNG for reproducibility
         let mut rng = StdRng::seed_from_u64(42);
@@ -2933,7 +2863,7 @@ mod tests {
 
     #[test]
     fn test_delete_account() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
@@ -2969,7 +2899,7 @@ mod tests {
 
     #[test]
     fn test_delete_accounts() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
@@ -3039,7 +2969,7 @@ mod tests {
 
     #[test]
     fn test_some_delete_accounts() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
@@ -3117,7 +3047,7 @@ mod tests {
 
     #[test]
     fn test_delete_storage() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
@@ -3229,7 +3159,7 @@ mod tests {
 
     #[test]
     fn test_delete_account_also_deletes_storage() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
@@ -3338,7 +3268,7 @@ mod tests {
 
     #[test]
     fn test_delete_single_child_branch_on_same_page() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         // GIVEN: a branch node with 2 children, where all the children live on the same page
         let mut account_1_nibbles = [0u8; 64];
@@ -3410,7 +3340,7 @@ mod tests {
 
     #[test]
     fn test_delete_single_child_non_root_branch_on_different_pages() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         // GIVEN: a non-root branch node with 2 children where both children are on a different
         // pages
@@ -3562,7 +3492,7 @@ mod tests {
 
     #[test]
     fn test_delete_single_child_root_branch_on_different_pages() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         // GIVEN: a root branch node with 2 children where both children are on a different page
         //
@@ -3669,7 +3599,7 @@ mod tests {
 
     #[test]
     fn test_delete_non_existent_value_doesnt_change_trie_structure() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         // GIVEN: a trie with a single account
         let address_nibbles = Nibbles::unpack(hex!(
@@ -3741,7 +3671,7 @@ mod tests {
 
     #[test]
     fn test_leaf_update_and_non_existent_delete_works() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         // GIVEN: a trie with a single account
         let address_nibbles_original_account = Nibbles::unpack(hex!(
@@ -3807,7 +3737,7 @@ mod tests {
                 1..100
             )
         ) {
-            let (storage_engine, mut context) = create_test_engine(10_000);
+            let (mut storage_engine, mut context) = create_test_engine(10_000);
 
             for (address, account) in &accounts {
                 storage_engine
@@ -3833,7 +3763,7 @@ mod tests {
                 1..100
             ),
         ) {
-            let (storage_engine, mut context) = create_test_engine(10_000);
+            let (mut storage_engine, mut context) = create_test_engine(10_000);
 
             let mut changes = vec![];
             for (address, account, storage) in &accounts {
@@ -3872,7 +3802,7 @@ mod tests {
                 1..100
             ),
         ) {
-            let (storage_engine, mut context) = create_test_engine(10_000);
+            let (mut storage_engine, mut context) = create_test_engine(10_000);
 
             let mut revision = 0;
             loop {
