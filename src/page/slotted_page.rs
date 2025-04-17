@@ -70,6 +70,7 @@ impl SlottedPage<'_> {
     // Returns the cell pointer at the given index.
     fn get_cell_pointer(&self, index: u8) -> Result<CellPointer, PageError> {
         if index >= self.num_cells() {
+            println!("InvalidCellPointer, index: {}, num_cells: {}", index, self.num_cells());
             return Err(PageError::InvalidCellPointer);
         }
         let start_index = 1 + CELL_POINTER_SIZE * (index as usize);
@@ -79,7 +80,7 @@ impl SlottedPage<'_> {
     }
 
     // Returns the number of cells in the page, which may include deleted cells.
-    fn num_cells(&self) -> u8 {
+    pub fn num_cells(&self) -> u8 {
         self.page.contents()[0]
     }
 

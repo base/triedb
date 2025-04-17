@@ -543,12 +543,6 @@ impl StorageEngine {
                 Err(Error::PageSplit) => {
                     context.transaction_metrics.inc_pages_split();
                     split_count += 1;
-                    println!(
-                        "\tPageSplit error, page_id: {}, changes size: {}, split_count: {}",
-                        page_id,
-                        changes.len(),
-                        split_count
-                    );
                     // FIXME: this is a temporary limit to prevent infinite loops.
                     if split_count > 20 {
                         return Err(Error::PageError(PageError::PageSplitLimitReached));
@@ -732,10 +726,10 @@ impl StorageEngine {
                 common_prefix_length,
             );
             if let Err(Error::PageSplit) = result {
-                println!("PageSplit error @handle_missing_parent_branch, page_id: {}, changes size: {}, split_count: {}", 
-                slotted_page.id(), changes.len(), split_count);
+                println!("PageSplit error @handle_missing_parent_branch, page_id: {}, page_index: {}, changes size: {}, split_count: {}", 
+                slotted_page.id(), page_index, changes.len(), split_count);
                 split_count += 1;
-                if split_count > 5 {
+                if split_count > 0 {
                     return result
                 }
             } else {
@@ -759,11 +753,20 @@ impl StorageEngine {
         // Ensure page has enough space for a new branch and leaf node
         // TODO: use a more accurate threshold
         if slotted_page.num_free_bytes() < 1000 {
+            println!(
+                "\tBefore PageSplit error @handle_missing_parent_branch_1, page_id: {}, page_index: {}, changes size: {}, num_cells: {}",
+                slotted_page.id(),
+                page_index,
+                changes.len(),
+                slotted_page.num_cells(),
+            );
             self.split_page(context, slotted_page)?;
             println!(
-                "\tPageSplit error @handle_missing_parent_branch_1, page_id: {}, changes size: {}",
+                "\tAfter PageSplit error @handle_missing_parent_branch_1, page_id: {}, page_index: {}, changes size: {}, num_cells: {}",
                 slotted_page.id(),
+                page_index,
                 changes.len(),
+                slotted_page.num_cells(),
             );
             return Err(Error::PageSplit);
         }
@@ -848,8 +851,9 @@ impl StorageEngine {
             if slotted_page.num_free_bytes() < node_size_incr {
                 self.split_page(context, slotted_page)?;
                 println!(
-                    "\tPageSplit error @handle_exact_prefix_match, page_id: {}, changes size: {}",
+                    "\tPageSplit error @handle_exact_prefix_match, page_id: {}, page_index: {}, changes size: {}",
                     slotted_page.id(),
+                    page_index,
                     changes.len()
                 );
                 return Err(Error::PageSplit);
