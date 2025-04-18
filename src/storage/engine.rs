@@ -840,23 +840,17 @@ impl StorageEngine {
         node: &mut Node,
         common_prefix_length: usize,
     ) -> Result<PointerChange, Error> {
-        if changes.is_empty() {
-            return Ok(PointerChange::None);
-        }
+        // Skip any deletion changes at the start since they are no-ops
+        let first_non_delete_idx = changes.iter().position(|(_, value)| value.is_some());
+        let first_non_delete_idx = match first_non_delete_idx {
+            None => return Ok(PointerChange::None),
+            Some(idx) => idx,
+        };
 
         // the account has no storage trie yet, so we need to create a new leaf node for the first
         // slot Get the first change and create a new leaf node
+        let changes = &changes[first_non_delete_idx..];
         let ((path, value), remaining_changes) = changes.split_first().unwrap();
-        if value.is_none() {
-            // this is a delete on a storage value that doesn't exist. skip it.
-            return self.set_values_in_cloned_page(
-                context,
-                remaining_changes,
-                path_offset,
-                slotted_page,
-                page_index,
-            );
-        }
 
         let node_size_incr = node.size_incr_with_new_child();
         let remaining_path = path.slice(path_offset as usize + common_prefix_length..);
