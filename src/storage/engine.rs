@@ -745,7 +745,7 @@ impl StorageEngine {
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
         slotted_page: &mut SlottedPageMut<'_>,
-        page_index: u8,
+        cell_index: u8,
         node: &mut Node,
         common_prefix: Nibbles,
         common_prefix_length: usize,
@@ -754,29 +754,23 @@ impl StorageEngine {
         // TODO: use a more accurate threshold
         if slotted_page.num_free_bytes() < 1000 {
             println!(
-                "\tBefore PageSplit error @handle_missing_parent_branch_1, page_id: {}, page_index: {}, changes size: {}, num_cells: {}",
+                "\tBefore PageSplit error @handle_missing_parent_branch_1, page_id: {}, cell_index: {}, changes size: {}, num_cells: {}",
                 slotted_page.id(),
-                page_index,
+                cell_index,
                 changes.len(),
                 slotted_page.num_cells(),
             );
-            self.split_page(context, slotted_page, page_index)?;
-            println!(
-                "\tAfter PageSplit error @handle_missing_parent_branch_1, page_id: {}, page_index: {}, changes size: {}, num_cells: {}",
-                slotted_page.id(),
-                page_index,
-                changes.len(),
-                slotted_page.num_cells(),
-            );
-            // get the slotted page after split
-            {
-                let page_id = slotted_page.id();
-                let page = self.get_slotted_page(context, page_id)?;
-                println!("PageSplit error @handle_missing_parent_branch_1, after reading from storage engine, page_id: {}, cells: {}", 
-                    page.id(), page.num_cells());
-                let page = self.get_slotted_page(context, page_id + 1)?;
-                println!("PageSplit error @handle_missing_parent_branch_1, after reading from storage engine ++, page_id: {}, cells: {}", 
-                    page.id(), page.num_cells());
+            let new_loc = self.split_page(context, slotted_page, cell_index)?;
+            match new_loc {
+                Some((new_page_id, new_cell_index)) => {
+                    println!("\t\tAfter PageSplit error @handle_missing_parent_branch_1, moved to new page, new_page_id: {}, new_cell_index: {}",
+                        new_page_id,
+                        new_cell_index,
+                    );
+                }
+                None => {
+                    println!("\t\tAfter PageSplit error @handle_missing_parent_branch_1, keep on the same page");
+                }
             }
             return Err(Error::PageSplit);
         }
@@ -792,10 +786,10 @@ impl StorageEngine {
         new_parent_branch.set_child(node_branch_index, Pointer::new(location, rlp_node))?;
 
         // Set the new branch as the current node
-        slotted_page.set_value(page_index, &new_parent_branch)?;
+        slotted_page.set_value(cell_index, &new_parent_branch)?;
 
         // Insert the changes into the new branch via recursion
-        self.set_values_in_cloned_page(context, changes, path_offset, slotted_page, page_index)
+        self.set_values_in_cloned_page(context, changes, path_offset, slotted_page, cell_index)
     }
 
     /// Handles the case when the path matches the node prefix exactly
