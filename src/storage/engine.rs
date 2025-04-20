@@ -120,7 +120,7 @@ impl StorageEngine {
     }
 
     /// Retrieves a mutable [Page] from the underlying [PageManager].
-    #[cfg(test)]
+    // #[cfg(test)]
     fn get_mut_page<'p>(
         &self,
         context: &TransactionContext,
@@ -752,6 +752,7 @@ impl StorageEngine {
     ) -> Result<PointerChange, Error> {
         // Ensure page has enough space for a new branch and leaf node
         // TODO: use a more accurate threshold
+        let mut cell_index = cell_index;
         if slotted_page.num_free_bytes() < 1000 {
             println!(
                 "\tBefore PageSplit error @handle_missing_parent_branch_1, page_id: {}, cell_index: {}, changes size: {}, num_cells: {}",
@@ -762,17 +763,22 @@ impl StorageEngine {
             );
             let new_loc = self.split_page(context, slotted_page, cell_index)?;
             match new_loc {
-                Some((new_page_id, new_cell_index)) => {
+                Some((new_slotted_page, new_cell_index)) => {
                     println!("\t\tAfter PageSplit error @handle_missing_parent_branch_1, moved to new page, new_page_id: {}, new_cell_index: {}",
-                        new_page_id,
+                        new_slotted_page.id(),
                         new_cell_index,
                     );
+                    let new_slotted_page = SlottedPageMut::try_from(
+                        self.get_mut_page(context, new_slotted_page.id())?,
+                    )?;
+                    *slotted_page = new_slotted_page;
+                    cell_index = new_cell_index;
                 }
                 None => {
                     println!("\t\tAfter PageSplit error @handle_missing_parent_branch_1, keep on the same page");
                 }
             }
-            return Err(Error::PageSplit);
+            // return Err(Error::PageSplit);
         }
 
         // Create a new branch node with the common prefix
@@ -1453,8 +1459,8 @@ impl StorageEngine {
         context: &mut TransactionContext,
         page: &mut SlottedPageMut<'_>,
         original_cell_index: u8,
-    ) -> Result<Option<(PageId, u8)>, Error> {
-        let mut original_cell_index_to_new_location: Option<(PageId, u8)> = None; // page_id, cell_index
+    ) -> Result<Option<(SlottedPageMut<'_>, u8)>, Error> {
+        let mut original_cell_index_to_new_location: Option<(SlottedPageMut<'_>, u8)> = None; // page_id, cell_index
 
         while page.num_free_bytes() < Page::DATA_SIZE / 4_usize {
             let child_page = self.allocate_page(context)?;
@@ -1490,11 +1496,6 @@ impl StorageEngine {
                     new_locations.0.page_id().is_some(),
                     "expected subtrie to be moved to a new page"
                 );
-                if let Some(new_cell_index) = new_locations.1 {
-                    original_cell_index_to_new_location =
-                        Some((child_slotted_page.id(), new_cell_index));
-                }
-
                 // Update the pointer in the root node to point to the new page
                 root_node.set_child(
                     largest_child_index,
@@ -1504,6 +1505,11 @@ impl StorageEngine {
                     ),
                 )?;
                 page.set_value(0, &root_node)?;
+
+                if let Some(new_cell_index) = new_locations.1 {
+                    original_cell_index_to_new_location =
+                        Some((child_slotted_page, new_cell_index));
+                }
             }
         }
 
