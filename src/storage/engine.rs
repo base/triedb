@@ -853,7 +853,7 @@ impl StorageEngine {
         if new_node_size > old_node_size {
             let node_size_incr = new_node_size - old_node_size;
             if slotted_page.num_free_bytes() < node_size_incr {
-                self.split_page(context, slotted_page)?;
+                self.split_page(context, slotted_page, page_index)?;
                 println!(
                     "\tPageSplit error @handle_exact_prefix_match, page_id: {}, page_index: {}, changes size: {}",
                     slotted_page.id(),
@@ -1021,7 +1021,7 @@ impl StorageEngine {
         // 3. and add new cell pointer for the new leaf node (3 bytes)
         // when adding the new child, split the page.
         if slotted_page.num_free_bytes() < node_size_incr + new_node.size() + CELL_POINTER_SIZE {
-            self.split_page(context, slotted_page)?;
+            self.split_page(context, slotted_page, page_index)?;
             println!(
                 "\tPageSplit error @create_first_storage_node, page_id: {}, changes size: {}",
                 slotted_page.id(),
@@ -1240,7 +1240,7 @@ impl StorageEngine {
                 if slotted_page.num_free_bytes() <
                     node_size_incr + new_node.size() + CELL_POINTER_SIZE
                 {
-                    self.split_page(context, slotted_page)?;
+                    self.split_page(context, slotted_page, page_index)?;
                     println!(
                         "\tPageSplit error @handle_branch_node_with_changes, page_id: {}, changes size: {}",
                         slotted_page.id(),
@@ -1426,7 +1426,7 @@ impl StorageEngine {
 
         // Ensure the child page has enough space
         if child_slotted_page.num_free_bytes() < 200 {
-            self.split_page(context, &mut child_slotted_page)?;
+            self.split_page(context, &mut child_slotted_page, page_index)?;
             // Not returning Error::PageSplit because we're splitting the child page
         }
 
@@ -1768,7 +1768,8 @@ fn move_subtrie_nodes(
         0..1
     };
 
-    let mut original_cell_index_to_new_location = None;
+    let mut original_cell_index_to_new_location =
+        if original_cell_index == root_index { loc.cell_index() } else { None };
 
     for branch_index in range {
         let child_ptr = if updated_node.is_account_leaf() {
@@ -2385,7 +2386,8 @@ mod tests {
         // Split the page
         let page = storage_engine.get_mut_page(&context, 256).unwrap();
         let mut slotted_page = SlottedPageMut::try_from(page).unwrap();
-        storage_engine.split_page(&mut context, &mut slotted_page).unwrap();
+        // todo: check original cell index
+        storage_engine.split_page(&mut context, &mut slotted_page, 0).unwrap();
 
         // Verify all accounts still exist after split
         for (nibbles, account) in test_accounts {
@@ -2920,7 +2922,7 @@ mod tests {
             let mut slotted_page = SlottedPageMut::try_from(page_result.unwrap()).unwrap();
 
             // Try to split this page
-            if storage_engine.split_page(&mut context, &mut slotted_page).is_ok() {
+            if storage_engine.split_page(&mut context, &mut slotted_page, 0).is_ok() {
                 // If split succeeded, add the new pages to be processed
                 pages_to_split.push(page_id + 1); // New page created by split
             }
@@ -3044,7 +3046,7 @@ mod tests {
             if let Ok(page) = storage_engine.get_mut_page(&context, page_id) {
                 if let Ok(mut slotted_page) = SlottedPageMut::try_from(page) {
                     // Force a split
-                    let _ = storage_engine.split_page(&mut context, &mut slotted_page);
+                    let _ = storage_engine.split_page(&mut context, &mut slotted_page, 0);
 
                     // Get the node to find child pages
                     if let Ok(node) = slotted_page.get_value::<Node>(0) {
