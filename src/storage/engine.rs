@@ -752,7 +752,6 @@ impl StorageEngine {
     ) -> Result<PointerChange, Error> {
         // Ensure page has enough space for a new branch and leaf node
         // TODO: use a more accurate threshold
-        let mut cell_index = cell_index;
         if slotted_page.num_free_bytes() < 1000 {
             println!(
                 "\tBefore PageSplit error @handle_missing_parent_branch_1, page_id: {}, cell_index: {}, changes size: {}, num_cells: {}",
@@ -763,16 +762,21 @@ impl StorageEngine {
             );
             let new_loc = self.split_page(context, slotted_page, cell_index)?;
             match new_loc {
-                Some((new_slotted_page, new_cell_index)) => {
+                Some((mut new_slotted_page, new_cell_index)) => {
                     println!("\t\tAfter PageSplit error @handle_missing_parent_branch_1, moved to new page, new_page_id: {}, new_cell_index: {}",
                         new_slotted_page.id(),
                         new_cell_index,
                     );
-                    let new_slotted_page = SlottedPageMut::try_from(
-                        self.get_mut_page(context, new_slotted_page.id())?,
-                    )?;
-                    *slotted_page = new_slotted_page;
-                    cell_index = new_cell_index;
+                    return self.handle_missing_parent_branch_1(
+                        context,
+                        changes,
+                        path_offset,
+                        &mut new_slotted_page,
+                        new_cell_index,
+                        node,
+                        common_prefix,
+                        common_prefix_length,
+                    )
                 }
                 None => {
                     println!("\t\tAfter PageSplit error @handle_missing_parent_branch_1, keep on the same page");
