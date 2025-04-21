@@ -1575,7 +1575,7 @@ fn move_subtrie_nodes(
     let new_index = target_page.insert_value(&node)?;
     let loc = node_location(target_page.id(), new_index);
     let mut original_cell_index_to_new_location: Option<u8> =
-        if original_cell_index == root_index { loc.cell_index() } else { None };
+        if original_cell_index == root_index { Some(new_index) } else { None };
 
     // if the node has no children, we're done.
     if !has_children {
