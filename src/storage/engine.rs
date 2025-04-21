@@ -638,10 +638,9 @@ impl StorageEngine {
                 changes.len(),
                 page_index
             );
-            let mut new_slotted_page = self.split_page_1(context, slotted_page, page_index)?;
-            let new_cell_index = 0;
+            let (mut new_slotted_page, new_cell_index) =
+                self.split_page_1(context, slotted_page, page_index)?;
             let mut new_node = new_slotted_page.get_value::<Node>(new_cell_index)?;
-            println!("new node: {:?}", new_node);
             return self.handle_missing_parent_branch(
                 context,
                 changes,
@@ -1255,7 +1254,7 @@ impl StorageEngine {
         context: &mut TransactionContext,
         page: &mut SlottedPageMut<'_>,
         cell_index: u8,
-    ) -> Result<SlottedPageMut<'p>, Error> {
+    ) -> Result<(SlottedPageMut<'p>, u8), Error> {
         let x = find_path_to_node(page, 0, cell_index)?;
         let x = x.unwrap();
         println!("\tpath to cell {}: {:?}", cell_index, x);
@@ -1277,13 +1276,18 @@ impl StorageEngine {
 
         let mut child_slotted_page = self.allocate_slotted_page(context)?;
         // Move all child nodes that are in the current page
-        let location = move_subtrie_nodes(
+        let (location, original_cell_index_to_new_location) = move_subtrie_nodes(
             page,
-            child_pointer.location().cell_index().unwrap(),
             &mut child_slotted_page,
+            child_pointer.location().cell_index().unwrap(),
+            cell_index,
         )?;
         assert!(location.page_id().is_some(), "expected subtrie to be moved to a new page");
-
+        assert!(
+            original_cell_index_to_new_location.is_some(),
+            "expected original cell index to be moved to a new page"
+        );
+        let original_cell_index_to_new_location = original_cell_index_to_new_location.unwrap();
         // Update the pointer in the root node to point to the new page
         parent_node.set_child(
             child_index,
@@ -1291,7 +1295,7 @@ impl StorageEngine {
         )?;
         page.set_value(parent_cell_index, &parent_node)?;
 
-        Ok(child_slotted_page)
+        Ok((child_slotted_page, original_cell_index_to_new_location))
     }
 
     // Split the page into two, moving the largest immediate subtrie of the root node to a new child
@@ -1326,7 +1330,8 @@ impl StorageEngine {
             // Move the subtrie to the new page
             if let Some(cell_index) = largest_child_pointer.location().cell_index() {
                 // Move all child nodes that are in the current page
-                let location = move_subtrie_nodes(page, cell_index, &mut child_slotted_page)?;
+                let (location, _) =
+                    move_subtrie_nodes(page, &mut child_slotted_page, cell_index, 0)?;
                 assert!(location.page_id().is_some(), "expected subtrie to be moved to a new page");
 
                 // Update the pointer in the root node to point to the new page
