@@ -19,7 +19,7 @@ use crate::{
 use alloy_primitives::StorageValue;
 use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
 use std::{
-    cmp::{max, Ordering},
+    cmp::{max, min, Ordering},
     fmt::Debug,
     io,
 };
@@ -639,12 +639,18 @@ impl StorageEngine {
                 page_index
             );
             let mut new_slotted_page = self.split_page_1(context, slotted_page, page_index)?;
-            return self.set_values_in_cloned_page(
+            let new_cell_index = 0;
+            let mut new_node = new_slotted_page.get_value::<Node>(new_cell_index)?;
+            println!("new node: {:?}", new_node);
+            return self.handle_missing_parent_branch(
                 context,
                 changes,
                 path_offset,
                 &mut new_slotted_page,
-                0,
+                new_cell_index,
+                &mut new_node,
+                common_prefix,
+                common_prefix_length,
             );
         }
 
@@ -1243,27 +1249,39 @@ impl StorageEngine {
         Ok(PointerChange::Update(Pointer::new(node_location(child_slotted_page.id(), 0), rlp_node)))
     }
 
-    // Split the page into two, moving the node at cell_index to a new child page.
+    // Split the page into two, moving the parent of the node at cell_index to a new child page.
     fn split_page_1<'p>(
         &mut self,
         context: &mut TransactionContext,
         page: &mut SlottedPageMut<'_>,
         cell_index: u8,
     ) -> Result<SlottedPageMut<'p>, Error> {
-        let result = find_parent_node(page, 0, cell_index)?;
-        assert!(result.is_some(), "expected parent node for cell {}", cell_index);
-        let (parent_cell_index, child_index) = result.unwrap();
-        let mut parent_node: Node = page.get_value(parent_cell_index)?;
-        println!(
-            "found parent node for cell {}: parent cell index {}, child index {}",
-            cell_index, parent_cell_index, child_index
-        );
+        let x = find_path_to_node(page, 0, cell_index)?;
+        let x = x.unwrap();
+        println!("\tpath to cell {}: {:?}", cell_index, x);
+        assert!(x.len() >= 1, "expected path to cell {} to be at least 1", cell_index);
 
+        let idx = min(1, x.len() - 1);
+        let (parent_cell_index, child_index) = x[idx];
+        println!("\tparent cell index: {}, child index: {}", parent_cell_index, child_index);
+
+        // let result = find_parent_node(page, 0, cell_index)?;
+        // assert!(result.is_some(), "expected parent node for cell {}", cell_index);
+        // let (parent_cell_index, child_index) = result.unwrap();
+        let mut parent_node: Node = page.get_value(parent_cell_index)?;
         let child_pointer = parent_node.child(child_index)?.unwrap();
+        println!(
+            "\tmove subtrie rooted at cell {} to new page",
+            child_pointer.location().cell_index().unwrap()
+        );
 
         let mut child_slotted_page = self.allocate_slotted_page(context)?;
         // Move all child nodes that are in the current page
-        let location = move_subtrie_nodes(page, cell_index, &mut child_slotted_page)?;
+        let location = move_subtrie_nodes(
+            page,
+            child_pointer.location().cell_index().unwrap(),
+            &mut child_slotted_page,
+        )?;
         assert!(location.page_id().is_some(), "expected subtrie to be moved to a new page");
 
         // Update the pointer in the root node to point to the new page
@@ -1532,12 +1550,17 @@ fn count_subtrie_nodes(page: &SlottedPage<'_>, root_index: u8) -> Result<u8, Err
     Ok(count)
 }
 
-// Helper function to move an entire subtrie from one page to another.
+// Helper function to move an entire subtrie from one page to another. Returns (Location,
+// Option<u8>) where:
+// - Location is the location of the root_index in the new page, and
+// - Option<u8> is the location of the original_cell_index in the new page if it was moved.
 fn move_subtrie_nodes(
     source_page: &mut SlottedPageMut<'_>,
-    root_index: u8,
     target_page: &mut SlottedPageMut<'_>,
-) -> Result<Location, Error> {
+    root_index: u8, // index of the node to move from the source page
+    original_cell_index: u8, /* given the original cell index, return the new location of the
+                     * node in Option<u8> */
+) -> Result<(Location, Option<u8>), Error> {
     let node: Node = source_page.get_value(root_index)?;
     source_page.delete_value(root_index)?;
 
@@ -1545,10 +1568,13 @@ fn move_subtrie_nodes(
 
     // first insert the node into the new page to secure its location.
     let new_index = target_page.insert_value(&node)?;
+    let loc = node_location(target_page.id(), new_index);
+    let mut original_cell_index_to_new_location: Option<u8> =
+        if original_cell_index == root_index { loc.cell_index() } else { None };
 
     // if the node has no children, we're done.
     if !has_children {
-        return Ok(node_location(target_page.id(), new_index));
+        return Ok((loc, original_cell_index_to_new_location));
     }
 
     // otherwise, we need to move the children of the node.
@@ -1571,10 +1597,16 @@ fn move_subtrie_nodes(
         if let Some(child_ptr) = child_ptr {
             if let Some(child_index) = child_ptr.location().cell_index() {
                 // Recursively move its children
-                let new_location = move_subtrie_nodes(source_page, child_index, target_page)?;
+                let new_locations =
+                    move_subtrie_nodes(source_page, target_page, child_index, original_cell_index)?;
                 // update the pointer in the parent node
-                updated_node
-                    .set_child(branch_index, Pointer::new(new_location, child_ptr.rlp().clone()))?;
+                updated_node.set_child(
+                    branch_index,
+                    Pointer::new(new_locations.0, child_ptr.rlp().clone()),
+                )?;
+                if let Some(new_location) = new_locations.1 {
+                    original_cell_index_to_new_location = Some(new_location);
+                }
             }
         }
     }
@@ -1582,7 +1614,7 @@ fn move_subtrie_nodes(
     // update the parent node with the new child pointers.
     target_page.set_value(new_index, &updated_node)?;
 
-    Ok(node_location(target_page.id(), new_index))
+    Ok((loc, original_cell_index_to_new_location))
 }
 
 // Returns (parent cell index, child index) of the parent of the look_for_cell_index.
@@ -1605,6 +1637,37 @@ fn find_parent_node(
             }
             match find_parent_node(page, child_cell_index, look_for_cell_index)? {
                 Some(result) => return Ok(Some(result)),
+                None => {}
+            }
+        }
+    }
+    Ok(None)
+}
+
+// Returns the path to the node at look_for_cell_index from the node at cell_index.
+// The path is a list of (parent cell index, child index) tuples.
+// The parent cell index is in [0, 255] range.  The child index is in [0, 15] range.
+fn find_path_to_node(
+    page: &SlottedPageMut<'_>,
+    cell_index: u8,
+    look_for_cell_index: u8,
+) -> Result<Option<Vec<(u8, u8)>>, Error> {
+    let node: Node = page.get_value(cell_index)?;
+    if !node.has_children() {
+        return Ok(None);
+    }
+
+    let children = node.enumerate_children()?;
+    for (child_index, child_pointer) in children {
+        if let Some(child_cell_index) = child_pointer.location().cell_index() {
+            if child_cell_index == look_for_cell_index {
+                return Ok(Some(vec![(cell_index, child_index)]));
+            }
+            match find_path_to_node(page, child_cell_index, look_for_cell_index)? {
+                Some(mut result) => {
+                    result.push((cell_index, child_index));
+                    return Ok(Some(result));
+                }
                 None => {}
             }
         }
