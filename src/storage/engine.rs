@@ -1230,12 +1230,65 @@ impl StorageEngine {
         Ok(PointerChange::Update(Pointer::new(node_location(child_slotted_page.id(), 0), rlp_node)))
     }
 
+    // Split the page into two, moving the node at cell_index to a new child page.
+    // fn split_page_1(
+    //     &mut self,
+    //     context: &mut TransactionContext,
+    //     page: &mut SlottedPageMut<'_>,
+    //     cell_index: u8,
+    // ) -> Result<(), Error> {
+    //     let mut root_node: Node = page.get_value(0)?;
+
+    //     while page.num_free_bytes() < Page::DATA_SIZE / 4_usize {
+    //         let child_page = self.allocate_page(context)?;
+    //         let mut child_slotted_page = SlottedPageMut::try_from(child_page)?;
+
+    //         let mut root_node: Node = page.get_value(0)?;
+
+    //         // Find the child with the largest subtrie
+    //         let (largest_child_index, largest_child_pointer) = root_node
+    //             .enumerate_children()?
+    //             .into_iter()
+    //             .max_by_key(|(_, ptr)| {
+    //                 // If pointer points to a cell in current page, count nodes in that subtrie
+    //                 if let Some(cell_index) = ptr.location().cell_index() {
+    //                     count_subtrie_nodes(page, cell_index).unwrap_or(0)
+    //                 } else {
+    //                     // If pointer points to another page, count as 0
+    //                     0
+    //                 }
+    //             })
+    //             .ok_or(Error::PageError(PageError::PageIsFull))?;
+
+    //         // Move the subtrie to the new page
+    //         if let Some(cell_index) = largest_child_pointer.location().cell_index() {
+    //             // Move all child nodes that are in the current page
+    //             let location = move_subtrie_nodes(page, cell_index, &mut child_slotted_page)?;
+    //             assert!(location.page_id().is_some(), "expected subtrie to be moved to a new
+    // page");
+
+    //             // Update the pointer in the root node to point to the new page
+    //             root_node.set_child(
+    //                 largest_child_index,
+    //                 Pointer::new(
+    //                     Location::for_page(child_slotted_page.id()),
+    //                     largest_child_pointer.rlp().clone(),
+    //                 ),
+    //             )?;
+    //             page.set_value(0, &root_node)?;
+    //         }
+    //     }
+
+    //     Ok(())
+    // }
+
     // Split the page into two, moving the largest immediate subtrie of the root node to a new child
     // page.
     fn split_page(
         &mut self,
         context: &mut TransactionContext,
         page: &mut SlottedPageMut<'_>,
+        cell_index: u8,
     ) -> Result<(), Error> {
         while page.num_free_bytes() < Page::DATA_SIZE / 4_usize {
             let child_page = self.allocate_page(context)?;
@@ -1536,6 +1589,32 @@ fn move_subtrie_nodes(
     target_page.set_value(new_index, &updated_node)?;
 
     Ok(node_location(target_page.id(), new_index))
+}
+
+fn find_parent_node(
+    page: &SlottedPageMut<'_>,
+    node: &Node,
+    cell_index: u8,
+) -> Result<Option<u8>, Error> {
+    if node.has_children() {
+        return Ok(None);
+    }
+
+    let children = node.enumerate_children()?;
+    for (_, child_pointer) in children {
+        if let Some(child_cell_index) = child_pointer.location().cell_index() {
+            if cell_index == child_cell_index {
+                return Ok(Some(child_cell_index));
+            }
+            // going down the tree if the child pointer is a branch
+            let child_node: Node = page.get_value(child_cell_index)?;
+            match find_parent_node(page, &child_node, cell_index)? {
+                Some(result) => return Ok(Some(result)),
+                None => {}
+            }
+        }
+    }
+    Ok(None)
 }
 
 impl StorageEngine {
