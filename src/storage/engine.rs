@@ -631,8 +631,21 @@ impl StorageEngine {
         // Ensure page has enough space for a new branch and leaf node
         // TODO: use a more accurate threshold
         if slotted_page.num_free_bytes() < 1000 {
-            self.split_page(context, slotted_page, page_index)?;
-            return Err(Error::PageSplit);
+            println!(
+                "splitting page at {} when num free bytes is {}, changes size is {}, cell index is {}",
+                slotted_page.id(),
+                slotted_page.num_free_bytes(),
+                changes.len(),
+                page_index
+            );
+            let mut new_slotted_page = self.split_page_1(context, slotted_page, page_index)?;
+            return self.set_values_in_cloned_page(
+                context,
+                changes,
+                path_offset,
+                &mut new_slotted_page,
+                0,
+            );
         }
 
         // Create a new branch node with the common prefix
@@ -1231,12 +1244,12 @@ impl StorageEngine {
     }
 
     // Split the page into two, moving the node at cell_index to a new child page.
-    fn split_page_1(
+    fn split_page_1<'p>(
         &mut self,
         context: &mut TransactionContext,
         page: &mut SlottedPageMut<'_>,
         cell_index: u8,
-    ) -> Result<(), Error> {
+    ) -> Result<SlottedPageMut<'p>, Error> {
         let result = find_parent_node(page, 0, cell_index)?;
         assert!(result.is_some(), "expected parent node for cell {}", cell_index);
         let (parent_cell_index, child_index) = result.unwrap();
@@ -1260,7 +1273,7 @@ impl StorageEngine {
         )?;
         page.set_value(parent_cell_index, &parent_node)?;
 
-        Ok(())
+        Ok(child_slotted_page)
     }
 
     // Split the page into two, moving the largest immediate subtrie of the root node to a new child
@@ -2739,7 +2752,7 @@ mod tests {
             let mut slotted_page = SlottedPageMut::try_from(page_result.unwrap()).unwrap();
 
             // Try to split this page
-            if storage_engine.split_page(&mut context, &mut slotted_page).is_ok() {
+            if storage_engine.split_page(&mut context, &mut slotted_page, 0).is_ok() {
                 // If split succeeded, add the new pages to be processed
                 pages_to_split.push(page_id + 1); // New page created by split
             }
@@ -2863,7 +2876,7 @@ mod tests {
             if let Ok(page) = storage_engine.get_mut_page(&context, page_id) {
                 if let Ok(mut slotted_page) = SlottedPageMut::try_from(page) {
                     // Force a split
-                    let _ = storage_engine.split_page(&mut context, &mut slotted_page);
+                    let _ = storage_engine.split_page(&mut context, &mut slotted_page, 0);
 
                     // Get the node to find child pages
                     if let Ok(node) = slotted_page.get_value::<Node>(0) {
