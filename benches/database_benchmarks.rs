@@ -115,9 +115,15 @@ fn bench_inserts(c: &mut Criterion) {
             (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+        let mut first_iteration = true;
         group.bench_with_input(BenchmarkId::new("batch_inserts", size), &size, |b, _| {
             b.iter_with_setup(
                 || {
+                    // Not to clean up before the first iteration.
+                    if first_iteration {
+                        first_iteration = false;
+                        return;
+                    }
                     let mut tx = db.begin_rw().unwrap();
                     for addr in &addresses {
                         tx.set_account(addr.clone(), None).unwrap();
@@ -163,12 +169,18 @@ fn bench_storage_inserts_single_account(c: &mut Criterion) {
         tx.commit().unwrap();
 
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+        let mut first_iteration = true;
         group.bench_with_input(
             BenchmarkId::new("batch_inserts_single_account_storage", size),
             &size,
             |b, _| {
                 b.iter_with_setup(
                     || {
+                        // Not to clean up before the first iteration.
+                        if first_iteration {
+                            first_iteration = false;
+                            return;
+                        }
                         let mut tx = db.begin_rw().unwrap();
                         for (storage_path, _) in &storage_paths_values {
                             tx.set_storage_slot(storage_path.clone(), None).unwrap();
@@ -221,12 +233,18 @@ fn bench_storage_inserts_multiple_accounts(c: &mut Criterion) {
         tx.commit().unwrap();
 
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+        let mut first_iteration = true;
         group.bench_with_input(
             BenchmarkId::new("batch_inserts_multiple_account_storage", size),
             &size,
             |b, _| {
                 b.iter_with_setup(
                     || {
+                        // Not to clean up before the first iteration.
+                        if first_iteration {
+                            first_iteration = false;
+                            return;
+                        }
                         let mut tx = db.begin_rw().unwrap();
                         for (storage_path, _) in &storage_paths_values {
                             tx.set_storage_slot(storage_path.clone(), None).unwrap();
