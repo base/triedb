@@ -1589,6 +1589,7 @@ impl StorageEngine {
 
             if remaining_path.is_empty() {
                 if verbosity_level == 0 {
+                    println!("writing node to file");
                     //write this node's information to file
                     let node_string = self.node_value_to_string(&node, slotted_page.id());
                     writer
@@ -1638,28 +1639,40 @@ impl StorageEngine {
                     verbosity_level,
                 );
             }
-        }
+        } 
+        
+        println!("writing node to file");
+        //write the final node's information to file
+        let node_string = self.node_value_to_string(&node, slotted_page.id());
+        let final_node_string = format!("\nFound node: {}\n", node_string);
 
+        writer
+            .write_all(final_node_string.as_bytes())
+            .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+        writer.flush().map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+
+        
         Ok(())
     }
 
     // Helper function to convert node information to string for printing/writing to file
     fn node_value_to_string(&self, node: &Node, page_id: u32) -> String {
         match &node {
-            Node::Branch { prefix: _, children } => {
+            Node::Branch { prefix, children } => {
                 format!(
-                    "Branch Node:  Page ID: {}  Children: {:?}\n",
+                    "Branch Node:  Page ID: {}  Children: {:?}, Prefix: {}\n",
                     page_id,
                     children
                         .iter()
                         .enumerate()
                         .filter(|(_, child)| child.is_some())
                         .map(|(i, _)| format!("{}", i))
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>(),
+                    alloy_primitives::hex::encode(prefix.pack())
                 )
             }
             Node::AccountLeaf {
-                prefix: _,
+                prefix,
                 nonce_rlp: _,
                 balance_rlp: _,
                 code_hash: _,
@@ -1668,17 +1681,21 @@ impl StorageEngine {
                 let val = match node.value() {
                     Ok(TrieValue::Account(acct)) => {
                         format!(
-                            "nonce: {:?}, balance: {:?}, code_hash: {:?}, storage_root: {:?}",
-                            acct.nonce, acct.balance, acct.code_hash, acct.storage_root
+                            "nonce: {:?}, balance: {:?}, prefix: {}, code_hash: {:x?}, storage_root: {:?}",
+                            acct.nonce, acct.balance, alloy_primitives::hex::encode(prefix.pack()), acct.code_hash, acct.storage_root,
+                            
                         )
                     }
                     _ => "".to_string(),
                 };
                 format!("AccountLeaf: {}\n", val)
             }
-            Node::StorageLeaf { prefix: _, value_rlp: _ } => {
+            Node::StorageLeaf { prefix, value_rlp: _ } => {
                 let val = match node.value() {
-                    Ok(TrieValue::Storage(strg)) => format!("StorageLeaf: {}\n", strg),
+                    Ok(TrieValue::Storage(strg)) => {
+                        let str_prefix = alloy_primitives::hex::encode(prefix.pack());
+                        format!("storage: {:?}, prefix: {}", strg, str_prefix)
+                    },
                     _ => "".to_string(),
                 };
                 format!("StorageLeaf: {}\n", val)

@@ -7,7 +7,7 @@ use crate::{
     transaction::{Transaction, TransactionError, TransactionManager, RO, RW},
 };
 use alloy_primitives::B256;
-use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
+use alloy_trie::EMPTY_ROOT_HASH;
 use parking_lot::RwLock;
 use std::fs::File;
 
@@ -115,20 +115,6 @@ impl Database {
         storage_engine.print_page(&context, output_file, page_id).map_err(Error::CloseError)
     }
 
-    pub fn get_account_or_storage(
-        &self,
-        output_file: &File,
-        nibbles: Nibbles,
-        verbosity_level: u32,
-    ) -> Result<(), Error> {
-        let metadata = self.inner.metadata.read().clone();
-        let context = TransactionContext::new(metadata);
-        let storage_engine = self.inner.storage_engine.read();
-
-        storage_engine
-            .print_path(&context, &nibbles, output_file, verbosity_level)
-            .map_err(Error::CloseError)
-    }
 }
 
 impl Drop for Database {

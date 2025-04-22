@@ -110,6 +110,38 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         let result = storage_engine.get_storage_with_proof(&self.context, storage_path).unwrap();
         Ok(result)
     }
+
+    pub fn debug_account(
+        &self,
+        output_file: &std::fs::File,
+        address_path: AddressPath,
+        verbosity_level: u32,
+    ) -> Result<(), TransactionError> {
+        let metadata = self.context.metadata.clone();
+        let context = TransactionContext::new(metadata);
+        let storage_engine = self.database.inner.storage_engine.read();
+
+        let result = storage_engine
+            .print_path(&context, address_path.to_nibbles(), output_file, verbosity_level)
+            .unwrap();
+        Ok(result)
+    }
+
+    pub fn debug_storage(
+        &self,
+        output_file: &std::fs::File,
+        storage_path: StoragePath,
+        verbosity_level: u32,
+    ) -> Result<(), TransactionError> {
+        let metadata = self.context.metadata.clone();
+        let context = TransactionContext::new(metadata);
+        let storage_engine = self.database.inner.storage_engine.read();
+
+        let result = storage_engine
+            .print_path(&context, &storage_path.full_path(), output_file, verbosity_level)
+            .unwrap();
+        Ok(result)
+    }
 }
 
 impl Transaction<'_, RW> {
