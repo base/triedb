@@ -161,7 +161,7 @@ impl PageManager {
     }
 
     /// Syncs pages to the backing file.
-    pub fn commit(&mut self, _snapshot_id: SnapshotId) -> Result<(), PageError> {
+    pub fn commit(&mut self) -> Result<(), PageError> {
         self.mmap.flush().map_err(PageError::IO)
     }
 }
@@ -205,7 +205,7 @@ mod tests {
 
         page.contents_mut()[0] = 1;
 
-        manager.commit(42).unwrap();
+        manager.commit().unwrap();
 
         let old_page = manager.get(42, 0).unwrap();
         assert_eq!(old_page.id(), 0);
@@ -228,7 +228,7 @@ mod tests {
 
         assert_eq!(page1_mut.contents()[0], 2);
 
-        manager.commit(42).unwrap();
+        manager.commit().unwrap();
 
         let page1 = manager.get(42, page1.id()).unwrap();
         assert_eq!(page1.contents()[0], 2);
@@ -258,7 +258,7 @@ mod tests {
 
         // write some data to the page
         page.contents_mut().write_all(b"abc").expect("write failed");
-        manager.commit(42).unwrap();
+        manager.commit().unwrap();
 
         // attempt to allocate again, expect error because the file is full
         let err = manager.allocate(42).unwrap_err();
@@ -284,7 +284,7 @@ mod tests {
         assert_eq!(page.snapshot_id(), 42);
         assert_eq!(manager.next_page_id, 2);
 
-        manager.commit(42).unwrap();
+        manager.commit().unwrap();
 
         // attempt to allocate again, expect error because the file is full
         let err = manager.allocate(42).unwrap_err();

@@ -27,7 +27,7 @@ fn bench_reads(c: &mut Criterion) {
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
         group.bench_with_input(BenchmarkId::new("random_reads", size), &size, |b, _| {
             b.iter(|| {
-                let tx = db.begin_ro().unwrap();
+                let mut tx = db.begin_ro().unwrap();
                 for addr in &addresses {
                     let a = tx.get_account(addr.clone()).unwrap();
                     assert!(a.is_some());
@@ -60,7 +60,7 @@ fn bench_storage_reads_single_account(c: &mut Criterion) {
             &size,
             |b, _| {
                 b.iter(|| {
-                    let tx = db.begin_ro().unwrap();
+                    let mut tx = db.begin_ro().unwrap();
                     for storage_path in &storage_paths {
                         let a = tx.get_storage_slot(storage_path.clone()).unwrap();
                         assert!(a.is_some());
@@ -92,7 +92,7 @@ fn bench_storage_reads_multiple_accounts(c: &mut Criterion) {
             &size,
             |b, _| {
                 b.iter(|| {
-                    let tx = db.begin_ro().unwrap();
+                    let mut tx = db.begin_ro().unwrap();
                     for storage_path in &storage_paths {
                         let a = tx.get_storage_slot(storage_path.clone()).unwrap();
                         assert!(a.is_some());
