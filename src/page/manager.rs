@@ -1,6 +1,5 @@
-mod mmap;
-
-pub use mmap::PageManager;
+pub(super) mod mmap;
+pub(super) mod options;
 
 /// Type alias for page ids.
 /// Currently we use 4 bytes for page ids, which implies a maximum of 16TB of data.
@@ -11,6 +10,7 @@ pub type PageId = u32;
 pub enum PageError {
     PageNotFound(PageId),
     OutOfBounds(PageId),
+    PageLimitReached,
     InvalidRootPage(PageId),
     InvalidCellPointer,
     NoFreeCells,
