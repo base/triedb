@@ -631,13 +631,13 @@ impl StorageEngine {
         // Ensure page has enough space for a new branch and leaf node
         // TODO: use a more accurate threshold
         if slotted_page.num_free_bytes() < 1000 {
-            println!(
-                "splitting page at {} when num free bytes is {}, changes size is {}, cell index is {}",
-                slotted_page.id(),
-                slotted_page.num_free_bytes(),
-                changes.len(),
-                page_index
-            );
+            // println!(
+            //     "splitting page at {} when num free bytes is {}, changes size is {}, cell index
+            // is {}",     slotted_page.id(),
+            //     slotted_page.num_free_bytes(),
+            //     changes.len(),
+            //     page_index
+            // );
             // let (mut new_slotted_page, new_cell_index) =
             //     self.split_page(context, slotted_page, page_index)?;
             self.split_page_1(context, slotted_page, page_index)?;
@@ -1259,12 +1259,12 @@ impl StorageEngine {
     ) -> Result<(SlottedPageMut<'p>, u8), Error> {
         let x = find_path_to_node(page, 0, cell_index)?;
         let x = x.unwrap();
-        println!("\tpath to cell {}: {:?}", cell_index, x);
+        // println!("\tpath to cell {}: {:?}", cell_index, x);
         assert!(x.len() >= 1, "expected path to cell {} to be at least 1", cell_index);
 
         let idx = min(3, x.len() - 1);
         let (parent_cell_index, child_index) = x[idx];
-        println!("\tparent cell index: {}, child index: {}", parent_cell_index, child_index);
+        // println!("\tparent cell index: {}, child index: {}", parent_cell_index, child_index);
 
         // let result = find_parent_node(page, 0, cell_index)?;
         // assert!(result.is_some(), "expected parent node for cell {}", cell_index);
