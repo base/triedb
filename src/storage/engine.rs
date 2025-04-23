@@ -1581,26 +1581,41 @@ impl StorageEngine {
                 .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
         }
 
-        let (common_prefix_length, _) =
-            find_shortest_common_prefix(&[(path.clone(), ())], path_offset as u8, &node);
+        let common_prefix_length =
+            nybbles::common_prefix_length(&path[path_offset..], node.prefix());
 
-        if common_prefix_length == node.prefix().len() {
-            let remaining_path = &path[path_offset + common_prefix_length..];
+        if common_prefix_length < node.prefix().len() {
+            writer.write_all(b"Node not found\n").map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+            return Ok(());
+        }
 
-            if remaining_path.is_empty() {
-                if verbosity_level == 0 {
-                    println!("writing node to file");
-                    //write this node's information to file
-                    let node_string = self.node_value_to_string(&node, slotted_page.id());
-                    writer
-                        .write_all(node_string.as_bytes())
-                        .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-                }
-                return Ok(());
+       
+        let remaining_path = &path[path_offset + common_prefix_length..];
+
+        if remaining_path.is_empty() {
+            if verbosity_level == 0 {
+                //write only this node's information to file
+                let node_string = self.node_value_to_string(&node, slotted_page.id());
+                writer
+                    .write_all(node_string.as_bytes())
+                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
             }
+            return Ok(());
+        }
 
-            let next_nibble = remaining_path[0];
-            if let Ok(Some(child_pointer)) = node.child(next_nibble) {
+        let (child_pointer, new_path_offset) = match node {
+            AccountLeaf { ref storage_root, .. } => {
+                (storage_root.as_ref(), path_offset + common_prefix_length)
+            }
+            Branch { ref children, .. } => (
+                children[remaining_path[0] as usize].as_ref(),
+                path_offset + common_prefix_length + 1,
+            ),
+            _ => unreachable!(),
+        };
+
+        match child_pointer {
+            Some(child_pointer) => {
                 let (child_slotted_page, child_cell_index) =
                     self.get_slotted_page_and_index(context, child_pointer, slotted_page)?;
 
@@ -1631,28 +1646,17 @@ impl StorageEngine {
                 return self.print_path_helper(
                     context,
                     path,
-                    path_offset + common_prefix_length + 1,
+                    new_path_offset,
                     child_slotted_page,
                     child_cell_index,
                     writer,
                     output_file,
                     verbosity_level,
                 );
+
             }
-        } 
-        
-        println!("writing node to file");
-        //write the final node's information to file
-        let node_string = self.node_value_to_string(&node, slotted_page.id());
-        let final_node_string = format!("\nFound node: {}\n", node_string);
-
-        writer
-            .write_all(final_node_string.as_bytes())
-            .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-        writer.flush().map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-
-        
-        Ok(())
+            None => Ok(())
+        }
     }
 
     // Helper function to convert node information to string for printing/writing to file
