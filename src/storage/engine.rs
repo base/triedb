@@ -638,19 +638,21 @@ impl StorageEngine {
                 changes.len(),
                 page_index
             );
-            let (mut new_slotted_page, new_cell_index) =
-                self.split_page_1(context, slotted_page, page_index)?;
-            let mut new_node = new_slotted_page.get_value::<Node>(new_cell_index)?;
-            return self.handle_missing_parent_branch(
-                context,
-                changes,
-                path_offset,
-                &mut new_slotted_page,
-                new_cell_index,
-                &mut new_node,
-                common_prefix,
-                common_prefix_length,
-            );
+            // let (mut new_slotted_page, new_cell_index) =
+            //     self.split_page(context, slotted_page, page_index)?;
+            self.split_page_1(context, slotted_page, page_index)?;
+            // let mut new_node = new_slotted_page.get_value::<Node>(new_cell_index)?;
+            // return self.handle_missing_parent_branch(
+            //     context,
+            //     changes,
+            //     path_offset,
+            //     &mut new_slotted_page,
+            //     new_cell_index,
+            //     &mut new_node,
+            //     common_prefix,
+            //     common_prefix_length,
+            // );
+            return Err(Error::PageSplit);
         }
 
         // Create a new branch node with the common prefix
@@ -1260,7 +1262,7 @@ impl StorageEngine {
         println!("\tpath to cell {}: {:?}", cell_index, x);
         assert!(x.len() >= 1, "expected path to cell {} to be at least 1", cell_index);
 
-        let idx = min(1, x.len() - 1);
+        let idx = min(3, x.len() - 1);
         let (parent_cell_index, child_index) = x[idx];
         println!("\tparent cell index: {}, child index: {}", parent_cell_index, child_index);
 
@@ -1269,10 +1271,6 @@ impl StorageEngine {
         // let (parent_cell_index, child_index) = result.unwrap();
         let mut parent_node: Node = page.get_value(parent_cell_index)?;
         let child_pointer = parent_node.child(child_index)?.unwrap();
-        println!(
-            "\tmove subtrie rooted at cell {} to new page",
-            child_pointer.location().cell_index().unwrap()
-        );
 
         let mut child_slotted_page = self.allocate_slotted_page(context)?;
         // Move all child nodes that are in the current page
@@ -1288,6 +1286,11 @@ impl StorageEngine {
             "expected original cell index to be moved to a new page"
         );
         let original_cell_index_to_new_location = original_cell_index_to_new_location.unwrap();
+        // println!(
+        //     "\tmove subtrie rooted at cell {} to new page. new cell index: {}",
+        //     child_pointer.location().cell_index().unwrap(),
+        //     original_cell_index_to_new_location
+        // );
         // Update the pointer in the root node to point to the new page
         parent_node.set_child(
             child_index,
@@ -2285,7 +2288,7 @@ mod tests {
         // Split the page
         let page = storage_engine.get_mut_page(&context, 256).unwrap();
         let mut slotted_page = SlottedPageMut::try_from(page).unwrap();
-        storage_engine.split_page(&mut context, &mut slotted_page).unwrap();
+        storage_engine.split_page_1(&mut context, &mut slotted_page, 4).unwrap();
 
         // Verify all accounts still exist after split
         for (nibbles, account) in test_accounts {
