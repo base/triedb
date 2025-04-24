@@ -14,19 +14,15 @@ use crate::{
     path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH, STORAGE_PATH_LENGTH},
     pointer::Pointer,
     snapshot::SnapshotId,
+    storage::value::Value,
 };
 use alloy_primitives::StorageValue;
 use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
-use parking_lot::RwLock;
 use std::{
     cmp::{max, Ordering},
     fmt::Debug,
-    fs::File,
-    io::{BufWriter, Write},
-    sync::Arc,
+    io,
 };
-
-use super::value::Value;
 
 /// The [StorageEngine] is responsible for managing the storage of data in the database.
 /// It handles reading and writing account and storage values, as well as managing the lifecycle of
@@ -34,15 +30,8 @@ use super::value::Value;
 ///
 /// The storage engine uses a [PageManager] (`P`) to interact with the underlying storage medium,
 /// which could be memory-mapped files, in-memory storage, or other implementations.
-///
-/// All operations are thread-safe through the use of a read-write lock around the inner state.
 #[derive(Debug)]
 pub struct StorageEngine {
-    inner: Arc<RwLock<Inner>>,
-}
-
-#[derive(Debug)]
-struct Inner {
     page_manager: PageManager,
     orphan_manager: OrphanPageManager,
 }
@@ -56,40 +45,32 @@ enum PointerChange {
 impl StorageEngine {
     /// Creates a new [StorageEngine] with the given [PageManager] and [OrphanPageManager].
     pub fn new(page_manager: PageManager, orphan_manager: OrphanPageManager) -> Self {
-        Self { inner: Arc::new(RwLock::new(Inner { page_manager, orphan_manager })) }
+        Self { page_manager, orphan_manager }
     }
 
     /// Unlocks any orphaned pages as of the given [SnapshotId] for reuse.
-    pub(crate) fn unlock(&self, snapshot_id: SnapshotId) {
-        self.inner.write().orphan_manager.unlock(snapshot_id);
-    }
-
-    /// Allocates a new page from the underlying page manager.
-    /// If there is an orphaned page available as of the given [SnapshotId],
-    /// it is used to allocate a new page instead.
-    fn allocate_page<'p>(&self, context: &mut TransactionContext) -> Result<PageMut<'p>, Error> {
-        self.inner.write().allocate_page(context)
+    pub(crate) fn unlock(&mut self, snapshot_id: SnapshotId) {
+        self.orphan_manager.unlock(snapshot_id);
     }
 
     /// Retrieves a mutable clone of a [Page] from the underlying [PageManager].
     /// The original page is marked as orphaned and a new page is allocated, potentially from an
     /// orphaned page.
     fn get_mut_clone<'p>(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         page_id: PageId,
     ) -> Result<PageMut<'p>, Error> {
-        let mut inner = self.inner.write();
-        let original_page = inner.get_page_mut(context, page_id)?;
+        let original_page = self.get_mut_page(context, page_id)?;
 
         // if the page already has the correct snapshot id, return it without cloning.
         if original_page.snapshot_id() == context.metadata.snapshot_id {
             return Ok(original_page);
         }
 
-        let mut new_page = inner.allocate_page(context)?;
+        let mut new_page = self.allocate_page(context)?;
 
-        inner.orphan_manager.add_orphaned_page_id(context.metadata.snapshot_id, page_id);
+        self.orphan_manager.add_orphaned_page_id(context.metadata.snapshot_id, page_id);
         new_page.contents_mut().copy_from_slice(original_page.contents());
         Ok(new_page)
     }
@@ -104,30 +85,11 @@ impl StorageEngine {
         Ok(SlottedPage::try_from(page)?)
     }
 
-    /// Retrieves a read-only [Page] from the underlying [PageManager].
-    fn get_page<'p>(
-        &self,
-        context: &TransactionContext,
-        page_id: PageId,
-    ) -> Result<Page<'p>, Error> {
-        self.inner.read().get_page(context, page_id)
-    }
-
-    /// Retrieves a mutable [Page] from the underlying [PageManager].
-    #[cfg(test)]
-    fn get_mut_page<'p>(
-        &self,
-        context: &TransactionContext,
-        page_id: PageId,
-    ) -> Result<PageMut<'p>, Error> {
-        self.inner.write().get_page_mut(context, page_id)
-    }
-
     /// Retrieves an [Account] from the storage engine, identified by the given [AddressPath].
     /// Returns [None] if the path is not found.
     pub fn get_account(
         &self,
-        context: &TransactionContext,
+        context: &mut TransactionContext,
         address_path: AddressPath,
     ) -> Result<Option<Account>, Error> {
         if context.metadata.root_subtrie_page_id == 0 {
@@ -148,7 +110,7 @@ impl StorageEngine {
     /// Returns [None] if the path is not found.
     pub fn get_storage(
         &self,
-        context: &TransactionContext,
+        context: &mut TransactionContext,
         storage_path: StoragePath,
     ) -> Result<Option<StorageValue>, Error> {
         if context.metadata.root_subtrie_page_id == 0 {
@@ -206,6 +168,34 @@ impl StorageEngine {
         }
     }
 
+    pub fn print_page<W: io::Write>(
+        &self,
+        context: &TransactionContext,
+        mut buf: W,
+        page_id: Option<u32>,
+    ) -> Result<(), Error> {
+        if context.metadata.root_subtrie_page_id == 0 {
+            return Ok(());
+        }
+
+        let (page_res, print_whole_db) = match page_id {
+            Some(id) => (self.get_page(context, id), false),
+            None => (self.get_page(context, context.metadata.root_subtrie_page_id), true),
+        };
+
+        let page = page_res?;
+
+        let slotted_page = SlottedPage::try_from(page)?;
+        self.print_page_traverse(
+            context,
+            slotted_page,
+            0,
+            String::from(""),
+            buf.by_ref(),
+            print_whole_db,
+        )
+    }
+
     fn get_slotted_page_and_index<'p>(
         &self,
         context: &TransactionContext,
@@ -222,11 +212,100 @@ impl StorageEngine {
         }
     }
 
+    fn print_page_traverse(
+        &self,
+        context: &TransactionContext,
+        slotted_page: SlottedPage<'_>,
+        cell_index: u8,
+        indent: String,
+        buf: &mut impl io::Write,
+        print_whole_db: bool,
+    ) -> Result<(), Error> {
+        let node: Node = slotted_page.get_value(cell_index)?;
+
+        let val = match node.value() {
+            Ok(TrieValue::Account(acct)) => {
+                format!("nonce: {:?}, balance: {:?}", acct.nonce, acct.balance)
+            }
+            Ok(TrieValue::Storage(strg)) => strg.to_string(),
+            _ => "".to_string(),
+        };
+
+        match node {
+            Node::AccountLeaf {
+                prefix: _,
+                nonce_rlp: _,
+                balance_rlp: _,
+                code_hash: _,
+                storage_root,
+            } => {
+                writeln!(buf, "{}Account leaf: {:?}", indent, val)?;
+                let mut new_indent = indent.clone();
+                new_indent.push('\t');
+
+                if let Some(direct_child) = storage_root {
+                    let (new_slotted_page, cell_index) =
+                        self.get_slotted_page_and_index(context, &direct_child, slotted_page)?;
+                    // child is on different page, and we are only printing the current page
+                    if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
+                        let child_page_id = direct_child.location().page_id().unwrap();
+                        writeln!(buf, "{}Child on new page: {:?}", new_indent, child_page_id)?;
+                        Ok(())
+                    } else {
+                        self.print_page_traverse(
+                            context,
+                            new_slotted_page,
+                            cell_index,
+                            new_indent,
+                            buf,
+                            print_whole_db,
+                        )
+                    }
+                } else {
+                    writeln!(buf, "{}No direct child", new_indent)?;
+                    Ok(())
+                }
+            }
+
+            Node::Branch { prefix: _, children } => {
+                writeln!(buf, "{}Branch, Page ID: {:?}", indent, slotted_page.id())?;
+                for child in children.into_iter().flatten() {
+                    let mut new_indent = indent.clone();
+                    new_indent.push('\t');
+
+                    //check if child is on same page
+                    let (new_slotted_page, cell_index) =
+                        self.get_slotted_page_and_index(context, &child, slotted_page)?;
+                    // child is on new page, and we are only printing the current page
+                    if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
+                        let child_page_id = child.location().page_id().unwrap();
+                        writeln!(buf, "{}Child on new page: {:?}", new_indent, child_page_id)?;
+                        return Ok(())
+                    } else {
+                        self.print_page_traverse(
+                            context,
+                            new_slotted_page,
+                            cell_index,
+                            new_indent,
+                            buf,
+                            print_whole_db,
+                        )?
+                    }
+                }
+                Ok(())
+            }
+            Node::StorageLeaf { prefix: _, value_rlp: _ } => {
+                writeln!(buf, "{}Storage leaf: {:?}", indent, val)?;
+                Ok(())
+            }
+        }
+    }
+
     /// Retrieves a [TrieValue] from the given page or any of its descendants.
     /// Returns [None] if the path is not found.
     fn get_value_from_page(
         &self,
-        context: &TransactionContext,
+        context: &mut TransactionContext,
         original_path_slice: &[u8],
         path_offset: usize,
         slotted_page: SlottedPage<'_>,
@@ -298,7 +377,7 @@ impl StorageEngine {
     }
 
     pub fn set_values(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         mut changes: &mut [(Nibbles, Option<TrieValue>)],
     ) -> Result<(), Error> {
@@ -343,7 +422,7 @@ impl StorageEngine {
     }
 
     fn set_values_in_page(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
@@ -368,10 +447,7 @@ impl StorageEngine {
                 // but this would require adding the page_id to a pending buffer. It would
                 // still be orphaned if unused by the end of the transaction.
                 Ok(PointerChange::Delete) => {
-                    self.inner
-                        .write()
-                        .orphan_manager
-                        .add_orphaned_page_id(context.metadata.snapshot_id, page_id);
+                    self.orphan_manager.add_orphaned_page_id(context.metadata.snapshot_id, page_id);
                     return Ok(PointerChange::Delete);
                 }
                 Ok(PointerChange::None) => return Ok(PointerChange::None),
@@ -418,7 +494,7 @@ impl StorageEngine {
     /// - `Ok(None)`: Node was deleted
     /// - `Err(Error)`: Operation failed, possibly due to page split
     fn set_values_in_cloned_page(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
@@ -542,7 +618,7 @@ impl StorageEngine {
 
     /// Handles the case when the path does not match the node prefix
     fn handle_missing_parent_branch(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
@@ -578,7 +654,7 @@ impl StorageEngine {
 
     /// Handles the case when the path matches the node prefix exactly
     fn handle_exact_prefix_match(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
@@ -681,7 +757,7 @@ impl StorageEngine {
 
     /// Handles traversal through an account leaf node with a child pointer
     fn handle_account_node_traversal(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
@@ -755,7 +831,7 @@ impl StorageEngine {
 
     /// Creates the first storage node for an account
     fn create_first_storage_node(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
@@ -842,7 +918,7 @@ impl StorageEngine {
 
     /// Handles traversal through a branch node
     fn handle_branch_node_traversal(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
@@ -1005,7 +1081,7 @@ impl StorageEngine {
 
     /// Handles cleanup of branch nodes (deletion or merging)
     fn handle_branch_node_cleanup(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
@@ -1039,7 +1115,7 @@ impl StorageEngine {
 
     /// Merges a branch node with its only child
     fn merge_branch_with_only_child(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
@@ -1126,7 +1202,7 @@ impl StorageEngine {
 
     // Handles merging a branch with a child on a different page
     fn merge_with_child_on_different_page(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
@@ -1148,10 +1224,7 @@ impl StorageEngine {
 
         // If we're the root node, orphan our page
         if page_index == 0 {
-            self.inner
-                .write()
-                .orphan_manager
-                .add_orphaned_page_id(context.metadata.snapshot_id, branch_page_id);
+            self.orphan_manager.add_orphaned_page_id(context.metadata.snapshot_id, branch_page_id);
         }
 
         Ok(PointerChange::Update(Pointer::new(node_location(child_slotted_page.id(), 0), rlp_node)))
@@ -1160,7 +1233,7 @@ impl StorageEngine {
     // Split the page into two, moving the largest immediate subtrie of the root node to a new child
     // page.
     fn split_page(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         page: &mut SlottedPageMut<'_>,
     ) -> Result<(), Error> {
@@ -1209,7 +1282,7 @@ impl StorageEngine {
     // Recursively deletes a subtrie from the page, orphaning any pages that become fully
     // unreferenced as a result.
     fn delete_subtrie(
-        &self,
+        &mut self,
         context: &mut TransactionContext,
         slotted_page: &mut SlottedPageMut<'_>,
         cell_index: u8,
@@ -1248,7 +1321,11 @@ impl StorageEngine {
 
     // Orphans a subtrie from the page, orphaning any pages that become fully unreferenced as a
     // result.
-    fn orphan_subtrie(&self, context: &mut TransactionContext, page_id: u32) -> Result<(), Error> {
+    fn orphan_subtrie(
+        &mut self,
+        context: &mut TransactionContext,
+        page_id: u32,
+    ) -> Result<(), Error> {
         let page = self.get_page(context, page_id)?;
         let slotted_page = SlottedPage::try_from(page)?;
 
@@ -1256,9 +1333,7 @@ impl StorageEngine {
         self.orphan_subtrie_helper(context, &slotted_page, 0, &mut orphaned_page_ids)?;
 
         {
-            self.inner
-                .write()
-                .orphan_manager
+            self.orphan_manager
                 .add_orphaned_page_ids(context.metadata.snapshot_id, orphaned_page_ids)
         }
 
@@ -1301,409 +1376,14 @@ impl StorageEngine {
         Ok(())
     }
 
-    /// Commits all outstanding data to disk.
-    pub fn commit(&self, context: &TransactionContext) -> Result<(), Error> {
-        self.inner.write().commit(context)
-    }
-
     /// Rolls back all outstanding data to disk. Currently unimplemented.
     pub fn rollback(&self, _context: &TransactionContext) -> Result<(), Error> {
         Ok(())
     }
 
-    // Ensures that the storage engine has a buffer of at least `min_buffer_size` pages.
-    // This includes unallocated pages at the end of the file, as well as any orphaned pages that
-    // are unlocked. If the buffer is insufficient, the storage engine will be scaled by
-    // `grow_by` until it has at least `min_buffer_size` pages.
-    pub(crate) fn ensure_page_buffer(
-        &self,
-        context: &TransactionContext,
-        min_buffer_size: u32,
-        grow_by: f64,
-    ) -> Result<(), Error> {
-        assert!(grow_by > 1.0, "grow_by must be greater than 1.0");
-
-        let mut inner = self.inner.write();
-        let current_page_count = inner.page_manager.size();
-        let unallocated_page_count = current_page_count - context.metadata.max_page_number - 1;
-        let unlocked_page_count = inner.orphan_manager.unlocked_page_count();
-
-        let mut free_page_count = unlocked_page_count + unallocated_page_count;
-
-        if free_page_count < min_buffer_size {
-            let unusable_page_count = current_page_count - free_page_count;
-            let mut new_page_count = current_page_count;
-            while free_page_count < min_buffer_size {
-                new_page_count = (new_page_count as f64 * grow_by) as u32;
-                free_page_count = new_page_count - unusable_page_count;
-            }
-            inner.resize(new_page_count)?;
-        }
-
-        Ok(())
-    }
-
-    /// Resizes the storage engine to the given number of pages.
-    pub(crate) fn resize(&mut self, new_page_count: PageId) -> Result<(), Error> {
-        self.inner.write().resize(new_page_count)
-    }
-
     /// Returns the total number of pages in the storage engine.
     pub fn size(&self) -> u32 {
-        let inner = self.inner.read();
-        inner.page_manager.size()
-    }
-
-    /// Shrinks the storage to its minimum size and commits all outstanding data to disk.
-    pub fn shrink_and_commit(&self, context: &TransactionContext) -> Result<(), Error> {
-        let mut inner = self.inner.write();
-
-        // there will always be a minimum of 256 pages (root pages + reserved orphan pages).
-        let max_page_count = max(context.metadata.max_page_number + 1, 256);
-        // resize the page manager so that we only store the exact amount of pages we need.
-        inner.resize(max_page_count)?;
-        // commit all outstanding data to disk.
-        inner.commit(context)?;
-
-        Ok(())
-    }
-
-    /// Writes the nodes and info a given page of the trie to file, with children nested under
-    /// parent branches. If page_id is None, writes the entire trie
-    pub fn print_page(
-        &self,
-        context: &TransactionContext,
-        output_file: &File,
-        page_id: Option<u32>,
-    ) -> Result<(), Error> {
-        if context.metadata.root_subtrie_page_id == 0 {
-            return Ok(());
-        }
-
-        let mut file_writer = BufWriter::new(output_file);
-
-        let (page_res, print_whole_db) = match page_id {
-            Some(id) => (self.get_page(context, id), false),
-            None => (self.get_page(context, context.metadata.root_subtrie_page_id), true),
-        };
-
-        let page = page_res?;
-
-        let slotted_page = SlottedPage::try_from(page)?;
-        self.print_page_helper(
-            context,
-            slotted_page,
-            0,
-            String::from(""),
-            &mut file_writer,
-            print_whole_db,
-        )
-    }
-
-    fn print_page_helper(
-        &self,
-        context: &TransactionContext,
-        slotted_page: SlottedPage<'_>,
-        cell_index: u8,
-        indent: String,
-        file_writer: &mut BufWriter<&File>,
-        print_whole_db: bool,
-    ) -> Result<(), Error> {
-        let node: Node = slotted_page.get_value(cell_index)?;
-
-        let node_val = self.node_value_to_string(&node, slotted_page.id());
-
-        match node {
-            Node::AccountLeaf {
-                prefix: _,
-                nonce_rlp: _,
-                balance_rlp: _,
-                code_hash: _,
-                storage_root,
-            } => {
-                let output_string = format!("{}{}", indent, node_val);
-                file_writer
-                    .write(output_string.as_bytes())
-                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-                let mut new_indent = indent.clone();
-                new_indent.push('\t');
-
-                if let Some(direct_child) = storage_root {
-                    let (new_slotted_page, cell_index) =
-                        self.get_slotted_page_and_index(context, &direct_child, slotted_page)?;
-                    // child is on different page, and we are only printing the current page
-                    if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
-                        let child_page_id = direct_child.location().page_id().unwrap();
-                        let output_string =
-                            format!("{}Child on new page: {:?}\n", new_indent, child_page_id);
-                        file_writer
-                            .write(output_string.as_bytes())
-                            .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-                        Ok(())
-                    } else {
-                        self.print_page_helper(
-                            context,
-                            new_slotted_page,
-                            cell_index,
-                            new_indent,
-                            file_writer,
-                            print_whole_db,
-                        )
-                    }
-                } else {
-                    let output_string = format!("{}No direct child\n", new_indent);
-                    file_writer
-                        .write(output_string.as_bytes())
-                        .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-                    Ok(())
-                }
-            }
-
-            Node::Branch { prefix: _, children } => {
-                let output_string = format!("{}{}", indent, node_val);
-                file_writer
-                    .write(output_string.as_bytes())
-                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-                for child in children.into_iter().flatten() {
-                    let mut new_indent = indent.clone();
-                    new_indent.push('\t');
-
-                    //check if child is on same page
-                    let (new_slotted_page, cell_index) =
-                        self.get_slotted_page_and_index(context, &child, slotted_page)?;
-                    // child is on new page, and we are only printing the current page
-                    if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
-                        let child_page_id = child.location().page_id().unwrap();
-                        let output_string =
-                            format!("{}Child on new page: {:?}\n", new_indent, child_page_id);
-                        file_writer
-                            .write(output_string.as_bytes())
-                            .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-                        return Ok(())
-                    } else {
-                        self.print_page_helper(
-                            context,
-                            new_slotted_page,
-                            cell_index,
-                            new_indent,
-                            file_writer,
-                            print_whole_db,
-                        )?
-                    }
-                }
-                file_writer.flush().map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-                Ok(())
-            }
-            Node::StorageLeaf { prefix: _, value_rlp: _ } => {
-                let output_string = format!("{}{}", indent, node_val);
-                file_writer
-                    .write(output_string.as_bytes())
-                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-                Ok(())
-            }
-        }
-    }
-
-    /// Prints information about a given TrieValue.
-    /// Verbose option: writes information about nodes visited along the path to file
-    /// Extra-verbose option: writes information about pages visited along path to file
-    pub fn print_path(
-        &self,
-        context: &TransactionContext,
-        path: &Nibbles,
-        output_file: &File,
-        verbosity_level: u32,
-    ) -> Result<(), Error> {
-        let page_id = context.metadata.root_subtrie_page_id;
-        let page = self.get_page(context, page_id)?;
-        let slotted_page = SlottedPage::try_from(page)?;
-
-        let mut writer = BufWriter::new(output_file);
-
-        // If extra_verbose, print the root page first
-        match verbosity_level {
-            0 => (),
-            1 => {
-                //verbose; print page ID and nodes accessed from page
-                writer
-                    .write_all(format!("\nNODES ACCESSED FROM PAGE {}\n", page_id).as_bytes())
-                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-                writer.flush().map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-            }
-            2 => {
-                //extra verbose; print page ID, nodes accessed from page, and page contents
-
-                writer
-                    .write_all(format!("PAGE: {}\n", page_id).as_bytes())
-                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-                writer.flush().map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-
-                self.print_page(context, output_file, Some(page_id))?;
-
-                writer
-                    .write_all(format!("\nNODES ACCESSED FROM PAGE {}\n", page_id).as_bytes())
-                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-                writer.flush().map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-            }
-            _ => return Err(Error::Other("Invalid verbosity level".to_string())),
-        }
-
-        self.print_path_helper(
-            context,
-            path,
-            0,
-            slotted_page,
-            0,
-            &mut writer,
-            output_file,
-            verbosity_level,
-        )
-    }
-
-    fn print_path_helper(
-        &self,
-        context: &TransactionContext,
-        path: &Nibbles,
-        path_offset: usize,
-        slotted_page: SlottedPage<'_>,
-        page_index: u8,
-        writer: &mut BufWriter<&File>,
-        output_file: &File,
-        verbosity_level: u32,
-    ) -> Result<(), Error> {
-        let node: Node = slotted_page.get_value(page_index)?;
-
-        if verbosity_level > 0 {
-            // Write node information with indentation
-            let node_string = self.node_value_to_string(&node, slotted_page.id());
-            writer
-                .write_all(node_string.as_bytes())
-                .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-        }
-
-        let common_prefix_length =
-            nybbles::common_prefix_length(&path[path_offset..], node.prefix());
-
-        if common_prefix_length < node.prefix().len() {
-            writer
-                .write_all(b"Node not found\n")
-                .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-            return Ok(());
-        }
-
-        let remaining_path = &path[path_offset + common_prefix_length..];
-
-        if remaining_path.is_empty() {
-            if verbosity_level == 0 {
-                //write only this node's information to file
-                let node_string = self.node_value_to_string(&node, slotted_page.id());
-                writer
-                    .write_all(node_string.as_bytes())
-                    .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-            }
-            return Ok(());
-        }
-
-        let (child_pointer, new_path_offset) = match node {
-            AccountLeaf { ref storage_root, .. } => {
-                (storage_root.as_ref(), path_offset + common_prefix_length)
-            }
-            Branch { ref children, .. } => (
-                children[remaining_path[0] as usize].as_ref(),
-                path_offset + common_prefix_length + 1,
-            ),
-            _ => unreachable!(),
-        };
-
-        match child_pointer {
-            Some(child_pointer) => {
-                let (child_slotted_page, child_cell_index) =
-                    self.get_slotted_page_and_index(context, child_pointer, slotted_page)?;
-
-                // If we're moving to a new page and extra_verbose is true, print the new page
-                if child_slotted_page.id() != slotted_page.id() {
-                    if verbosity_level == 2 {
-                        //extra verbose; print new page contents
-                        writer
-                            .write_all(
-                                format!("\n\n\nNEW PAGE: {}\n", child_slotted_page.id()).as_bytes(),
-                            )
-                            .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-                        writer.flush().map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-                        self.print_page(context, output_file, Some(child_slotted_page.id()))?;
-                    }
-
-                    if verbosity_level > 0 {
-                        writer
-                            .write_all(
-                                format!("\nNODES ACCESSED FROM PAGE {}\n", child_slotted_page.id())
-                                    .as_bytes(),
-                            )
-                            .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-                        writer.flush().map_err(|e| Error::Other(format!("IO error: {}", e)))?;
-                    }
-                }
-
-                self.print_path_helper(
-                    context,
-                    path,
-                    new_path_offset,
-                    child_slotted_page,
-                    child_cell_index,
-                    writer,
-                    output_file,
-                    verbosity_level,
-                )
-            }
-            None => Ok(()),
-        }
-    }
-
-    // Helper function to convert node information to string for printing/writing to file
-    fn node_value_to_string(&self, node: &Node, page_id: u32) -> String {
-        match &node {
-            Node::Branch { prefix, children } => {
-                format!(
-                    "Branch Node:  Page ID: {}  Children: {:?}, Prefix: {}\n",
-                    page_id,
-                    children
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, child)| child.is_some())
-                        .map(|(i, _)| format!("{}", i))
-                        .collect::<Vec<_>>(),
-                    alloy_primitives::hex::encode(prefix.pack())
-                )
-            }
-            Node::AccountLeaf {
-                prefix,
-                nonce_rlp: _,
-                balance_rlp: _,
-                code_hash: _,
-                storage_root: _,
-            } => {
-                let val = match node.value() {
-                    Ok(TrieValue::Account(acct)) => {
-                        format!(
-                            "nonce: {:?}, balance: {:?}, prefix: {}, code_hash: {:x?}, storage_root: {:?}",
-                            acct.nonce, acct.balance, alloy_primitives::hex::encode(prefix.pack()), acct.code_hash, acct.storage_root,
-                        )
-                    }
-                    _ => "".to_string(),
-                };
-                format!("AccountLeaf: {}\n", val)
-            }
-            Node::StorageLeaf { prefix, value_rlp: _ } => {
-                let val = match node.value() {
-                    Ok(TrieValue::Storage(strg)) => {
-                        let str_prefix = alloy_primitives::hex::encode(prefix.pack());
-                        format!("storage: {:?}, prefix: {}", strg, str_prefix)
-                    }
-                    _ => "".to_string(),
-                };
-                format!("StorageLeaf: {}\n", val)
-            }
-        }
+        self.page_manager.size()
     }
 }
 
@@ -1815,14 +1495,17 @@ fn move_subtrie_nodes(
     Ok(node_location(target_page.id(), new_index))
 }
 
-impl Inner {
-    fn allocate_page<'p>(
+impl StorageEngine {
+    /// Allocates a new page from the underlying page manager.
+    /// If there is an orphaned page available as of the given [SnapshotId],
+    /// it is used to allocate a new page instead.
+    pub fn allocate_page<'p>(
         &mut self,
         context: &mut TransactionContext,
     ) -> Result<PageMut<'p>, Error> {
         let orphaned_page_id = self.orphan_manager.get_orphaned_page_id();
         let page_to_return = if let Some(orphaned_page_id) = orphaned_page_id {
-            let mut page = self.get_page_mut(context, orphaned_page_id)?;
+            let mut page = self.get_mut_page(context, orphaned_page_id)?;
             page.set_snapshot_id(context.metadata.snapshot_id);
             page.contents_mut().fill(0);
             context.transaction_metrics.inc_pages_reallocated();
@@ -1838,14 +1521,9 @@ impl Inner {
         Ok(page_to_return)
     }
 
-    fn resize(&mut self, new_page_count: PageId) -> Result<(), Error> {
-        self.page_manager.resize(new_page_count)?;
-        Ok(())
-    }
-
-    fn commit(&mut self, context: &TransactionContext) -> Result<(), Error> {
+    pub fn commit(&mut self, context: &TransactionContext) -> Result<(), Error> {
         // First commit to ensure all changes are written before writing the new root page.
-        self.page_manager.commit(context.metadata.snapshot_id)?;
+        self.page_manager.commit()?;
 
         let mut page_mut = self
             .page_manager
@@ -1871,13 +1549,13 @@ impl Inner {
             .unwrap();
 
         // Second commit to ensure the new root page is written to disk.
-        self.page_manager.commit(context.metadata.snapshot_id)?;
+        self.page_manager.commit()?;
 
         Ok(())
     }
 
-    // a wrapper around the page manager get_mut that increments the pages read metric
-    fn get_page_mut<'p>(
+    /// Retrieves a mutable [Page] from the underlying [PageManager].
+    pub fn get_mut_page<'p>(
         &mut self,
         context: &TransactionContext,
         page_id: PageId,
@@ -1887,8 +1565,8 @@ impl Inner {
         Ok(page)
     }
 
-    // a wrapper around the page manager get that increments the pages read metric
-    fn get_page<'p>(
+    /// Retrieves a read-only [Page] from the underlying [PageManager].
+    pub fn get_page<'p>(
         &self,
         context: &TransactionContext,
         page_id: PageId,
@@ -1901,24 +1579,29 @@ impl Inner {
 
 #[derive(Debug)]
 pub enum Error {
+    IO(io::Error),
     NodeError(NodeError),
     PageError(PageError),
     InvalidCommonPrefixIndex,
     InvalidSnapshotId,
-    EngineClosed,
     PageSplit,
-    Other(String),
 }
 
 impl From<PageError> for Error {
     fn from(error: PageError) -> Self {
-        Error::PageError(error)
+        Self::PageError(error)
     }
 }
 
 impl From<NodeError> for Error {
     fn from(error: NodeError) -> Self {
-        Error::NodeError(error)
+        Self::NodeError(error)
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(error: io::Error) -> Self {
+        Self::IO(error)
     }
 }
 
@@ -1947,7 +1630,7 @@ mod tests {
 
     #[test]
     fn test_allocate_get_mut_clone() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         // Initial allocation
         let mut page = storage_engine.allocate_page(&mut context).unwrap();
@@ -2012,7 +1695,7 @@ mod tests {
 
     #[test]
     fn test_shared_page_mutability() {
-        let (storage_engine, context) = create_test_engine(300);
+        let (mut storage_engine, context) = create_test_engine(300);
 
         let page1 = storage_engine.get_page(&context, 1).unwrap();
         assert_eq!(page1.contents()[0], 0);
@@ -2031,7 +1714,7 @@ mod tests {
 
     #[test]
     fn test_set_get_account() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
@@ -2062,7 +1745,7 @@ mod tests {
         for (address, account) in &test_cases {
             let path = AddressPath::for_address(*address);
 
-            let read_account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let read_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(read_account, None);
 
             storage_engine
@@ -2075,15 +1758,16 @@ mod tests {
 
         // Verify all accounts exist after insertion
         for (address, account) in test_cases {
-            let read_account =
-                storage_engine.get_account(&context, AddressPath::for_address(address)).unwrap();
+            let read_account = storage_engine
+                .get_account(&mut context, AddressPath::for_address(address))
+                .unwrap();
             assert_eq!(read_account, Some(account));
         }
     }
 
     #[test]
     fn test_simple_trie_state_root_1() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let address1 = address!("0x8e64566b5eb8f595f7eb2b8d302f2e5613cb8bae");
         let account1 = create_test_account(1_000_000_000_000_000_000u64, 0);
@@ -2113,7 +1797,7 @@ mod tests {
 
     #[test]
     fn test_simple_trie_state_root_2() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let address1 = address!("0x000f3df6d732807ef1319fb7b8bb8522d0beac02");
         let account1 = Account::new(1, U256::from(0), EMPTY_ROOT_HASH, keccak256(hex!("0x3373fffffffffffffffffffffffffffffffffffffffe14604d57602036146024575f5ffd5b5f35801560495762001fff810690815414603c575f5ffd5b62001fff01545f5260205ff35b5f5ffd5b62001fff42064281555f359062001fff015500")));
@@ -2219,7 +1903,7 @@ mod tests {
             accounts.push((address, account, storage));
         }
 
-        let (storage_engine, mut context) = create_test_engine(30000);
+        let (mut storage_engine, mut context) = create_test_engine(30000);
 
         // insert accounts and storage in random order
         accounts.shuffle(&mut rng);
@@ -2249,14 +1933,14 @@ mod tests {
         // check that all of the values are correct
         for (address, account, storage) in accounts.clone() {
             let read_account = storage_engine
-                .get_account(&context, AddressPath::for_address(address))
+                .get_account(&mut context, AddressPath::for_address(address))
                 .unwrap()
                 .unwrap();
             assert_eq!(read_account.balance, account.balance);
 
             for (slot, value) in storage {
                 let read_value = storage_engine
-                    .get_storage(&context, StoragePath::for_address_and_slot(address, slot))
+                    .get_storage(&mut context, StoragePath::for_address_and_slot(address, slot))
                     .unwrap();
                 assert_eq!(read_value, Some(value));
             }
@@ -2264,7 +1948,7 @@ mod tests {
             expected_account_storage_roots.insert(address, read_account.storage_root);
         }
 
-        let (storage_engine, mut context) = create_test_engine(30000);
+        let (mut storage_engine, mut context) = create_test_engine(30000);
 
         // insert accounts in a different random order, but only after inserting different values
         // first
@@ -2326,7 +2010,7 @@ mod tests {
         // check that all of the values are correct
         for (address, account, storage) in accounts.clone() {
             let read_account = storage_engine
-                .get_account(&context, AddressPath::for_address(address))
+                .get_account(&mut context, AddressPath::for_address(address))
                 .unwrap()
                 .unwrap();
             assert_eq!(read_account.balance, account.balance);
@@ -2334,7 +2018,7 @@ mod tests {
             assert_eq!(read_account.storage_root, expected_account_storage_roots[&address]);
             for (slot, value) in storage {
                 let read_value = storage_engine
-                    .get_storage(&context, StoragePath::for_address_and_slot(address, slot))
+                    .get_storage(&mut context, StoragePath::for_address_and_slot(address, slot))
                     .unwrap();
                 assert_eq!(read_value, Some(value));
             }
@@ -2346,7 +2030,7 @@ mod tests {
 
     #[test]
     fn test_set_get_account_common_prefix() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let test_accounts = vec![
             (hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001"), create_test_account(100, 1)),
@@ -2370,14 +2054,14 @@ mod tests {
         // Verify all accounts exist
         for (nibbles, account) in test_accounts {
             let path = AddressPath::new(Nibbles::from_nibbles(nibbles));
-            let read_account = storage_engine.get_account(&context, path).unwrap();
+            let read_account = storage_engine.get_account(&mut context, path).unwrap();
             assert_eq!(read_account, Some(account));
         }
     }
 
     #[test]
     fn test_split_page() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let test_accounts = vec![
             (hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001"), create_test_account(100, 1)),
@@ -2406,14 +2090,14 @@ mod tests {
         // Verify all accounts still exist after split
         for (nibbles, account) in test_accounts {
             let path = AddressPath::new(Nibbles::from_nibbles(nibbles));
-            let read_account = storage_engine.get_account(&context, path).unwrap();
+            let read_account = storage_engine.get_account(&mut context, path).unwrap();
             assert_eq!(read_account, Some(account));
         }
     }
 
     #[test]
     fn test_insert_get_1000_accounts() {
-        let (storage_engine, mut context) = create_test_engine(5000);
+        let (mut storage_engine, mut context) = create_test_engine(5000);
 
         for i in 0..1000 {
             let path = address_path_for_idx(i);
@@ -2430,7 +2114,7 @@ mod tests {
 
         for i in 0..1000 {
             let path = address_path_for_idx(i);
-            let account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(account, Some(create_test_account(i, i)));
         }
     }
@@ -2438,7 +2122,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_set_storage_slot_with_no_account_panics() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
 
         let storage_key =
@@ -2460,7 +2144,7 @@ mod tests {
 
     #[test]
     fn test_get_account_storage_cache() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
         {
             // An account with no storage should not be cached
             let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96555");
@@ -2476,7 +2160,7 @@ mod tests {
             context = TransactionContext::new(context.metadata.next());
 
             let read_account =
-                storage_engine.get_account(&context, address_path.clone()).unwrap().unwrap();
+                storage_engine.get_account(&mut context, address_path.clone()).unwrap().unwrap();
             assert_eq!(read_account, account);
             let cached_location = context.contract_account_loc_cache.get(address_path.to_nibbles());
             assert!(cached_location.is_none());
@@ -2529,7 +2213,7 @@ mod tests {
 
             context = TransactionContext::new(context.metadata.next());
             let read_account = storage_engine
-                .get_account(&context, AddressPath::for_address(address))
+                .get_account(&mut context, AddressPath::for_address(address))
                 .unwrap()
                 .unwrap();
             assert_eq!(read_account.balance, account.balance);
@@ -2546,7 +2230,7 @@ mod tests {
             // getting the storage slot should hit the cache
             let storage_path = StoragePath::for_address_and_slot(address, test_cases[0].0);
             let read_storage_slot =
-                storage_engine.get_storage(&context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
             assert_eq!(
                 read_storage_slot,
                 Some(StorageValue::from_be_slice(
@@ -2596,7 +2280,7 @@ mod tests {
 
             context = TransactionContext::new(context.metadata.next());
             storage_engine
-                .get_account(&context, AddressPath::for_address(address))
+                .get_account(&mut context, AddressPath::for_address(address))
                 .unwrap()
                 .unwrap();
 
@@ -2634,7 +2318,7 @@ mod tests {
 
     #[test]
     fn test_set_get_account_storage_slots() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
@@ -2674,7 +2358,7 @@ mod tests {
         for (storage_key, _) in &test_cases {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
             let read_storage_slot =
-                storage_engine.get_storage(&context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
             assert_eq!(read_storage_slot, None);
         }
         storage_engine
@@ -2696,7 +2380,7 @@ mod tests {
         // Verify all storage slots exist after insertion
         for (storage_key, storage_value) in &test_cases {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
-            let read_storage_slot = storage_engine.get_storage(&context, storage_path).unwrap();
+            let read_storage_slot = storage_engine.get_storage(&mut context, storage_path).unwrap();
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
             assert_eq!(read_storage_slot, Some(storage_value));
         }
@@ -2704,7 +2388,7 @@ mod tests {
 
     #[test]
     fn test_set_get_account_storage_roots() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
@@ -2745,7 +2429,7 @@ mod tests {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
             let read_storage_slot =
-                storage_engine.get_storage(&context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
             assert_eq!(read_storage_slot, None);
 
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
@@ -2767,7 +2451,7 @@ mod tests {
         }));
 
         let account = storage_engine
-            .get_account(&context, AddressPath::for_address(address))
+            .get_account(&mut context, AddressPath::for_address(address))
             .unwrap()
             .unwrap();
 
@@ -2776,7 +2460,7 @@ mod tests {
 
     #[test]
     fn test_set_get_many_accounts_storage_roots() {
-        let (storage_engine, mut context) = create_test_engine(2000);
+        let (mut storage_engine, mut context) = create_test_engine(2000);
 
         for i in 0..100 {
             let address =
@@ -2820,7 +2504,7 @@ mod tests {
             let expected_root = storage_root_unsorted(keys_values.into_iter());
 
             // check the storage root of the account
-            let account = storage_engine.get_account(&context, path).unwrap().unwrap();
+            let account = storage_engine.get_account(&mut context, path).unwrap().unwrap();
 
             assert_eq!(account.storage_root, expected_root);
         }
@@ -2829,7 +2513,7 @@ mod tests {
     #[test]
     fn test_split_page_stress() {
         // Create a storage engine with limited pages to force splits
-        let (storage_engine, mut context) = create_test_engine(5000);
+        let (mut storage_engine, mut context) = create_test_engine(5000);
 
         // Create a large number of accounts with different patterns to stress the trie
 
@@ -2916,7 +2600,7 @@ mod tests {
 
         // Verify all accounts exist with correct values
         for (path, expected_account) in &accounts {
-            let retrieved_account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let retrieved_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(
                 retrieved_account,
                 Some(expected_account.clone()),
@@ -2944,7 +2628,7 @@ mod tests {
 
         // Verify all accounts still exist with correct values after splits
         for (path, expected_account) in &accounts {
-            let retrieved_account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let retrieved_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(
                 retrieved_account,
                 Some(expected_account.clone()),
@@ -2985,7 +2669,7 @@ mod tests {
 
         // Verify all original accounts still exist
         for (path, expected_account) in &accounts {
-            let retrieved_account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let retrieved_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(
                 retrieved_account,
                 Some(expected_account.clone()),
@@ -2995,7 +2679,7 @@ mod tests {
 
         // Verify all new accounts exist
         for (path, expected_account) in &additional_accounts {
-            let retrieved_account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let retrieved_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(retrieved_account, Some(expected_account.clone()), "New account not found");
         }
         // Verify the pages split metric
@@ -3007,7 +2691,7 @@ mod tests {
         use rand::{rngs::StdRng, Rng, SeedableRng};
 
         // Create a storage engine
-        let (storage_engine, mut context) = create_test_engine(2000);
+        let (mut storage_engine, mut context) = create_test_engine(2000);
 
         // Use a seeded RNG for reproducibility
         let mut rng = StdRng::seed_from_u64(42);
@@ -3043,7 +2727,7 @@ mod tests {
 
         // Verify all accounts exist with correct values
         for (path, expected_account) in &accounts {
-            let retrieved_account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let retrieved_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(retrieved_account, Some(expected_account.clone()));
         }
 
@@ -3079,7 +2763,7 @@ mod tests {
 
         // Verify all accounts still exist with correct values after splits
         for (path, expected_account) in &accounts {
-            let retrieved_account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let retrieved_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(
                 retrieved_account,
                 Some(expected_account.clone()),
@@ -3118,7 +2802,7 @@ mod tests {
 
         // Verify all accounts have correct values after updates
         for (path, expected_account) in &accounts {
-            let retrieved_account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let retrieved_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(
                 retrieved_account,
                 Some(expected_account.clone()),
@@ -3129,7 +2813,7 @@ mod tests {
 
     #[test]
     fn test_delete_account() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
@@ -3144,7 +2828,7 @@ mod tests {
 
         // Check that the account exists
         let read_account =
-            storage_engine.get_account(&context, AddressPath::for_address(address)).unwrap();
+            storage_engine.get_account(&mut context, AddressPath::for_address(address)).unwrap();
         assert_eq!(read_account, Some(account.clone()));
 
         // Reset the context metrics
@@ -3159,13 +2843,13 @@ mod tests {
 
         // Verify the account is deleted
         let read_account =
-            storage_engine.get_account(&context, AddressPath::for_address(address)).unwrap();
+            storage_engine.get_account(&mut context, AddressPath::for_address(address)).unwrap();
         assert_eq!(read_account, None);
     }
 
     #[test]
     fn test_delete_accounts() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
@@ -3195,7 +2879,7 @@ mod tests {
         for (address, account) in &test_cases {
             let path = AddressPath::for_address(*address);
 
-            let read_account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let read_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(read_account, None);
 
             storage_engine
@@ -3208,8 +2892,9 @@ mod tests {
 
         // Verify all accounts exist after insertion
         for (address, account) in &test_cases {
-            let read_account =
-                storage_engine.get_account(&context, AddressPath::for_address(*address)).unwrap();
+            let read_account = storage_engine
+                .get_account(&mut context, AddressPath::for_address(*address))
+                .unwrap();
             assert_eq!(read_account, Some(account.clone()));
         }
 
@@ -3225,15 +2910,16 @@ mod tests {
 
         // Verify that the accounts don't exist anymore
         for (address, _) in &test_cases {
-            let read_account =
-                storage_engine.get_account(&context, AddressPath::for_address(*address)).unwrap();
+            let read_account = storage_engine
+                .get_account(&mut context, AddressPath::for_address(*address))
+                .unwrap();
             assert_eq!(read_account, None);
         }
     }
 
     #[test]
     fn test_some_delete_accounts() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
@@ -3263,7 +2949,7 @@ mod tests {
         for (address, account) in &test_cases {
             let path = AddressPath::for_address(*address);
 
-            let read_account = storage_engine.get_account(&context, path.clone()).unwrap();
+            let read_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
             assert_eq!(read_account, None);
 
             storage_engine
@@ -3276,8 +2962,9 @@ mod tests {
 
         // Verify all accounts exist after insertion
         for (address, account) in &test_cases {
-            let read_account =
-                storage_engine.get_account(&context, AddressPath::for_address(*address)).unwrap();
+            let read_account = storage_engine
+                .get_account(&mut context, AddressPath::for_address(*address))
+                .unwrap();
             assert_eq!(read_account, Some(account.clone()));
         }
 
@@ -3293,22 +2980,24 @@ mod tests {
 
         // Verify that the accounts don't exist anymore
         for (address, _) in &test_cases[0..2] {
-            let read_account =
-                storage_engine.get_account(&context, AddressPath::for_address(*address)).unwrap();
+            let read_account = storage_engine
+                .get_account(&mut context, AddressPath::for_address(*address))
+                .unwrap();
             assert_eq!(read_account, None);
         }
 
         // Verify that the non-deleted accounts still exist
         for (address, account) in &test_cases[2..] {
-            let read_account =
-                storage_engine.get_account(&context, AddressPath::for_address(*address)).unwrap();
+            let read_account = storage_engine
+                .get_account(&mut context, AddressPath::for_address(*address))
+                .unwrap();
             assert_eq!(read_account, Some(account.clone()));
         }
     }
 
     #[test]
     fn test_delete_storage() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
@@ -3349,7 +3038,7 @@ mod tests {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
             let read_storage_slot =
-                storage_engine.get_storage(&context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
             assert_eq!(read_storage_slot, None);
 
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
@@ -3371,7 +3060,7 @@ mod tests {
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             let read_storage_slot =
-                storage_engine.get_storage(&context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
             assert_eq!(read_storage_slot, Some(storage_value));
         }
 
@@ -3385,7 +3074,7 @@ mod tests {
             .collect();
         let expected_root = storage_root_unhashed(keys_values.clone());
         let account = storage_engine
-            .get_account(&context, AddressPath::for_address(address))
+            .get_account(&mut context, AddressPath::for_address(address))
             .unwrap()
             .unwrap();
 
@@ -3402,7 +3091,7 @@ mod tests {
                 .unwrap();
 
             let read_storage_slot =
-                storage_engine.get_storage(&context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
 
             assert_eq!(read_storage_slot, None);
 
@@ -3410,7 +3099,7 @@ mod tests {
             keys_values.remove(0);
             let expected_root = storage_root_unhashed(keys_values.clone());
             let account = storage_engine
-                .get_account(&context, AddressPath::for_address(address))
+                .get_account(&mut context, AddressPath::for_address(address))
                 .unwrap()
                 .unwrap();
 
@@ -3420,7 +3109,7 @@ mod tests {
 
     #[test]
     fn test_delete_account_also_deletes_storage() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
@@ -3461,7 +3150,7 @@ mod tests {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
             let read_storage_slot =
-                storage_engine.get_storage(&context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
             assert_eq!(read_storage_slot, None);
 
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
@@ -3483,7 +3172,7 @@ mod tests {
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             let read_storage_slot =
-                storage_engine.get_storage(&context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
             assert_eq!(read_storage_slot, Some(storage_value));
         }
 
@@ -3496,14 +3185,15 @@ mod tests {
             .unwrap();
 
         // Verify the account no longer exists
-        let res = storage_engine.get_account(&context, AddressPath::for_address(address)).unwrap();
+        let res =
+            storage_engine.get_account(&mut context, AddressPath::for_address(address)).unwrap();
         assert_eq!(res, None);
 
         // Verify all the storage slots don't exist
         for (storage_key, _) in &test_cases {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
-            let res = storage_engine.get_storage(&context, storage_path.clone()).unwrap();
+            let res = storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
             assert_eq!(res, None);
         }
 
@@ -3520,14 +3210,15 @@ mod tests {
         for (storage_key, _) in &test_cases {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
-            let read_storage = storage_engine.get_storage(&context, storage_path.clone()).unwrap();
+            let read_storage =
+                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
             assert_eq!(read_storage, None);
         }
     }
 
     #[test]
     fn test_delete_single_child_branch_on_same_page() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         // GIVEN: a branch node with 2 children, where all the children live on the same page
         let mut account_1_nibbles = [0u8; 64];
@@ -3580,12 +3271,12 @@ mod tests {
         //
         // first verify the deleted account is gone and the remaining account exists
         let read_account1 = storage_engine
-            .get_account(&context, AddressPath::new(Nibbles::from_nibbles(account_1_nibbles)))
+            .get_account(&mut context, AddressPath::new(Nibbles::from_nibbles(account_1_nibbles)))
             .unwrap();
         assert_eq!(read_account1, None);
 
         let read_account2 = storage_engine
-            .get_account(&context, AddressPath::new(Nibbles::from_nibbles(account_2_nibbles)))
+            .get_account(&mut context, AddressPath::new(Nibbles::from_nibbles(account_2_nibbles)))
             .unwrap();
         assert_eq!(read_account2, Some(account2));
 
@@ -3599,7 +3290,7 @@ mod tests {
 
     #[test]
     fn test_delete_single_child_non_root_branch_on_different_pages() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         // GIVEN: a non-root branch node with 2 children where both children are on a different
         // pages
@@ -3713,11 +3404,11 @@ mod tests {
         let child_1_nibbles = Nibbles::from_nibbles(child_1_full_path);
         let child_2_nibbles = Nibbles::from_nibbles(child_2_full_path);
         let read_account1 = storage_engine
-            .get_account(&context, AddressPath::new(child_1_nibbles.clone()))
+            .get_account(&mut context, AddressPath::new(child_1_nibbles.clone()))
             .unwrap();
         assert_eq!(read_account1, Some(test_account.clone()));
         let read_account2 = storage_engine
-            .get_account(&context, AddressPath::new(child_2_nibbles.clone()))
+            .get_account(&mut context, AddressPath::new(child_2_nibbles.clone()))
             .unwrap();
         assert_eq!(read_account2, Some(test_account.clone()));
 
@@ -3742,16 +3433,16 @@ mod tests {
 
         // test that we can get child 2 and not child 1
         let read_account2 =
-            storage_engine.get_account(&context, AddressPath::new(child_2_nibbles)).unwrap();
+            storage_engine.get_account(&mut context, AddressPath::new(child_2_nibbles)).unwrap();
         assert_eq!(read_account2, Some(test_account.clone()));
         let read_account1 =
-            storage_engine.get_account(&context, AddressPath::new(child_1_nibbles)).unwrap();
+            storage_engine.get_account(&mut context, AddressPath::new(child_1_nibbles)).unwrap();
         assert_eq!(read_account1, None);
     }
 
     #[test]
     fn test_delete_single_child_root_branch_on_different_pages() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         // GIVEN: a root branch node with 2 children where both children are on a different page
         //
@@ -3819,11 +3510,11 @@ mod tests {
         let child_1_nibbles = Nibbles::from_nibbles(child_1_full_path);
         let child_2_nibbles = Nibbles::from_nibbles(child_2_full_path);
         let read_account1 = storage_engine
-            .get_account(&context, AddressPath::new(child_1_nibbles.clone()))
+            .get_account(&mut context, AddressPath::new(child_1_nibbles.clone()))
             .unwrap();
         assert_eq!(read_account1, Some(test_account.clone()));
         let read_account2 = storage_engine
-            .get_account(&context, AddressPath::new(child_2_nibbles.clone()))
+            .get_account(&mut context, AddressPath::new(child_2_nibbles.clone()))
             .unwrap();
         assert_eq!(read_account2, Some(test_account.clone()));
 
@@ -3849,16 +3540,16 @@ mod tests {
 
         // test that we can get child 2 and not child 1
         let read_account2 =
-            storage_engine.get_account(&context, AddressPath::new(child_2_nibbles)).unwrap();
+            storage_engine.get_account(&mut context, AddressPath::new(child_2_nibbles)).unwrap();
         assert_eq!(read_account2, Some(test_account.clone()));
         let read_account1 =
-            storage_engine.get_account(&context, AddressPath::new(child_1_nibbles)).unwrap();
+            storage_engine.get_account(&mut context, AddressPath::new(child_1_nibbles)).unwrap();
         assert_eq!(read_account1, None);
     }
 
     #[test]
     fn test_delete_non_existent_value_doesnt_change_trie_structure() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         // GIVEN: a trie with a single account
         let address_nibbles = Nibbles::unpack(hex!(
@@ -3930,7 +3621,7 @@ mod tests {
 
     #[test]
     fn test_leaf_update_and_non_existent_delete_works() {
-        let (storage_engine, mut context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
         // GIVEN: a trie with a single account
         let address_nibbles_original_account = Nibbles::unpack(hex!(
@@ -3970,7 +3661,7 @@ mod tests {
 
         // THEN: the updated account should be updated
         let account_in_database = storage_engine
-            .get_account(&context, AddressPath::new(address_nibbles_original_account))
+            .get_account(&mut context, AddressPath::new(address_nibbles_original_account))
             .unwrap()
             .unwrap();
         assert_eq!(account_in_database, updated_account);
@@ -3996,7 +3687,7 @@ mod tests {
                 1..100
             )
         ) {
-            let (storage_engine, mut context) = create_test_engine(10_000);
+            let (mut storage_engine, mut context) = create_test_engine(10_000);
 
             for (address, account) in &accounts {
                 storage_engine
@@ -4006,7 +3697,7 @@ mod tests {
 
             for (address, account) in accounts {
                 let read_account = storage_engine
-                    .get_account(&context, AddressPath::for_address(address))
+                    .get_account(&mut context, AddressPath::for_address(address))
                     .unwrap();
                 assert_eq!(read_account, Some(Account::new(account.nonce, account.balance, EMPTY_ROOT_HASH, account.code_hash)));
             }
@@ -4022,7 +3713,7 @@ mod tests {
                 1..100
             ),
         ) {
-            let (storage_engine, mut context) = create_test_engine(10_000);
+            let (mut storage_engine, mut context) = create_test_engine(10_000);
 
             let mut changes = vec![];
             for (address, account, storage) in &accounts {
@@ -4038,7 +3729,7 @@ mod tests {
 
             for (address, account, storage) in accounts {
                 let read_account = storage_engine
-                    .get_account(&context, AddressPath::for_address(address))
+                    .get_account(&mut context, AddressPath::for_address(address))
                     .unwrap();
                 let read_account = read_account.unwrap();
                 assert_eq!(read_account.nonce, account.nonce);
@@ -4047,7 +3738,7 @@ mod tests {
 
                 for (key, value) in storage {
                     let read_storage = storage_engine
-                        .get_storage(&context, StoragePath::for_address_and_slot(address, key))
+                        .get_storage(&mut context, StoragePath::for_address_and_slot(address, key))
                         .unwrap();
                     assert_eq!(read_storage, Some(value));
                 }
@@ -4061,7 +3752,7 @@ mod tests {
                 1..100
             ),
         ) {
-            let (storage_engine, mut context) = create_test_engine(10_000);
+            let (mut storage_engine, mut context) = create_test_engine(10_000);
 
             let mut revision = 0;
             loop {
@@ -4083,7 +3774,7 @@ mod tests {
             for (address, revisions) in &account_revisions {
                 let last_revision = revisions.last().unwrap();
                 let read_account = storage_engine
-                    .get_account(&context, AddressPath::for_address(*address))
+                    .get_account(&mut context, AddressPath::for_address(*address))
                     .unwrap();
                 let read_account = read_account.unwrap();
                 assert_eq!(read_account.nonce, last_revision.nonce);

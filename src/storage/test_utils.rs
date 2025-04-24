@@ -9,8 +9,12 @@ use crate::{
     storage::engine::StorageEngine, PageManager,
 };
 
-pub(crate) fn create_test_engine(page_count: u32) -> (StorageEngine, TransactionContext) {
-    let manager = PageManager::new_anon(page_count, 256).unwrap();
+pub(crate) fn create_test_engine(max_pages: u32) -> (StorageEngine, TransactionContext) {
+    let mut page_manager = PageManager::options().max_pages(max_pages).open_temp_file().unwrap();
+    for _ in 0..256 {
+        page_manager.allocate(0).unwrap();
+    }
+
     let orphan_manager = OrphanPageManager::new();
     let metadata = Metadata {
         snapshot_id: 1,
@@ -19,7 +23,8 @@ pub(crate) fn create_test_engine(page_count: u32) -> (StorageEngine, Transaction
         root_subtrie_page_id: 0,
         state_root: EMPTY_ROOT_HASH,
     };
-    let storage_engine = StorageEngine::new(manager, orphan_manager);
+    let storage_engine = StorageEngine::new(page_manager, orphan_manager);
+
     (storage_engine, TransactionContext::new(metadata))
 }
 
