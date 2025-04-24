@@ -114,7 +114,6 @@ impl Database {
         let storage_engine = self.inner.storage_engine.read();
         storage_engine.print_page(&context, output_file, page_id).map_err(Error::CloseError)
     }
-
 }
 
 impl Drop for Database {

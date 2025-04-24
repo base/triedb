@@ -1585,11 +1585,12 @@ impl StorageEngine {
             nybbles::common_prefix_length(&path[path_offset..], node.prefix());
 
         if common_prefix_length < node.prefix().len() {
-            writer.write_all(b"Node not found\n").map_err(|e| Error::Other(format!("IO error: {}", e)))?;
+            writer
+                .write_all(b"Node not found\n")
+                .map_err(|e| Error::Other(format!("IO error: {}", e)))?;
             return Ok(());
         }
 
-       
         let remaining_path = &path[path_offset + common_prefix_length..];
 
         if remaining_path.is_empty() {
@@ -1643,7 +1644,7 @@ impl StorageEngine {
                     }
                 }
 
-                return self.print_path_helper(
+                self.print_path_helper(
                     context,
                     path,
                     new_path_offset,
@@ -1652,10 +1653,9 @@ impl StorageEngine {
                     writer,
                     output_file,
                     verbosity_level,
-                );
-
+                )
             }
-            None => Ok(())
+            None => Ok(()),
         }
     }
 
@@ -1687,7 +1687,6 @@ impl StorageEngine {
                         format!(
                             "nonce: {:?}, balance: {:?}, prefix: {}, code_hash: {:x?}, storage_root: {:?}",
                             acct.nonce, acct.balance, alloy_primitives::hex::encode(prefix.pack()), acct.code_hash, acct.storage_root,
-                            
                         )
                     }
                     _ => "".to_string(),
@@ -1699,7 +1698,7 @@ impl StorageEngine {
                     Ok(TrieValue::Storage(strg)) => {
                         let str_prefix = alloy_primitives::hex::encode(prefix.pack());
                         format!("storage: {:?}, prefix: {}", strg, str_prefix)
-                    },
+                    }
                     _ => "".to_string(),
                 };
                 format!("StorageLeaf: {}\n", val)

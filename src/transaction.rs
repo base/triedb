@@ -121,10 +121,10 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         let context = TransactionContext::new(metadata);
         let storage_engine = self.database.inner.storage_engine.read();
 
-        let result = storage_engine
+        storage_engine
             .print_path(&context, address_path.to_nibbles(), output_file, verbosity_level)
             .unwrap();
-        Ok(result)
+        Ok(())
     }
 
     pub fn debug_storage(
@@ -137,10 +137,10 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         let context = TransactionContext::new(metadata);
         let storage_engine = self.database.inner.storage_engine.read();
 
-        let result = storage_engine
+        storage_engine
             .print_path(&context, &storage_path.full_path(), output_file, verbosity_level)
             .unwrap();
-        Ok(result)
+        Ok(())
     }
 }
 
