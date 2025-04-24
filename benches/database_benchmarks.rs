@@ -585,13 +585,13 @@ criterion_group!(
     bench_updates,
     bench_deletes,
     bench_mixed_operations,
-    bench_storage_reads_single_account,
-    bench_storage_reads_multiple_accounts,
-    bench_storage_inserts_single_account,
-    bench_storage_inserts_multiple_accounts,
-    bench_storage_single_account_updates,
-    bench_storage_multiple_account_updates,
-    bench_storage_single_account_deletes,
-    bench_storage_mutliple_accounts_deletes
+    // bench_storage_reads_single_account,
+    // bench_storage_reads_multiple_accounts,
+    // bench_storage_inserts_single_account,
+    // bench_storage_inserts_multiple_accounts,
+    // bench_storage_single_account_updates,
+    // bench_storage_multiple_account_updates,
+    // bench_storage_single_account_deletes,
+    // bench_storage_mutliple_accounts_deletes
 );
 criterion_main!(benches);
