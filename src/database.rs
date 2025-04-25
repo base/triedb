@@ -12,14 +12,9 @@ use std::{io, path::Path};
 
 #[derive(Debug)]
 pub struct Database {
-    pub(crate) inner: Inner,
-    metrics: DatabaseMetrics,
-}
-
-#[derive(Debug)]
-pub(crate) struct Inner {
     pub(crate) storage_engine: RwLock<StorageEngine>,
     pub(crate) transaction_manager: RwLock<TransactionManager>,
+    metrics: DatabaseMetrics,
 }
 
 #[derive(Debug)]
@@ -82,16 +77,14 @@ impl Database {
 
     pub fn new(storage_engine: StorageEngine) -> Self {
         Self {
-            inner: Inner {
-                storage_engine: RwLock::new(storage_engine),
-                transaction_manager: RwLock::new(TransactionManager::new()),
-            },
+            storage_engine: RwLock::new(storage_engine),
+            transaction_manager: RwLock::new(TransactionManager::new()),
             metrics: DatabaseMetrics::default(),
         }
     }
 
     pub fn print_page<W: io::Write>(self, buf: W, page_id: Option<u32>) -> Result<(), Error> {
-        let storage_engine = self.inner.storage_engine.read();
+        let storage_engine = self.storage_engine.read();
         let context = storage_engine.read_context();
         // TODO: Must use `expect()` because `storage::engine::Error` and `database::Error` are not
         // compatible. There's probably no reason to use two different error enums here, so maybe
@@ -101,8 +94,8 @@ impl Database {
     }
 
     pub fn begin_rw(&self) -> Result<Transaction<'_, RW>, TransactionError> {
-        let mut transaction_manager = self.inner.transaction_manager.write();
-        let mut storage_engine = self.inner.storage_engine.write();
+        let mut transaction_manager = self.transaction_manager.write();
+        let mut storage_engine = self.storage_engine.write();
         let metadata = storage_engine.metadata().dirty_slot();
         let min_snapshot_id = transaction_manager.begin_rw(metadata.snapshot_id())?;
         if min_snapshot_id > 0 {
@@ -113,8 +106,8 @@ impl Database {
     }
 
     pub fn begin_ro(&self) -> Result<Transaction<'_, RO>, TransactionError> {
-        let mut transaction_manager = self.inner.transaction_manager.write();
-        let storage_engine = self.inner.storage_engine.read();
+        let mut transaction_manager = self.transaction_manager.write();
+        let storage_engine = self.storage_engine.read();
         let metadata = storage_engine.metadata().active_slot();
         transaction_manager.begin_ro(metadata.snapshot_id());
         let context = storage_engine.read_context();
@@ -122,7 +115,7 @@ impl Database {
     }
 
     pub fn state_root(&self) -> B256 {
-        self.inner.storage_engine.read().metadata().active_slot().root_node_hash()
+        self.storage_engine.read().metadata().active_slot().root_node_hash()
     }
 
     pub fn close(mut self) -> Result<(), Error> {
@@ -130,13 +123,13 @@ impl Database {
     }
 
     fn commit(&mut self) -> Result<(), Error> {
-        let mut storage_engine = self.inner.storage_engine.write();
+        let mut storage_engine = self.storage_engine.write();
         let context = storage_engine.write_context();
         storage_engine.commit(&context).map_err(Error::EngineError)
     }
 
     pub fn size(&self) -> u32 {
-        let storage_engine = self.inner.storage_engine.read();
+        let storage_engine = self.storage_engine.read();
         storage_engine.size()
     }
 
