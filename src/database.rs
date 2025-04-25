@@ -53,10 +53,9 @@ pub enum Error {
 
 impl Database {
     pub fn create(file_path: impl AsRef<Path>) -> Result<Self, Error> {
-        // TODO: handle the case where the file already exists.
-        let mut page_manager = PageManager::open(file_path).map_err(Error::PageError)?;
+        let mut page_manager =
+            PageManager::options().create_new(true).open(file_path).map_err(Error::PageError)?;
         // allocate the first 256 pages for the root, orphans, and root subtrie
-        page_manager.resize(1000).map_err(Error::PageError)?;
         for i in 0..256 {
             let page = page_manager.allocate(0).map_err(Error::PageError)?;
             assert_eq!(page.id(), i);
@@ -81,7 +80,8 @@ impl Database {
     }
 
     pub fn open(file_path: impl AsRef<Path>) -> Result<Self, Error> {
-        let page_manager = PageManager::open(file_path).map_err(Error::PageError)?;
+        let mut page_manager =
+            PageManager::options().page_count(256).open(file_path).map_err(Error::PageError)?;
 
         let root_page_0 = page_manager.get(0, 0).map_err(Error::PageError)?;
         let root_page_1 = page_manager.get(0, 1).map_err(Error::PageError)?;
@@ -91,20 +91,15 @@ impl Database {
 
         let root_page = if root_0.snapshot_id() > root_1.snapshot_id() { root_0 } else { root_1 };
 
-        let max_page_count = root_page.max_page_number();
-
         let orphaned_page_ids =
             root_page.get_orphaned_page_ids(&page_manager).map_err(Error::PageError)?;
         let orphan_manager = OrphanPageManager::new_with_unlocked_page_ids(orphaned_page_ids);
 
         let metadata: Metadata = root_page.into();
+        page_manager.set_size(metadata.max_page_number + 1);
 
         let storage_engine = StorageEngine::new(page_manager, orphan_manager);
-        let database = Database::new(metadata, storage_engine);
-        // add a buffer of 1000 pages
-        // TODO: make this configurable
-        database.resize(max_page_count + 1000).unwrap();
-        Ok(database)
+        Ok(Self::new(metadata, storage_engine))
     }
 
     pub fn print_page<W: io::Write>(self, buf: W, page_id: Option<u32>) -> Result<(), Error> {
@@ -122,7 +117,7 @@ impl Database {
 
 impl Drop for Database {
     fn drop(&mut self) {
-        self.shrink_and_commit().expect("failed to close database")
+        self.commit().expect("failed to close database")
     }
 }
 
@@ -163,21 +158,15 @@ impl Database {
         metadata.state_root
     }
 
-    pub(crate) fn resize(&self, new_page_count: PageId) -> Result<(), TransactionError> {
-        let mut storage_engine = self.inner.storage_engine.write();
-        storage_engine.resize(new_page_count).unwrap();
-        Ok(())
-    }
-
     pub fn close(mut self) -> Result<(), Error> {
-        self.shrink_and_commit()
+        self.commit()
     }
 
-    fn shrink_and_commit(&mut self) -> Result<(), Error> {
+    fn commit(&mut self) -> Result<(), Error> {
         let mut storage_engine = self.inner.storage_engine.write();
         let metadata = self.inner.metadata.read();
         let context = TransactionContext::new(metadata.clone());
-        storage_engine.shrink_and_commit(&context).map_err(Error::CloseError)?;
+        storage_engine.commit(&context).map_err(Error::CloseError)?;
         Ok(())
     }
 
@@ -232,7 +221,7 @@ mod tests {
     use std::fs::File;
     use tempdir::TempDir;
 
-    use crate::{account::Account, path::AddressPath};
+    use crate::{account::Account, page::Page, path::AddressPath};
 
     use super::*;
 
@@ -290,9 +279,8 @@ mod tests {
         // THEN: the size of the database should be the
         // max_page_size + buffer
         let open_size = db.size();
-
         let max_page_size = 255; // fresh db has root pages + reserved orphan pages
-        assert_eq!(open_size, max_page_size + 1000);
+        assert!(open_size >= max_page_size);
 
         // cleanup
         tmp_dir.close().unwrap();
@@ -308,18 +296,17 @@ mod tests {
         let file_path = tmp_dir.path().join("test.db");
         let db = Database::create(&file_path).unwrap();
         let create_size = db.size();
-
-        assert_eq!(create_size, 1000);
+        assert!(create_size >= 256);
 
         // WHEN: the database is closed
         db.close().unwrap();
 
-        // THEN: the size of the database should be the
-        // max_page_size
+        // THEN: the size of the database should be at least large enough to contain
+        // `max_page_size`
         let max_page_size = 256; // fresh db so at least 256 pages for the root pages + orphan pages
         let file = File::options().read(true).open(&file_path).unwrap();
         let file_len = file.metadata().unwrap().len();
-        assert_eq!(file_len, max_page_size * 4096);
+        assert!(file_len >= max_page_size * Page::SIZE as u64);
 
         // cleanup
         tmp_dir.close().unwrap();
@@ -338,7 +325,7 @@ mod tests {
             let db = Database::create(&file_path).unwrap();
 
             let create_size = db.size();
-            assert_eq!(create_size, 1000);
+            assert!(create_size >= 256);
         }
 
         // WHEN: the database is dropped from scope
@@ -346,7 +333,7 @@ mod tests {
         let max_page_size = 256; // fresh db so at least 256 pages for the root pages + orphan pages
         let file = File::options().read(true).open(&file_path).unwrap();
         let file_len = file.metadata().unwrap().len();
-        assert_eq!(file_len, max_page_size * 4096);
+        assert!(file_len >= max_page_size * Page::SIZE as u64);
 
         // cleanup
         tmp_dir.close().unwrap();
