@@ -16,7 +16,7 @@ cargo run trie-value -d <path to database> -i <node identifier> [-v <verbose opt
 Node identifier must be in one of these formats:
     1. Address (<0x40 hex chars>)
     2. Address hash (<0x64 hex chars>)
-    3. Storage hash (<0x128 hex chars>)
+    3. Address hash + storage hash (<0x128 hex chars>)
     4. Address with storage slot, space separated (<0x40 hex chars> <slot>)
 
 Verbose options vary the level of information written to file:

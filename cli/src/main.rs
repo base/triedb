@@ -1,4 +1,4 @@
-use alloy_primitives::{hex, Address, StorageKey, U256};
+use alloy_primitives::{hex, Address, StorageKey};
 use alloy_trie::Nibbles;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::{fs::File, str};
@@ -9,10 +9,10 @@ use triedb::{
 
 #[derive(Debug)]
 enum TrieValueIdentifier {
-    Address(String),                 // 40 chars
-    StorageHash(String),             //128 chars
-    AddressHash(String),             // 64 chars
-    AddressWithStorage(String, u32), // 40 chars + 64 chars
+    Address(String),                    // 40 chars
+    StorageHash(String),                //128 chars
+    AddressHash(String),                // 64 chars
+    AddressWithStorage(String, String), // 40 chars + 64 chars
 }
 
 #[derive(Debug)]
@@ -104,8 +104,11 @@ fn parse_trie_value_identifier(
                 return Err("Address must be 0x +40 hex characters (20 bytes)".into());
             }
             // Validate slot part 
-            let slot_int = slot.parse::<u32>()?;
-            Ok(TrieValueIdentifier::AddressWithStorage(address_hex.to_string(), slot_int))
+            let slot_hex = slot.strip_prefix("0x").unwrap_or("");
+            if slot_hex.len() >= 64 || slot_hex.len() % 2 != 0 {
+                return Err("Storage slot must be 0x +[2-64] hex characters (32 byte maximum), with an even number of characters".into());
+            }
+            Ok(TrieValueIdentifier::AddressWithStorage(address_hex.to_string(), slot_hex.to_string()))
         },
         _ => Err("Invalid identifier format. Expected either: -Address: 0x<40 chars> -Address hash: 0x<64 chars> -Storage hash: 0x<128 chars> -Address and storage slot: 0x<40 chars> <storage slot>".into()),
     }
@@ -139,7 +142,8 @@ fn identifier_to_trie_value_path(
             let address_bytes: [u8; 20] = hex::decode(address_str)?.try_into().unwrap();
             let address = Address::from_slice(&address_bytes);
 
-            let storage = StorageKey::from(U256::from(*storage_str as usize));
+            let storage_bytes = hex::decode(storage_str)?;
+            let storage = StorageKey::left_padding_from(&storage_bytes);
             Ok(TrieValuePath::Storage(StoragePath::for_address_and_slot(address, storage)))
         }
     }
