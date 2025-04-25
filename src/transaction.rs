@@ -162,7 +162,7 @@ impl Transaction<'_, RW> {
             storage_engine.set_values(&mut self.context, changes.as_mut()).unwrap();
         }
 
-        let mut transaction_manager = self.database.transaction_manager.write();
+        let mut transaction_manager = self.database.transaction_manager.lock();
         storage_engine.commit(&self.context).unwrap();
 
         self.database.update_metrics_rw(&self.context);
@@ -177,7 +177,7 @@ impl Transaction<'_, RW> {
         let storage_engine = self.database.storage_engine.write();
         storage_engine.rollback(&self.context).unwrap();
 
-        let mut transaction_manager = self.database.transaction_manager.write();
+        let mut transaction_manager = self.database.transaction_manager.lock();
         transaction_manager.remove_tx(self.context.snapshot_id, true);
 
         self.committed = false;
@@ -187,7 +187,7 @@ impl Transaction<'_, RW> {
 
 impl Transaction<'_, RO> {
     pub fn commit(mut self) -> Result<(), TransactionError> {
-        let mut transaction_manager = self.database.transaction_manager.write();
+        let mut transaction_manager = self.database.transaction_manager.lock();
         transaction_manager.remove_tx(self.context.snapshot_id, false);
 
         self.committed = true;

@@ -7,14 +7,13 @@ use crate::{
     transaction::{Transaction, TransactionError, TransactionManager, RO, RW},
 };
 use alloy_primitives::B256;
-use parking_lot::RwLock;
-
+use parking_lot::{Mutex, RwLock};
 use std::{io, path::Path};
 
 #[derive(Debug)]
 pub struct Database {
     pub(crate) storage_engine: RwLock<StorageEngine>,
-    pub(crate) transaction_manager: RwLock<TransactionManager>,
+    pub(crate) transaction_manager: Mutex<TransactionManager>,
     metrics: DatabaseMetrics,
 }
 
@@ -69,7 +68,7 @@ impl Database {
     pub fn new(storage_engine: StorageEngine) -> Self {
         Self {
             storage_engine: RwLock::new(storage_engine),
-            transaction_manager: RwLock::new(TransactionManager::new()),
+            transaction_manager: Mutex::new(TransactionManager::new()),
             metrics: DatabaseMetrics::default(),
         }
     }
@@ -124,7 +123,7 @@ impl Database {
     }
 
     pub fn begin_rw(&self) -> Result<Transaction<'_, RW>, TransactionError> {
-        let mut transaction_manager = self.transaction_manager.write();
+        let mut transaction_manager = self.transaction_manager.lock();
         let mut storage_engine = self.storage_engine.write();
         let metadata = storage_engine.metadata().dirty_slot();
         let min_snapshot_id = transaction_manager.begin_rw(metadata.snapshot_id())?;
@@ -136,7 +135,7 @@ impl Database {
     }
 
     pub fn begin_ro(&self) -> Result<Transaction<'_, RO>, TransactionError> {
-        let mut transaction_manager = self.transaction_manager.write();
+        let mut transaction_manager = self.transaction_manager.lock();
         let storage_engine = self.storage_engine.read();
         let metadata = storage_engine.metadata().active_slot();
         transaction_manager.begin_ro(metadata.snapshot_id());
