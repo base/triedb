@@ -1,15 +1,17 @@
+use alloy_primitives::{hex, Address, StorageKey, U256};
 use alloy_trie::Nibbles;
 use clap::{Parser, Subcommand, ValueEnum};
-use std::fs::File;
-use triedb::{Database, path::{AddressPath, StoragePath}};
-use alloy_primitives::{Address, StorageKey, B256, hex, U256};
-use std::str;
+use std::{fs::File, str};
+use triedb::{
+    path::{AddressPath, StoragePath},
+    Database,
+};
 
 #[derive(Debug)]
 enum TrieValueIdentifier {
-    Address(String),                // 40 chars
-    StorageHash(String), //128 chars
-    AccountHash(String), // 64 chars
+    Address(String),                 // 40 chars
+    StorageHash(String),             //128 chars
+    AddressHash(String),             // 64 chars
     AddressWithStorage(String, u32), // 40 chars + 64 chars
 }
 
@@ -61,7 +63,7 @@ enum Commands {
         /// 2. Address (0x + 40 hex chars)
         /// 3. Address with storage slot (0x + 40 hex chars + 0x + variable length)
         #[arg(short = 'i', long = "identifier", num_args = 1..)]
-        identifier: String,
+        identifier: Vec<String>,
 
         /// Output filepath (optional)
         #[arg(short = 'o', long = "output", default_value = "./account_info")]
@@ -88,9 +90,9 @@ fn parse_trie_value_identifier(
             let hex_str = parts[0].strip_prefix("0x").unwrap_or("");
             match hex_str.len() {
                 40 => Ok(TrieValueIdentifier::Address(hex_str.to_string())),
-                64 => Ok(TrieValueIdentifier::AccountHash(hex_str.to_string())),
+                64 => Ok(TrieValueIdentifier::AddressHash(hex_str.to_string())),
                 128 => Ok(TrieValueIdentifier::StorageHash(hex_str.to_string())),
-                _ => Err("Invalid identifier length. Must be either:\n- 40 hex chars for address\n- 64 or 128 hex chars for full hash\n- 40 hex chars + space + variable length for address with slot".into()),
+                _ => Err("Invalid identifier format. Expected either: -Address: 0x<40 chars> -Address hash: 0x<64 chars> -Storage hash: 0x<128 chars> -Address and storage slot: 0x<40 chars> <storage slot>".into()),
             }
         },
         2 => {
@@ -103,10 +105,9 @@ fn parse_trie_value_identifier(
             }
             // Validate slot part 
             let slot_int = slot.parse::<u32>()?;
-            println!("slot_int: {}", slot_int);
             Ok(TrieValueIdentifier::AddressWithStorage(address_hex.to_string(), slot_int))
         },
-        _ => Err("Invalid identifier format. Expected either:\n- Single hex string\n- Address and storage slot separated by space".into()),
+        _ => Err("Invalid identifier format. Expected either: -Address: 0x<40 chars> -Address hash: 0x<64 chars> -Storage hash: 0x<128 chars> -Address and storage slot: 0x<40 chars> <storage slot>".into()),
     }
 }
 
@@ -118,19 +119,21 @@ fn identifier_to_trie_value_path(
             let bytes: [u8; 20] = hex::decode(address_str)?.try_into().unwrap();
             Ok(TrieValuePath::Account(AddressPath::for_address(bytes.into())))
         }
-        TrieValueIdentifier::AccountHash(acct_str) => {
+        TrieValueIdentifier::AddressHash(acct_str) => {
             let bytes: [u8; 32] = hex::decode(acct_str)?.try_into().unwrap();
             Ok(TrieValuePath::Account(AddressPath::new(Nibbles::unpack(bytes))))
         }
         TrieValueIdentifier::StorageHash(strg_str) => {
-            let bytes: [u8; 128] = hex::decode(strg_str)?.try_into().unwrap();
-            let address_bytes: [u8; 64] = bytes[0..64].try_into().unwrap();
-            let address_path = AddressPath::new(Nibbles::from_nibbles(address_bytes));
+            let bytes: [u8; 64] = hex::decode(strg_str)?.try_into().unwrap();
+            let address_bytes: [u8; 32] = bytes[..32].try_into().unwrap();
+            let address_path = AddressPath::new(Nibbles::unpack(address_bytes));
 
-            let slot_bytes: [u8; 64] = bytes[64..128].try_into().unwrap();
-            let slot_nibbles = Nibbles::from_nibbles(slot_bytes);
-            Ok(TrieValuePath::Storage(StoragePath::for_address_path_and_slot_hash(address_path, slot_nibbles)))
-
+            let slot_bytes: [u8; 32] = bytes[32..64].try_into().unwrap();
+            let slot_nibbles = Nibbles::unpack(slot_bytes);
+            Ok(TrieValuePath::Storage(StoragePath::for_address_path_and_slot_hash(
+                address_path,
+                slot_nibbles,
+            )))
         }
         TrieValueIdentifier::AddressWithStorage(address_str, storage_str) => {
             let address_bytes: [u8; 20] = hex::decode(address_str)?.try_into().unwrap();
@@ -150,7 +153,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             print_page(&db_path, page_id, &output_path);
         }
         Commands::TrieValue { db_path, identifier, output_path, verbosity } => {
-            get_trie_value(&db_path, &identifier, &output_path, verbosity)?;
+            let identifier_str = identifier.join(" ");
+            get_trie_value(&db_path, &identifier_str, &output_path, verbosity)?;
         }
     }
 
