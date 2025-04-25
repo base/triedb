@@ -2,7 +2,7 @@ use crate::{
     context::TransactionContext,
     meta::{MetadataManager, OpenMetadataError},
     metrics::DatabaseMetrics,
-    page::{PageError, PageManager},
+    page::{PageError, PageId, PageManager},
     storage::engine::{self, StorageEngine},
     transaction::{Transaction, TransactionError, TransactionManager, RO, RW},
 };
@@ -41,24 +41,13 @@ impl Database {
 
         let mut meta_file_path = db_file_path.to_path_buf();
         meta_file_path.as_mut_os_string().push(".meta");
-        let mut meta_manager =
-            MetadataManager::open(meta_file_path).map_err(OpenError::MetadataError)?;
 
-        let mut page_manager = PageManager::options()
+        let meta_manager =
+            MetadataManager::open(meta_file_path).map_err(OpenError::MetadataError)?;
+        let page_manager = PageManager::options()
             .create_new(true)
             .open(db_file_path)
             .map_err(OpenError::PageError)?;
-
-        // TODO: Allocate the first 256 pages because the existing code requires them. Remove this
-        // later.
-        for i in 0..256 {
-            let page = page_manager.allocate(0).map_err(OpenError::PageError)?;
-            assert_eq!(page.id(), i);
-        }
-        meta_manager.dirty_slot_mut().set_page_count(256);
-
-        page_manager.commit().map_err(OpenError::PageError)?;
-        meta_manager.commit().map_err(OpenError::IO)?;
 
         Ok(Self::new(StorageEngine::new(page_manager, meta_manager)))
     }
@@ -91,7 +80,7 @@ impl Database {
         }
     }
 
-    pub fn print_page<W: io::Write>(self, buf: W, page_id: Option<u32>) -> Result<(), Error> {
+    pub fn print_page<W: io::Write>(self, buf: W, page_id: Option<PageId>) -> Result<(), Error> {
         let storage_engine = self.inner.storage_engine.read();
         let context = storage_engine.read_context();
         // TODO: Must use `expect()` because `storage::engine::Error` and `database::Error` are not
@@ -176,14 +165,11 @@ impl Drop for Database {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::{account::Account, path::AddressPath};
     use alloy_primitives::{address, U256};
     use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
-    use std::fs::File;
     use tempdir::TempDir;
-
-    use crate::{account::Account, page::Page, path::AddressPath};
-
-    use super::*;
 
     #[test]
     fn test_set_get_account() {
@@ -227,8 +213,7 @@ mod tests {
     fn test_open_resize() {
         // GIVEN: a database
         //
-        // create the database on disk. currently this
-        // will create a database with N pages (see 'create' for N).
+        // create the database on disk. currently this will create a database with 0 pages
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
         let _db = Database::create(&file_path).unwrap();
@@ -236,64 +221,8 @@ mod tests {
         // WHEN: the database is opened
         let db = Database::open(&file_path).unwrap();
 
-        // THEN: the size of the database should be the
-        // max_page_size + buffer
-        let open_size = db.size();
-        let max_page_size = 255; // fresh db has root pages + reserved orphan pages
-        assert!(open_size >= max_page_size);
-
-        // cleanup
-        tmp_dir.close().unwrap();
-    }
-
-    #[test]
-    fn test_close_resize() {
-        // GIVEN: a database
-        //
-        // create the database on disk. currently this
-        // will create a database with N pages (see 'create' for N).
-        let tmp_dir = TempDir::new("test_db").unwrap();
-        let file_path = tmp_dir.path().join("test.db");
-        let db = Database::create(&file_path).unwrap();
-        let create_size = db.size();
-        assert!(create_size >= 256);
-
-        // WHEN: the database is closed
-        db.close().unwrap();
-
-        // THEN: the size of the database should be at least large enough to contain
-        // `max_page_size`
-        let max_page_size = 256; // fresh db so at least 256 pages for the root pages + orphan pages
-        let file = File::options().read(true).open(&file_path).unwrap();
-        let file_len = file.metadata().unwrap().len();
-        assert!(file_len >= max_page_size * Page::SIZE as u64);
-
-        // cleanup
-        tmp_dir.close().unwrap();
-    }
-
-    #[test]
-    fn test_auto_close_database() {
-        // GIVEN: a database
-        //
-        // create the database on disk. currently this
-        // will create a database with N pages (see 'create' for N).
-        let tmp_dir = TempDir::new("test_db").unwrap();
-        let file_path = tmp_dir.path().join("test.db");
-
-        {
-            let db = Database::create(&file_path).unwrap();
-
-            let create_size = db.size();
-            assert!(create_size >= 256);
-        }
-
-        // WHEN: the database is dropped from scope
-        // THEN: the database should be closed and the file should be truncated
-        let max_page_size = 256; // fresh db so at least 256 pages for the root pages + orphan pages
-        let file = File::options().read(true).open(&file_path).unwrap();
-        let file_len = file.metadata().unwrap().len();
-        assert!(file_len >= max_page_size * Page::SIZE as u64);
+        // THEN: the size of the database should be 0
+        assert_eq!(db.size(), 0);
 
         // cleanup
         tmp_dir.close().unwrap();

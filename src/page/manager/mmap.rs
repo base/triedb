@@ -11,7 +11,7 @@ pub struct PageManager {
     mmap: MmapMut,
     file: File,
     file_len: u64,
-    next_page_id: PageId,
+    page_count: u32,
 }
 
 impl PageManager {
@@ -86,12 +86,12 @@ impl PageManager {
             file_len / (Page::SIZE as u64)
         );
 
-        Ok(Self { mmap, file, file_len, next_page_id: opts.page_count })
+        Ok(Self { mmap, file, file_len, page_count: opts.page_count })
     }
 
     /// Returns the number of pages currently stored in the file.
     pub fn size(&self) -> u32 {
-        self.next_page_id
+        self.page_count
     }
 
     /// Returns the maximum number of pages that can be allocated to the file.
@@ -101,28 +101,28 @@ impl PageManager {
 
     // Returns a mutable reference to the data of the page with the given id.
     fn page_data<'p>(&self, page_id: PageId) -> Result<&'p mut [u8; Page::SIZE], PageError> {
-        if page_id >= self.next_page_id {
+        if page_id > self.page_count {
             return Err(PageError::PageNotFound(page_id));
         }
-        let start = page_id as usize * Page::SIZE;
+        let start = page_id.as_offset();
         let page_data = unsafe { &mut *(self.mmap.as_ptr().add(start) as *mut [u8; Page::SIZE]) };
         Ok(page_data)
     }
 
     // Allocates a new page in the memory mapped file.
     fn allocate_page_data<'p>(&mut self) -> Result<(PageId, &'p mut [u8; Page::SIZE]), PageError> {
-        let page_id = self.next_page_id;
-        let new_len =
-            page_id.checked_add(1).ok_or(PageError::OutOfBounds(page_id))? as usize * Page::SIZE;
+        let new_count = self.page_count.checked_add(1).ok_or(PageError::PageLimitReached)?;
+        let page_id = PageId::try_from(new_count).map_err(|_| PageError::PageLimitReached)?;
+        let new_len = new_count as usize * Page::SIZE;
 
         if new_len > self.mmap.len() {
-            return Err(PageError::OutOfBounds(page_id));
+            return Err(PageError::PageLimitReached);
         }
         if new_len as u64 > self.file_len {
             self.grow()?;
         }
 
-        self.next_page_id += 1;
+        self.page_count += 1;
         let page_data = self.page_data(page_id)?;
         page_data.fill(0);
         Ok((page_id, page_data))
@@ -184,12 +184,14 @@ impl PageManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::page::page_id;
 
     #[test]
     fn test_allocate_get() {
         let mut manager = PageManager::options().max_pages(10).open_temp_file().unwrap();
 
-        for i in 0..10 {
+        for i in 1..=10 {
+            let i = PageId::new(i).unwrap();
             let err = manager.get(42, i).unwrap_err();
             assert!(matches!(err, PageError::PageNotFound(page_id) if page_id == i));
 
@@ -205,7 +207,7 @@ mod tests {
         }
 
         let err = manager.allocate(42).unwrap_err();
-        assert!(matches!(err, PageError::OutOfBounds(10)));
+        assert!(matches!(err, PageError::PageLimitReached));
     }
 
     #[test]
@@ -213,7 +215,7 @@ mod tests {
         let mut manager = PageManager::open_temp_file().unwrap();
 
         let mut page = manager.allocate(42).unwrap();
-        assert_eq!(page.id(), 0);
+        assert_eq!(page.id(), page_id!(1));
         assert_eq!(page.contents(), &mut [0; Page::DATA_SIZE]);
         assert_eq!(page.snapshot_id(), 42);
 
@@ -221,8 +223,8 @@ mod tests {
 
         manager.commit().unwrap();
 
-        let old_page = manager.get(42, 0).unwrap();
-        assert_eq!(old_page.id(), 0);
+        let old_page = manager.get(42, page_id!(1)).unwrap();
+        assert_eq!(old_page.id(), page_id!(1));
         assert_eq!(old_page.contents()[0], 1);
         assert_eq!(old_page.snapshot_id(), 42);
 
@@ -270,23 +272,23 @@ mod tests {
         for i in 0..8 {
             for j in 0..1024 {
                 let p = m.allocate(snapshot).expect("page allocation failed");
-                assert_eq!(p.id() as usize, i * 1024 + j);
+                assert_eq!(p.id().as_usize(), 1 + i * 1024 + j);
                 assert_eq!(len(&f), (i + 1) * 1024 * Page::SIZE);
             }
         }
 
         // From this point on, the automatic growth should be 12.5% (1/8).
-        for id in (8 * 1024)..(9 * 1024) {
+        for id in (1 + 8 * 1024)..=(9 * 1024) {
             let p = m.allocate(snapshot).expect("page allocation failed");
             assert_eq!(p.id(), id);
             assert_eq!(len(&f), 9 * 1024 * Page::SIZE);
         }
-        for id in (9 * 1024)..10368 {
+        for id in (1 + 9 * 1024)..=10368 {
             let p = m.allocate(snapshot).expect("page allocation failed");
             assert_eq!(p.id(), id);
             assert_eq!(len(&f), 10368 * Page::SIZE);
         }
-        for id in 10368..11664 {
+        for id in (1 + 10368)..=11664 {
             let p = m.allocate(snapshot).expect("page allocation failed");
             assert_eq!(p.id(), id);
             assert_eq!(len(&f), 11664 * Page::SIZE);

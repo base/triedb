@@ -51,8 +51,8 @@ where
 pub struct TransactionContext {
     pub(crate) snapshot_id: SnapshotId,
     pub(crate) root_node_hash: B256,
-    pub(crate) root_node_page_id: PageId,
-    pub(crate) page_count: PageId,
+    pub(crate) root_node_page_id: Option<PageId>,
+    pub(crate) page_count: u32,
     pub(crate) transaction_metrics: TransactionMetrics,
     pub(crate) contract_account_loc_cache: B512Map<(PageId, u8)>,
 }

@@ -1,4 +1,4 @@
-use crate::page::{PageError, PageId, PageManager};
+use crate::page::{Page, PageError, PageManager};
 use std::{
     fs::{File, OpenOptions},
     path::Path,
@@ -7,8 +7,8 @@ use std::{
 #[derive(Clone, Debug)]
 pub struct PageManagerOptions {
     pub(super) open_options: OpenOptions,
-    pub(super) page_count: PageId,
-    pub(super) max_pages: PageId,
+    pub(super) page_count: u32,
+    pub(super) max_pages: u32,
 }
 
 impl PageManagerOptions {
@@ -17,11 +17,11 @@ impl PageManagerOptions {
         open_options.read(true).write(true).create(true).truncate(false);
 
         let max_pages = if cfg!(not(test)) {
-            PageId::MAX
+            Page::MAX_COUNT
         } else {
             // Because tests run in parallel, it's easy to exhaust the address space, so use a more
             // conservative limit
-            PageId::MAX / 1024
+            Page::MAX_COUNT / 1024
         };
 
         Self { open_options, page_count: 0, max_pages }
@@ -48,7 +48,7 @@ impl PageManagerOptions {
     /// Sets the number of pages already written to the file.
     ///
     /// The default is `0`.
-    pub fn page_count(&mut self, page_count: PageId) -> &mut Self {
+    pub fn page_count(&mut self, page_count: u32) -> &mut Self {
         self.page_count = page_count;
         self
     }
@@ -56,7 +56,7 @@ impl PageManagerOptions {
     /// Sets the maximum number of pages that can be allocated to this file.
     ///
     /// The default is [`PageId::MAX`].
-    pub fn max_pages(&mut self, max_pages: PageId) -> &mut Self {
+    pub fn max_pages(&mut self, max_pages: u32) -> &mut Self {
         self.max_pages = max_pages;
         self
     }
