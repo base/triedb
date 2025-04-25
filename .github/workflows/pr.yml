@@ -13,12 +13,13 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
+        profile: [dev, release]
     runs-on: ${{ matrix.os }}
 
     steps:
     - uses: actions/checkout@v4
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --verbose --profile=${{ profile }}
 
   format:
     runs-on: ubuntu-latest
@@ -49,20 +50,24 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
+        profile: [dev, release]
     runs-on: ${{ matrix.os }}
 
     steps:
     - uses: actions/checkout@v4
     - name: Run unit tests
-      run: make unit-tests cargo_flags=--verbose
+      run: |
+        make unit-tests cargo_flags='--verbose --profile=${{ profile }}'
 
   integration-tests:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
+        profile: [dev, release]
     runs-on: ${{ matrix.os }}
 
     steps:
     - uses: actions/checkout@v4
     - name: Run integration tests
-      run: make integration-tests test_flags=--nocapture
+      run:
+        make integration-tests cargo_flags=--profile=${{ profile }} test_flags=--nocapture
