@@ -458,7 +458,8 @@ impl StorageEngine {
                 // that a page will be consistently evaluated, and not modified in
                 // the middle of an operation, which could result in inconsistent
                 // cell pointers.
-                Err(Error::PageSplit) => {
+                Err(Error::PageSplit(handled_total)) => {
+                    println!("handled_total: {}", handled_total);
                     context.transaction_metrics.inc_pages_split();
                     split_count += 1;
                     // FIXME: this is a temporary limit to prevent infinite loops.
@@ -635,7 +636,7 @@ impl StorageEngine {
         // TODO: use a more accurate threshold
         if slotted_page.num_free_bytes() < 1000 {
             self.split_page(context, slotted_page)?;
-            return Err(Error::PageSplit);
+            return Err(Error::PageSplit(0));
         }
 
         // Create a new branch node with the common prefix
@@ -718,7 +719,7 @@ impl StorageEngine {
             let node_size_incr = new_node_size - old_node_size;
             if slotted_page.num_free_bytes() < node_size_incr {
                 self.split_page(context, slotted_page)?;
-                return Err(Error::PageSplit);
+                return Err(Error::PageSplit(0));
             }
         }
 
@@ -891,7 +892,7 @@ impl StorageEngine {
         // when adding the new child, split the page.
         if slotted_page.num_free_bytes() < node_size_incr + new_node.size() + CELL_POINTER_SIZE {
             self.split_page(context, slotted_page)?;
-            return Err(Error::PageSplit);
+            return Err(Error::PageSplit(0));
         }
 
         let rlp_node = new_node.as_rlp_node();
@@ -1039,7 +1040,7 @@ impl StorageEngine {
                     node_size_incr + new_node.size() + CELL_POINTER_SIZE
                 {
                     self.split_page(context, slotted_page)?;
-                    return Err(Error::PageSplit);
+                    return Err(Error::PageSplit(0));
                 }
 
                 let rlp_node = new_node.as_rlp_node();
@@ -1102,7 +1103,7 @@ impl StorageEngine {
         // Partition changes by child index
         let mut remaining_changes = changes;
 
-        let mut handled_index: usize = 0;
+        let mut handled_total: usize = 0;
 
         for child_index in 0..16 {
             let split_index = remaining_changes.partition_point(|(path, _)| {
@@ -1127,24 +1128,24 @@ impl StorageEngine {
             );
             // debugging purposes, should be removed
             match result {
-                Err(Error::PageSplit) => {
+                Err(Error::PageSplit(processed)) => {
                     // todo: could add to handled_index
-                    return Err(Error::PageSplit);
+                    return Err(Error::PageSplit(processed + handled_total));
                 }
                 Err(e) => {
                     return Err(e);
                 }
                 _ => {}
             }
-            handled_index += matching_changes.len();
+            handled_total += matching_changes.len();
         }
 
-        assert!(handled_index == changes.len(), "all changes should be handled");
+        assert!(handled_total == changes.len(), "all changes should be handled");
 
         // Check if the branch node should be deleted or merged
         let pointer_change =
             self.handle_branch_node_cleanup(context, slotted_page, page_index, node)?;
-        Ok((pointer_change, handled_index))
+        Ok((pointer_change, handled_total))
     }
 
     /// Handles cleanup of branch nodes (deletion or merging)
@@ -1652,7 +1653,7 @@ pub enum Error {
     PageError(PageError),
     InvalidCommonPrefixIndex,
     InvalidSnapshotId,
-    PageSplit,
+    PageSplit(usize),
 }
 
 impl From<PageError> for Error {
