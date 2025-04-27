@@ -446,12 +446,14 @@ impl StorageEngine {
                 // TODO: this page could actually be reallocated in the same transaction,
                 // but this would require adding the page_id to a pending buffer. It would
                 // still be orphaned if unused by the end of the transaction.
-                Ok(PointerChange::Delete) => {
+                Ok((PointerChange::Delete, _)) => {
                     self.orphan_manager.add_orphaned_page_id(context.metadata.snapshot_id, page_id);
                     return Ok(PointerChange::Delete);
                 }
-                Ok(PointerChange::None) => return Ok(PointerChange::None),
-                Ok(PointerChange::Update(pointer)) => return Ok(PointerChange::Update(pointer)),
+                Ok((PointerChange::None, _)) => return Ok(PointerChange::None),
+                Ok((PointerChange::Update(pointer), _)) => {
+                    return Ok(PointerChange::Update(pointer))
+                }
                 // In the case of a page split, re-attempt the operation from scratch. This ensures
                 // that a page will be consistently evaluated, and not modified in
                 // the middle of an operation, which could result in inconsistent
@@ -942,7 +944,7 @@ impl StorageEngine {
     fn handle_child_node_traversal(
         &mut self,
         context: &mut TransactionContext,
-        matching_changes: &[(Nibbles, Option<TrieValue>)],
+        changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
         slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
@@ -962,7 +964,7 @@ impl StorageEngine {
                         // Local child node
                         self.set_values_in_cloned_page(
                             context,
-                            matching_changes,
+                            changes,
                             path_offset + common_prefix_length as u8 + 1,
                             slotted_page,
                             child_cell_index,
@@ -972,12 +974,12 @@ impl StorageEngine {
                         let child_page_id = child_location.page_id().unwrap();
                         let pointer_change = self.set_values_in_page(
                             context,
-                            matching_changes,
+                            changes,
                             path_offset + common_prefix_length as u8 + 1,
                             child_page_id,
                         )?;
-                        (pointer_change, matching_changes.len()) // todo: should have a return value
-                                                                 // for set_values_in_page
+                        (pointer_change, changes.len()) // todo: should have a return value
+                                                        // for set_values_in_page
                     };
 
                 match child_pointer_change {
@@ -1004,11 +1006,11 @@ impl StorageEngine {
                 // in this case, if the change(s) we want to make are deletes, they should be
                 // ignored as the child node already doesn't exist.
                 let index_of_first_non_delete_change =
-                    matching_changes.iter().position(|(_, value)| value.is_some());
+                    changes.iter().position(|(_, value)| value.is_some());
 
                 let matching_changes_without_leading_deletes =
                     match index_of_first_non_delete_change {
-                        Some(index) => &matching_changes[index..],
+                        Some(index) => &changes[index..],
                         None => &[],
                     };
 
@@ -1076,9 +1078,9 @@ impl StorageEngine {
                         }
                         PointerChange::None => {}
                     }
-                    handled_total
+                    handled_total + 1
                 } else {
-                    0
+                    1
                 }
             }
         };
@@ -1126,6 +1128,7 @@ impl StorageEngine {
             // debugging purposes, should be removed
             match result {
                 Err(Error::PageSplit) => {
+                    // todo: could add to handled_index
                     return Err(Error::PageSplit);
                 }
                 Err(e) => {
