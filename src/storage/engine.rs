@@ -523,6 +523,7 @@ impl StorageEngine {
             if value.is_none() {
                 let (changes_left, changes_right) = changes.split_at(shortest_common_prefix_idx);
                 let changes_right = &changes_right[1..];
+                // todo: lets not touch the returning index now
                 if changes_right.is_empty() {
                     return self.set_values_in_cloned_page(
                         context,
@@ -627,7 +628,7 @@ impl StorageEngine {
         node: &mut Node,
         common_prefix: Nibbles,
         common_prefix_length: usize,
-    ) -> Result<PointerChange, Error> {
+    ) -> Result<(PointerChange, usize), Error> {
         // Ensure page has enough space for a new branch and leaf node
         // TODO: use a more accurate threshold
         if slotted_page.num_free_bytes() < 1000 {
@@ -663,7 +664,7 @@ impl StorageEngine {
         node: &mut Node,
         path: Nibbles,
         value: Option<&TrieValue>,
-    ) -> Result<PointerChange, Error> {
+    ) -> Result<(PointerChange, usize), Error> {
         if value.is_none() {
             // Delete the node
             if node.has_children() {
@@ -680,7 +681,7 @@ impl StorageEngine {
                 page and recursively trying to process anymore \
                 changes will result in an error"
             );
-            return Ok(PointerChange::Delete);
+            return Ok((PointerChange::Delete, 1));
         }
 
         let (_, remaining_changes) = changes.split_first().unwrap();
@@ -688,9 +689,10 @@ impl StorageEngine {
         // skip if the value is the same as the current value
         if &node.value()? == value.unwrap() {
             if remaining_changes.is_empty() {
-                return Ok(PointerChange::None);
+                return Ok((PointerChange::None, 0));
             }
 
+            // todo: index + 1???
             return self.set_values_in_cloned_page(
                 context,
                 remaining_changes,
@@ -722,10 +724,14 @@ impl StorageEngine {
 
         if remaining_changes.is_empty() {
             let rlp_node = new_node.as_rlp_node();
-            Ok(PointerChange::Update(Pointer::new(
-                node_location(slotted_page.id(), page_index),
-                rlp_node,
-            )))
+            // todo: 0 is correct?
+            Ok((
+                PointerChange::Update(Pointer::new(
+                    node_location(slotted_page.id(), page_index),
+                    rlp_node,
+                )),
+                0,
+            ))
         } else {
             // Recurse with remaining changes - this should return a change to the pointer of the
             // current account node, if any
@@ -736,18 +742,24 @@ impl StorageEngine {
                 slotted_page,
                 page_index,
             );
+            // todo: verify the index
             match account_pointer_change {
-                Ok(PointerChange::Update(pointer)) => Ok(PointerChange::Update(pointer)),
-                Ok(PointerChange::None) => {
+                Ok((PointerChange::Update(pointer), idx)) => {
+                    Ok((PointerChange::Update(pointer), idx))
+                }
+                Ok((PointerChange::None, idx)) => {
                     // even if the storage is unchanged, we still need to update the RLP encoding of
                     // this account node as its contents have changed
                     let rlp_node = new_node.as_rlp_node();
-                    Ok(PointerChange::Update(Pointer::new(
-                        node_location(slotted_page.id(), page_index),
-                        rlp_node,
-                    )))
+                    Ok((
+                        PointerChange::Update(Pointer::new(
+                            node_location(slotted_page.id(), page_index),
+                            rlp_node,
+                        )),
+                        idx,
+                    ))
                 }
-                Ok(PointerChange::Delete) => {
+                Ok((PointerChange::Delete, _)) => {
                     panic!("unexpected case - account pointer is deleted after update");
                 }
                 Err(e) => Err(e),
@@ -765,20 +777,21 @@ impl StorageEngine {
         page_index: u8,
         node: &mut Node,
         common_prefix_length: usize,
-    ) -> Result<PointerChange, Error> {
+    ) -> Result<(PointerChange, usize), Error> {
         let child_pointer = node.direct_child()?;
 
         if let Some(child_pointer) = child_pointer {
             let child_pointer_change =
                 if let Some(child_cell_index) = child_pointer.location().cell_index() {
                     // Handle local child node (on same page)
-                    self.set_values_in_cloned_page(
+                    let (pointer_change, _) = self.set_values_in_cloned_page(
                         context,
                         changes,
                         path_offset + common_prefix_length as u8,
                         slotted_page,
                         child_cell_index,
-                    )?
+                    )?;
+                    pointer_change
                 } else {
                     // Handle remote child node (on different page)
                     let child_page_id = child_pointer.location().page_id().unwrap();
@@ -800,20 +813,27 @@ impl StorageEngine {
                         0,
                     )?;
                     let rlp_node = node.as_rlp_node();
-                    Ok(PointerChange::Update(Pointer::new(
-                        node_location(slotted_page.id(), page_index),
-                        rlp_node,
-                    )))
+                    Ok((
+                        PointerChange::Update(Pointer::new(
+                            node_location(slotted_page.id(), page_index),
+                            rlp_node,
+                        )),
+                        changes.len(), // todo: is this correct?
+                    ))
                 }
                 PointerChange::Delete => {
                     self.update_node_child(node, slotted_page, page_index, None, 0)?;
                     let rlp_node = node.as_rlp_node();
-                    Ok(PointerChange::Update(Pointer::new(
-                        node_location(slotted_page.id(), page_index),
-                        rlp_node,
-                    )))
+                    Ok((
+                        PointerChange::Update(Pointer::new(
+                            node_location(slotted_page.id(), page_index),
+                            rlp_node,
+                        )),
+                        changes.len(), // todo: is this correct?
+                    ))
                 }
-                PointerChange::None => Ok(PointerChange::None),
+                PointerChange::None => Ok((PointerChange::None, changes.len())), /* todo: is this
+                                                                                  * correct? */
             }
         } else {
             // The account has no storage trie yet, create a new leaf node for the first slot
@@ -839,9 +859,9 @@ impl StorageEngine {
         page_index: u8,
         node: &mut Node,
         common_prefix_length: usize,
-    ) -> Result<PointerChange, Error> {
+    ) -> Result<(PointerChange, usize), Error> {
         if changes.is_empty() {
-            return Ok(PointerChange::None);
+            return Ok((PointerChange::None, 0));
         }
 
         // the account has no storage trie yet, so we need to create a new leaf node for the first
@@ -881,10 +901,13 @@ impl StorageEngine {
 
         if remaining_changes.is_empty() {
             let rlp_node = node.as_rlp_node();
-            return Ok(PointerChange::Update(Pointer::new(
-                node_location(slotted_page.id(), page_index),
-                rlp_node,
-            )));
+            return Ok((
+                PointerChange::Update(Pointer::new(
+                    node_location(slotted_page.id(), page_index),
+                    rlp_node,
+                )),
+                1, // todo: is this correct?
+            ));
         }
 
         // Recurse with the remaining changes
@@ -926,15 +949,15 @@ impl StorageEngine {
         node: &mut Node,
         common_prefix_length: usize,
         child_index: u8,
-    ) -> Result<(), Error> {
+    ) -> Result<usize, Error> {
         // Get the child pointer for this index
         let child_pointer = node.child(child_index)?;
 
-        match child_pointer {
+        let handled_total = match child_pointer {
             Some(child_pointer) => {
                 // Child exists, traverse it
                 let child_location = child_pointer.location();
-                let child_pointer_change =
+                let (child_pointer_change, handled_total) =
                     if let Some(child_cell_index) = child_location.cell_index() {
                         // Local child node
                         self.set_values_in_cloned_page(
@@ -947,12 +970,14 @@ impl StorageEngine {
                     } else {
                         // Remote child node
                         let child_page_id = child_location.page_id().unwrap();
-                        self.set_values_in_page(
+                        let pointer_change = self.set_values_in_page(
                             context,
                             matching_changes,
                             path_offset + common_prefix_length as u8 + 1,
                             child_page_id,
-                        )?
+                        )?;
+                        (pointer_change, matching_changes.len()) // todo: should have a return value
+                                                                 // for set_values_in_page
                     };
 
                 match child_pointer_change {
@@ -970,6 +995,7 @@ impl StorageEngine {
                     }
                     PointerChange::None => {}
                 }
+                handled_total
             }
             None => {
                 // the child node does not exist, so we need to create a new leaf node with the
@@ -987,7 +1013,7 @@ impl StorageEngine {
                     };
 
                 if matching_changes_without_leading_deletes.is_empty() {
-                    return Ok(());
+                    return Ok(0);
                 }
 
                 let ((path, value), matching_changes) =
@@ -1021,7 +1047,7 @@ impl StorageEngine {
 
                 // If there are more matching changes, recurse
                 if !matching_changes.is_empty() {
-                    let child_pointer_change = self.set_values_in_cloned_page(
+                    let (child_pointer_change, handled_total) = self.set_values_in_cloned_page(
                         context,
                         matching_changes,
                         path_offset + common_prefix_length as u8 + 1,
@@ -1050,10 +1076,13 @@ impl StorageEngine {
                         }
                         PointerChange::None => {}
                     }
+                    handled_total
+                } else {
+                    0
                 }
             }
-        }
-        Ok(())
+        };
+        Ok(handled_total)
     }
 
     /// Handles traversal through a branch node. Returns a tuple of the pointer change and the
