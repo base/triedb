@@ -500,9 +500,9 @@ impl StorageEngine {
         path_offset: u8,
         slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
-    ) -> Result<PointerChange, Error> {
+    ) -> Result<(PointerChange, usize), Error> {
         if changes.is_empty() {
-            return Ok(PointerChange::None);
+            return Ok((PointerChange::None, 0));
         }
 
         let mut node = slotted_page.get_value::<Node>(page_index)?;
@@ -1056,7 +1056,8 @@ impl StorageEngine {
         Ok(())
     }
 
-    /// Handles traversal through a branch node
+    /// Handles traversal through a branch node. Returns a tuple of the pointer change and the
+    /// number of changes handled by this function.
     fn handle_branch_node_traversal(
         &mut self,
         context: &mut TransactionContext,
@@ -1066,22 +1067,24 @@ impl StorageEngine {
         page_index: u8,
         node: &mut Node,
         common_prefix_length: usize,
-    ) -> Result<PointerChange, Error> {
+    ) -> Result<(PointerChange, usize), Error> {
         // Partition changes by child index
         let mut remaining_changes = changes;
 
+        let mut handled_index: usize = 0;
+
         for child_index in 0..16 {
+            let split_index = remaining_changes.partition_point(|(path, _)| {
+                path[path_offset as usize + common_prefix_length] == child_index
+            });
             let matching_changes;
-            (matching_changes, remaining_changes) =
-                remaining_changes.split_at(remaining_changes.partition_point(|(path, _)| {
-                    path[path_offset as usize + common_prefix_length] == child_index
-                }));
+            (matching_changes, remaining_changes) = remaining_changes.split_at(split_index);
 
             if matching_changes.is_empty() {
                 continue;
             }
 
-            self.handle_child_node_traversal(
+            let result = self.handle_child_node_traversal(
                 context,
                 matching_changes,
                 path_offset,
@@ -1090,11 +1093,26 @@ impl StorageEngine {
                 node,
                 common_prefix_length,
                 child_index,
-            )?;
+            );
+            // debugging purposes, should be removed
+            match result {
+                Err(Error::PageSplit) => {
+                    return Err(Error::PageSplit);
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+                _ => {}
+            }
+            handled_index += matching_changes.len();
         }
 
+        assert!(handled_index == changes.len(), "all changes should be handled");
+
         // Check if the branch node should be deleted or merged
-        self.handle_branch_node_cleanup(context, slotted_page, page_index, node)
+        let pointer_change =
+            self.handle_branch_node_cleanup(context, slotted_page, page_index, node)?;
+        Ok((pointer_change, handled_index))
     }
 
     /// Handles cleanup of branch nodes (deletion or merging)
