@@ -424,7 +424,7 @@ impl StorageEngine {
     fn set_values_in_page(
         &mut self,
         context: &mut TransactionContext,
-        changes: &[(Nibbles, Option<TrieValue>)],
+        mut changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
         page_id: PageId,
     ) -> Result<PointerChange, Error> {
@@ -459,7 +459,13 @@ impl StorageEngine {
                 // the middle of an operation, which could result in inconsistent
                 // cell pointers.
                 Err(Error::PageSplit(handled_total)) => {
-                    println!("handled_total: {}", handled_total);
+                    changes = &changes[handled_total..];
+                    // println!(
+                    //     "Root page split, page id: {}, handled_total: {}, remaining changes: {}",
+                    //     page_id,
+                    //     handled_total,
+                    //     changes.len()
+                    // );
                     context.transaction_metrics.inc_pages_split();
                     split_count += 1;
                     // FIXME: this is a temporary limit to prevent infinite loops.
@@ -1103,7 +1109,7 @@ impl StorageEngine {
         // Partition changes by child index
         let mut remaining_changes = changes;
 
-        let mut handled_total: usize = 0;
+        let mut handled_in_children: usize = 0;
 
         for child_index in 0..16 {
             let split_index = remaining_changes.partition_point(|(path, _)| {
@@ -1126,26 +1132,32 @@ impl StorageEngine {
                 common_prefix_length,
                 child_index,
             );
-            // debugging purposes, should be removed
             match result {
                 Err(Error::PageSplit(processed)) => {
-                    // todo: could add to handled_index
-                    return Err(Error::PageSplit(processed + handled_total));
+                    // println!(
+                    //     "\t\tpage id: {}, total changes: {}, processed: {}, handled_in_children:
+                    // {}, total: {}",     slotted_page.id(),
+                    //     changes.len(),
+                    //     processed,
+                    //     handled_in_children,
+                    //     handled_in_children + processed
+                    // );
+                    return Err(Error::PageSplit(handled_in_children + processed));
                 }
                 Err(e) => {
                     return Err(e);
                 }
                 _ => {}
             }
-            handled_total += matching_changes.len();
+            handled_in_children += matching_changes.len();
         }
 
-        assert!(handled_total == changes.len(), "all changes should be handled");
+        assert!(handled_in_children == changes.len(), "all changes should be handled");
 
         // Check if the branch node should be deleted or merged
         let pointer_change =
             self.handle_branch_node_cleanup(context, slotted_page, page_index, node)?;
-        Ok((pointer_change, handled_total))
+        Ok((pointer_change, handled_in_children))
     }
 
     /// Handles cleanup of branch nodes (deletion or merging)
