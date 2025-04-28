@@ -1,13 +1,24 @@
+use alloy_primitives::{hex, Address, StorageKey};
 use alloy_trie::Nibbles;
 use clap::{Parser, Subcommand, ValueEnum};
-use std::fs::File;
-use triedb::Database;
+use std::{fs::File, str};
+use triedb::{
+    path::{AddressPath, StoragePath},
+    Database,
+};
 
 #[derive(Debug)]
-enum AccountIdentifier {
-    FullHash(String),                // 0x + 64 or 128 chars
-    Address(String),                 // 0x + 40 chars
-    AddressWithSlot(String, String), // 0x + 40 chars + 0x + variable length
+enum TrieValueIdentifier {
+    Address(String),                    // 40 chars
+    StorageHash(String),                //128 chars
+    AddressHash(String),                // 64 chars
+    AddressWithStorage(String, String), // 40 chars + 64 chars
+}
+
+#[derive(Debug)]
+enum TrieValuePath {
+    Account(AddressPath),
+    Storage(StoragePath),
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -26,7 +37,7 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Print a specific page from the database
+    /// Print a specific page or all pages from the database
     Print {
         /// Path to the database file
         #[arg(short = 'd', long = "database")]
@@ -41,8 +52,8 @@ enum Commands {
         output_path: String,
     },
 
-    /// Get information about a specific account
-    Account {
+    /// Get information about a specific Trie Value
+    TrieValue {
         /// Path to the database file
         #[arg(short = 'd', long = "database")]
         db_path: String,
@@ -51,8 +62,8 @@ enum Commands {
         /// 1. Full hash (0x + 64 or 128 hex chars)
         /// 2. Address (0x + 40 hex chars)
         /// 3. Address with storage slot (0x + 40 hex chars + 0x + variable length)
-        #[arg(short = 'i', long = "identifier")]
-        identifier: String,
+        #[arg(short = 'i', long = "identifier", num_args = 1..)]
+        identifier: Vec<String>,
 
         /// Output filepath (optional)
         #[arg(short = 'o', long = "output", default_value = "./account_info")]
@@ -79,65 +90,72 @@ enum Commands {
     },
 }
 
-fn parse_account_identifier(
+fn parse_trie_value_identifier(
     identifier: &str,
-) -> Result<AccountIdentifier, Box<dyn std::error::Error>> {
+) -> Result<TrieValueIdentifier, Box<dyn std::error::Error>> {
     // Split by whitespace to handle address + slot format
     let parts: Vec<&str> = identifier.split_whitespace().collect();
 
     match parts.len() {
         1 => {
-            let hex_str = parts[0].strip_prefix("0x").unwrap_or(parts[0]);
+            let hex_str = parts[0].strip_prefix("0x").unwrap_or("");
             match hex_str.len() {
-                40 => Ok(AccountIdentifier::Address(parts[0].to_string())),
-                64 | 128 => Ok(AccountIdentifier::FullHash(parts[0].to_string())),
-                _ => Err("Invalid identifier length. Must be either:\n- 40 hex chars for address\n- 64 or 128 hex chars for full hash\n- 40 hex chars + space + variable length for address with slot".into()),
+                40 => Ok(TrieValueIdentifier::Address(hex_str.to_string())),
+                64 => Ok(TrieValueIdentifier::AddressHash(hex_str.to_string())),
+                128 => Ok(TrieValueIdentifier::StorageHash(hex_str.to_string())),
+                _ => Err("Invalid identifier format. Expected either: -Address: 0x<40 chars> -Address hash: 0x<64 chars> -Storage hash: 0x<128 chars> -Address and storage slot: 0x<40 chars> <storage slot>".into()),
             }
         },
         2 => {
             let address = parts[0];
             let slot = parts[1];
             // Validate address part
-            let address_hex = address.strip_prefix("0x").unwrap_or(address);
+            let address_hex = address.strip_prefix("0x").unwrap_or("");
             if address_hex.len() != 40 {
-                return Err("Address part must be 40 hex characters (20 bytes)".into());
+                return Err("Address must be 0x +40 hex characters (20 bytes)".into());
             }
-            // Validate slot part has 0x prefix
-            if !slot.starts_with("0x") {
-                return Err("Storage slot must start with 0x".into());
+            // Validate slot part 
+            let slot_hex = slot.strip_prefix("0x").unwrap_or("");
+            if slot_hex.len() >= 64 || slot_hex.len() % 2 != 0 {
+                return Err("Storage slot must be 0x +[2-64] hex characters (32 byte maximum), with an even number of characters".into());
             }
-            Ok(AccountIdentifier::AddressWithSlot(address.to_string(), slot.to_string()))
+            Ok(TrieValueIdentifier::AddressWithStorage(address_hex.to_string(), slot_hex.to_string()))
         },
-        _ => Err("Invalid identifier format. Expected either:\n- Single hex string\n- Address and storage slot separated by space".into()),
+        _ => Err("Invalid identifier format. Expected either: -Address: 0x<40 chars> -Address hash: 0x<64 chars> -Storage hash: 0x<128 chars> -Address and storage slot: 0x<40 chars> <storage slot>".into()),
     }
 }
 
-fn identifier_to_nibbles(
-    identifier: &AccountIdentifier,
-) -> Result<Nibbles, Box<dyn std::error::Error>> {
+fn identifier_to_trie_value_path(
+    identifier: &TrieValueIdentifier,
+) -> Result<TrieValuePath, Box<dyn std::error::Error>> {
     match identifier {
-        AccountIdentifier::FullHash(hash) => {
-            let hex_str = hash.strip_prefix("0x").unwrap_or(hash);
-            let bytes = hex::decode(hex_str)?;
-            Ok(Nibbles::unpack(&bytes))
+        TrieValueIdentifier::Address(address_str) => {
+            let bytes: [u8; 20] = hex::decode(address_str)?.try_into().unwrap();
+            Ok(TrieValuePath::Account(AddressPath::for_address(bytes.into())))
         }
-        AccountIdentifier::Address(address) => {
-            let hex_str = address.strip_prefix("0x").unwrap_or(address);
-            let bytes = hex::decode(hex_str)?;
-            Ok(Nibbles::unpack(&bytes))
+        TrieValueIdentifier::AddressHash(acct_str) => {
+            let bytes: [u8; 32] = hex::decode(acct_str)?.try_into().unwrap();
+            Ok(TrieValuePath::Account(AddressPath::new(Nibbles::unpack(bytes))))
         }
-        AccountIdentifier::AddressWithSlot(address, slot) => {
-            let address_hex = address.strip_prefix("0x").unwrap_or(address);
-            let slot_hex = slot.strip_prefix("0x").unwrap_or(slot);
+        TrieValueIdentifier::StorageHash(strg_str) => {
+            let bytes: [u8; 64] = hex::decode(strg_str)?.try_into().unwrap();
+            let address_bytes: [u8; 32] = bytes[..32].try_into().unwrap();
+            let address_path = AddressPath::new(Nibbles::unpack(address_bytes));
 
-            let address_bytes = hex::decode(address_hex)?;
-            let slot_bytes = hex::decode(slot_hex)?;
+            let slot_bytes: [u8; 32] = bytes[32..64].try_into().unwrap();
+            let slot_nibbles = Nibbles::unpack(slot_bytes);
+            Ok(TrieValuePath::Storage(StoragePath::for_address_path_and_slot_hash(
+                address_path,
+                slot_nibbles,
+            )))
+        }
+        TrieValueIdentifier::AddressWithStorage(address_str, storage_str) => {
+            let address_bytes: [u8; 20] = hex::decode(address_str)?.try_into().unwrap();
+            let address = Address::from_slice(&address_bytes);
 
-            // Combine address and slot bytes
-            let mut combined = address_bytes;
-            combined.extend(slot_bytes);
-
-            Ok(Nibbles::unpack(&combined))
+            let storage_bytes = hex::decode(storage_str)?;
+            let storage = StorageKey::left_padding_from(&storage_bytes);
+            Ok(TrieValuePath::Storage(StoragePath::for_address_and_slot(address, storage)))
         }
     }
 }
@@ -149,8 +167,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Print { db_path, page_id, output_path } => {
             print_page(&db_path, page_id, &output_path);
         }
-        Commands::Account { db_path, identifier, output_path, verbosity } => {
-            get_account(&db_path, &identifier, &output_path, verbosity)?;
+        Commands::TrieValue { db_path, identifier, output_path, verbosity } => {
+            let identifier_str = identifier.join(" ");
+            get_trie_value(&db_path, &identifier_str, &output_path, verbosity)?;
         }
         Commands::RootPage { db_path, output_path } => {
             root_page_info(&db_path, &output_path)?;
@@ -173,7 +192,7 @@ fn print_page(db_path: &str, page_id: Option<u32>, output_path: &str) {
     }
 }
 
-fn get_account(
+fn get_trie_value(
     db_path: &str,
     identifier: &str,
     output_path: &str,
@@ -185,10 +204,10 @@ fn get_account(
     };
 
     // Parse the identifier into the appropriate format
-    let account_id = parse_account_identifier(identifier)?;
+    let trie_value_id = parse_trie_value_identifier(identifier)?;
 
-    // Convert to nibbles
-    let nibbles = identifier_to_nibbles(&account_id)?;
+    // Convert to AddressPath or StoragePath
+    let trie_value_path = identifier_to_trie_value_path(&trie_value_id)?;
 
     let output_file = File::create(output_path)?;
 
@@ -199,9 +218,14 @@ fn get_account(
         VerbosityLevel::ExtraVerbose => 2,
     };
 
-    match db.get_account_or_storage(&output_file, nibbles, verbosity_level) {
-        Ok(_) => println!("Path info printed to {}", output_path),
-        Err(e) => println!("Error printing path: {:?}", e),
+    let tx = db.begin_ro()?;
+    match trie_value_path {
+        TrieValuePath::Account(address_path) => {
+            tx.debug_account(&output_file, address_path, verbosity_level)?;
+        }
+        TrieValuePath::Storage(storage_path) => {
+            tx.debug_storage(&output_file, storage_path, verbosity_level)?;
+        }
     }
 
     Ok(())

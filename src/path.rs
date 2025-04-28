@@ -66,6 +66,10 @@ impl StoragePath {
         Self { address: address_path, slot: slot_nibbles }
     }
 
+    pub fn for_address_path_and_slot_hash(address_path: AddressPath, slot_hash: Nibbles) -> Self {
+        Self { address: address_path, slot: slot_hash }
+    }
+
     /// Returns the full 128 nibble path to the storage slot.
     pub fn full_path(&self) -> Nibbles {
         self.address.path.join(&self.slot)
