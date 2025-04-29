@@ -42,6 +42,31 @@ enum PointerChange {
     Delete,
 }
 
+#[derive(Default, Debug)]
+struct DebugPage {
+    page_nodes: DebugStats,
+    page_size: DebugStats,
+    depth: DebugStats,
+    path_prefix_length: DebugStats,
+    num_children: DebugStats,
+    //KALEY TODO ask about these
+    node_size: DebugStats,
+    serialized_node_size: DebugStats,
+}
+
+#[derive(Default, Debug)]
+
+struct DebugStats {
+    min: usize,
+    max: usize,
+    //mean is a tuple of (mean, count)
+    mean: (f64, usize),
+}
+
+
+
+
+
 impl StorageEngine {
     /// Creates a new [StorageEngine] with the given [PageManager] and [OrphanPageManager].
     pub fn new(page_manager: PageManager, orphan_manager: OrphanPageManager) -> Self {
@@ -1543,6 +1568,96 @@ impl StorageEngine {
                     _ => "".to_string(),
                 };
                 format!("StorageLeaf: {}\n", val)
+            }
+        }
+    }
+
+    pub fn debug_statistics<W: io::Write>(
+        &self,
+        context: &TransactionContext,
+        mut buf: W,
+    ) -> Result<(), Error> {
+        if context.metadata.root_subtrie_page_id == 0 {
+            return Ok(());
+        }
+
+        let page = self.get_page(context, context.metadata.root_subtrie_page_id)?;
+
+        let slotted_page = SlottedPage::try_from(page)?;
+        let mut stats = DebugPage::default();
+        self.debug_statistics_helper(context, slotted_page, 0, &mut stats)?;
+
+        writeln!(buf, "Page Statistics: {:?}", stats)?;
+        Ok(())
+    }
+
+    fn update_stats(stats: &mut DebugStats, new_val: usize) {
+        if new_val > stats.max {
+            stats.max = new_val;
+        }
+        if new_val < stats.min {
+            stats.min = new_val;
+        }
+        let sum = stats.mean.0 + new_val as f64;
+        let new_count = stats.mean.1 + 1;
+        stats.mean = (sum / new_count as f64, new_count);
+    }
+    
+    
+    fn debug_statistics_helper(
+        &self,
+        context: &TransactionContext,
+        slotted_page: SlottedPage<'_>,
+        cell_index: u8,
+        stats: &mut DebugPage,
+    ) -> Result<(), Error> {
+        let node: Node = slotted_page.get_value(cell_index)?;
+        
+        //update stats total node size and prefix length stats
+        StorageEngine::update_stats(&mut stats.node_size, node.size());
+        //StorageEngine::update_stats(&mut stats.serialized_node_size, node.serialize_into(buf));
+        StorageEngine::update_stats(&mut stats.path_prefix_length, node.prefix().len()); 
+
+        match node {
+            Node::AccountLeaf {
+                prefix: _,
+                nonce_rlp: _,
+                balance_rlp: _,
+                code_hash: _,
+                storage_root,
+            } => {
+                let value = node.value().unwrap();
+                let value_size = value.size();
+                StorageEngine::update_stats(&mut stats.node_size, value_size); 
+                               //Note: direct child is not counted as part of stats.num_children
+                if let Some(direct_child) = storage_root {
+                    let (new_slotted_page, cell_index) =
+                        self.get_slotted_page_and_index(context, &direct_child, slotted_page)?;
+
+                    self.debug_statistics_helper(context, new_slotted_page, cell_index, stats)
+                } else {
+                    Ok(())
+                }
+            }
+
+            Node::Branch { prefix, children } => {
+
+                //update num branch child nodes stats
+                let child_iter = children.into_iter().flatten();
+                let num_children = child_iter.clone().count();
+                StorageEngine::update_stats(&mut stats.num_children, num_children);
+                
+                for child in child_iter {
+                    //check if child is on same page
+                    let (new_slotted_page, cell_index) =
+                        self.get_slotted_page_and_index(context, &child, slotted_page)?;
+
+                    self.debug_statistics_helper(context, new_slotted_page, cell_index, stats)?
+                }
+                Ok(())
+            }
+            Node::StorageLeaf { prefix, value_rlp: _ } => {
+                Ok(())
             }
         }
     }

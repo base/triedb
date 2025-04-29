@@ -113,6 +113,13 @@ impl Database {
         storage_engine.print_page(&context, buf, page_id).expect("write failed");
         Ok(())
     }
+
+    pub fn print_statistics<W: io::Write>(self, buf: W) -> Result<(), Error> {
+        let metadata = self.inner.metadata.read().clone();
+        let storage_engine = self.inner.storage_engine.read();
+        storage_engine.print_statistics(&metadata, buf).expect("write failed");
+        Ok(())
+    }
 }
 
 impl Drop for Database {
