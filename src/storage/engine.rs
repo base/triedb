@@ -46,7 +46,8 @@ enum PointerChange {
 struct DebugPage {
     page_nodes: DebugStats,
     page_size: DebugStats,
-    depth: DebugStats,
+    trie_depth_nodes: DebugStats,
+    trie_depth_pages: DebugStats,
     path_prefix_length: DebugStats,
     num_children: DebugStats,
     //KALEY TODO ask about these
@@ -1585,7 +1586,7 @@ impl StorageEngine {
 
         let slotted_page = SlottedPage::try_from(page)?;
         let mut stats = DebugPage::default();
-        self.debug_statistics_helper(context, slotted_page, 0, &mut stats)?;
+        self.debug_statistics_helper(context, slotted_page, 0, 0, 1,&mut stats)?;
 
         writeln!(buf, "Page Statistics: {:?}", stats)?;
         Ok(())
@@ -1609,6 +1610,8 @@ impl StorageEngine {
         context: &TransactionContext,
         slotted_page: SlottedPage<'_>,
         cell_index: u8,
+        node_depth: usize,
+        page_depth: usize,
         stats: &mut DebugPage,
     ) -> Result<(), Error> {
         let node: Node = slotted_page.get_value(cell_index)?;
@@ -1626,21 +1629,24 @@ impl StorageEngine {
                 code_hash: _,
                 storage_root,
             } => {
-                let value = node.value().unwrap();
-                let value_size = value.size();
-                StorageEngine::update_stats(&mut stats.node_size, value_size); 
-                               //Note: direct child is not counted as part of stats.num_children
+                //Note: direct child is not counted as part of stats.num_children
                 if let Some(direct_child) = storage_root {
                     let (new_slotted_page, cell_index) =
                         self.get_slotted_page_and_index(context, &direct_child, slotted_page)?;
+                    if new_slotted_page.id() != slotted_page.id() {
+                        self.debug_statistics_helper(context, new_slotted_page, cell_index, node_depth+1, page_depth+1, stats)
+                    } else {
+                        self.debug_statistics_helper(context, new_slotted_page, cell_index, node_depth+1, page_depth, stats)
+                    }
 
-                    self.debug_statistics_helper(context, new_slotted_page, cell_index, stats)
                 } else {
+                    StorageEngine::update_stats(&mut stats.trie_depth_nodes, node_depth);
+                    StorageEngine::update_stats(&mut stats.trie_depth_pages, page_depth);
                     Ok(())
                 }
             }
 
-            Node::Branch { prefix, children } => {
+            Node::Branch { prefix:_, children } => {
 
                 //update num branch child nodes stats
                 let child_iter = children.into_iter().flatten();
@@ -1651,12 +1657,19 @@ impl StorageEngine {
                     //check if child is on same page
                     let (new_slotted_page, cell_index) =
                         self.get_slotted_page_and_index(context, &child, slotted_page)?;
+                    //update page depth if we move to a new page
+                    if new_slotted_page.id() != slotted_page.id() {
+                        self.debug_statistics_helper(context, new_slotted_page, cell_index, node_depth+1,page_depth+1, stats)?
+                    } else {
+                        self.debug_statistics_helper(context, new_slotted_page, cell_index, node_depth+1,page_depth, stats)?
+                    }
 
-                    self.debug_statistics_helper(context, new_slotted_page, cell_index, stats)?
                 }
                 Ok(())
             }
-            Node::StorageLeaf { prefix, value_rlp: _ } => {
+            Node::StorageLeaf { prefix:_, value_rlp: _ } => {
+                StorageEngine::update_stats(&mut stats.trie_depth_pages, page_depth);
+                StorageEngine::update_stats(&mut stats.trie_depth_nodes, node_depth);
                 Ok(())
             }
         }
