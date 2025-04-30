@@ -4,14 +4,14 @@ Commands should be called from the `/cli` folder for an existing database.
 
 ###Print Page###
 To print a single page of a database:
-`cargo run print -d <path to database> [-p <page_id of page to print>] [-o <output path>]
+`cargo run print -d <path to database> [-p <page_id of page to print>] [-o <output path>]`
 
 To print the whole database, omit the `page_id `:
-`cargo run print -d <path to database> 
+`cargo run print -d <path to database>`
 
 
 ###Print TrieValue Info###
-cargo run trie-value -d <path to database> -i <node identifier> [-v <verbose options>]
+`cargo run trie-value -d <path to database> -i <node identifier> [-v <verbose options>]`
 
 Node identifier must be in one of these formats:
     1. Address (<0x40 hex chars>)
