@@ -108,6 +108,21 @@ impl SlottedPage<'_> {
         let used_bytes: usize = self.cell_pointers_iter().map(|cp| cp.length() as usize).sum();
         total_bytes - free_bytes - used_bytes - 1 - CELL_POINTER_SIZE * num_cells as usize
     }
+
+    // below functions added for debug statistics
+    pub fn num_occupied_bytes(&self) -> usize {
+        let occupied_bytes = self
+            .cell_pointers_iter()
+            .filter(|cp| !cp.is_deleted())
+            .map(|cp| cp.length() as usize)
+            .sum::<usize>();
+        let pointer_bytes = CELL_POINTER_SIZE * self.num_cells() as usize;
+        occupied_bytes + pointer_bytes
+    }
+
+    pub fn num_occupied_cells(&self) -> usize {
+        self.cell_pointers_iter().filter(|cp| !cp.is_deleted()).count()
+    }
 }
 
 impl<'p> Deref for SlottedPage<'p> {

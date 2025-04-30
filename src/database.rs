@@ -116,8 +116,9 @@ impl Database {
 
     pub fn print_statistics<W: io::Write>(self, buf: W) -> Result<(), Error> {
         let metadata = self.inner.metadata.read().clone();
+        let context = TransactionContext::new(metadata);
         let storage_engine = self.inner.storage_engine.read();
-        storage_engine.print_statistics(&metadata, buf).expect("write failed");
+        storage_engine.debug_statistics(&context, buf).expect("write failed");
         Ok(())
     }
 }

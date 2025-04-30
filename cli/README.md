@@ -24,6 +24,16 @@ Verbose options vary the level of information written to file:
     2. Verbose (-v verbose): Node information for every node accessed along path to specified node
     3. Extra Verbose (-v extra-verbose): Information for each page accessed followed by information for each node accessed from that page along path to specified node
 
+###Page Statistics###
+`cargo run statistics -d <path to database> [-o <output path>]`
 
+Current stats, all presented with minimum, maxiumum, and mean:
+    * Nodes per page
+    * Bytes per page
+    * Depth of trie in nodes
+    * Depth of trie in pages
+    * Path prefix lenth
+    * Number of children per branch
+    * Node size in bytes
 
 

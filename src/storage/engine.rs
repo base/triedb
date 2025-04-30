@@ -42,20 +42,23 @@ enum PointerChange {
     Delete,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default)]
 struct DebugPage {
-    page_nodes: DebugStats,
-    page_size: DebugStats,
-    trie_depth_nodes: DebugStats,
-    trie_depth_pages: DebugStats,
+    nodes_per_page: DebugStats,
+    bytes_per_page: DebugStats,
+    depth_of_trie_in_nodes: DebugStats,
+    depth_of_trie_in_pages: DebugStats,
     path_prefix_length: DebugStats,
-    num_children: DebugStats,
+    num_children_per_branch: DebugStats,
     //KALEY TODO ask about these
-    node_size: DebugStats,
-    serialized_node_size: DebugStats,
+    node_size_in_bytes: DebugStats,
 }
 
-#[derive(Default, Debug)]
+impl Debug for DebugPage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "\nnodes_per_page: {:?}\n bytes_per_page: {:?}\n depth_of_trie_in_nodes: {:?}\n depth_of_trie_in_pages: {:?}\n path_prefix_length: {:?}\n num_children_per_branch: {:?}\n node_size_in_bytes: {:?}", self.nodes_per_page, self.bytes_per_page, self.depth_of_trie_in_nodes, self.depth_of_trie_in_pages, self.path_prefix_length, self.num_children_per_branch, self.node_size_in_bytes)
+    }
+}
 
 struct DebugStats {
     min: usize,
@@ -64,9 +67,31 @@ struct DebugStats {
     mean: (f64, usize),
 }
 
+impl DebugStats {
+    fn update_stats(&mut self, new_val: usize) {
+        if new_val > self.max {
+            self.max = new_val;
+        }
+        if new_val < self.min {
+            self.min = new_val;
+        }
+        let total_sum = self.mean.0 * self.mean.1 as f64 + new_val as f64;
+        let new_count = self.mean.1 + 1;
+        self.mean = (total_sum / new_count as f64, new_count);
+    }
+}
 
+impl Default for DebugStats {
+    fn default() -> Self {
+        Self { min: usize::MAX, max: usize::MIN, mean: (0.0, 0) }
+    }
+}
 
-
+impl Debug for DebugStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "min: {}, max: {}, mean: {}", self.min, self.max, self.mean.0)
+    }
+}
 
 impl StorageEngine {
     /// Creates a new [StorageEngine] with the given [PageManager] and [OrphanPageManager].
@@ -1586,25 +1611,19 @@ impl StorageEngine {
 
         let slotted_page = SlottedPage::try_from(page)?;
         let mut stats = DebugPage::default();
-        self.debug_statistics_helper(context, slotted_page, 0, 0, 1,&mut stats)?;
+
+        let occupied_bytes = slotted_page.num_occupied_bytes();
+        let occupied_cells = slotted_page.num_occupied_cells();
+
+        stats.bytes_per_page.update_stats(occupied_bytes);
+        stats.nodes_per_page.update_stats(occupied_cells);
+
+        self.debug_statistics_helper(context, slotted_page, 0, 1, 1, &mut stats)?;
 
         writeln!(buf, "Page Statistics: {:?}", stats)?;
         Ok(())
     }
 
-    fn update_stats(stats: &mut DebugStats, new_val: usize) {
-        if new_val > stats.max {
-            stats.max = new_val;
-        }
-        if new_val < stats.min {
-            stats.min = new_val;
-        }
-        let sum = stats.mean.0 + new_val as f64;
-        let new_count = stats.mean.1 + 1;
-        stats.mean = (sum / new_count as f64, new_count);
-    }
-    
-    
     fn debug_statistics_helper(
         &self,
         context: &TransactionContext,
@@ -1615,11 +1634,11 @@ impl StorageEngine {
         stats: &mut DebugPage,
     ) -> Result<(), Error> {
         let node: Node = slotted_page.get_value(cell_index)?;
-        
+
         //update stats total node size and prefix length stats
-        StorageEngine::update_stats(&mut stats.node_size, node.size());
+        stats.node_size_in_bytes.update_stats(node.size());
         //StorageEngine::update_stats(&mut stats.serialized_node_size, node.serialize_into(buf));
-        StorageEngine::update_stats(&mut stats.path_prefix_length, node.prefix().len()); 
+        stats.path_prefix_length.update_stats(node.prefix().len());
 
         match node {
             Node::AccountLeaf {
@@ -1633,43 +1652,80 @@ impl StorageEngine {
                 if let Some(direct_child) = storage_root {
                     let (new_slotted_page, cell_index) =
                         self.get_slotted_page_and_index(context, &direct_child, slotted_page)?;
+                    //if we move to a new page, update relevent stats
                     if new_slotted_page.id() != slotted_page.id() {
-                        self.debug_statistics_helper(context, new_slotted_page, cell_index, node_depth+1, page_depth+1, stats)
-                    } else {
-                        self.debug_statistics_helper(context, new_slotted_page, cell_index, node_depth+1, page_depth, stats)
-                    }
+                        let occupied_bytes = new_slotted_page.num_occupied_bytes();
+                        let occupied_cells = new_slotted_page.num_occupied_cells();
 
+                        stats.bytes_per_page.update_stats(occupied_bytes);
+                        stats.nodes_per_page.update_stats(occupied_cells);
+
+                        self.debug_statistics_helper(
+                            context,
+                            new_slotted_page,
+                            cell_index,
+                            node_depth + 1,
+                            page_depth + 1,
+                            stats,
+                        )
+                    } else {
+                        self.debug_statistics_helper(
+                            context,
+                            new_slotted_page,
+                            cell_index,
+                            node_depth + 1,
+                            page_depth,
+                            stats,
+                        )
+                    }
                 } else {
-                    StorageEngine::update_stats(&mut stats.trie_depth_nodes, node_depth);
-                    StorageEngine::update_stats(&mut stats.trie_depth_pages, page_depth);
+                    stats.depth_of_trie_in_nodes.update_stats(node_depth);
+                    stats.depth_of_trie_in_pages.update_stats(page_depth);
                     Ok(())
                 }
             }
 
-            Node::Branch { prefix:_, children } => {
-
+            Node::Branch { prefix: _, children } => {
                 //update num branch child nodes stats
                 let child_iter = children.into_iter().flatten();
                 let num_children = child_iter.clone().count();
-                StorageEngine::update_stats(&mut stats.num_children, num_children);
-                
+                stats.num_children_per_branch.update_stats(num_children);
+
                 for child in child_iter {
                     //check if child is on same page
                     let (new_slotted_page, cell_index) =
                         self.get_slotted_page_and_index(context, &child, slotted_page)?;
                     //update page depth if we move to a new page
                     if new_slotted_page.id() != slotted_page.id() {
-                        self.debug_statistics_helper(context, new_slotted_page, cell_index, node_depth+1,page_depth+1, stats)?
-                    } else {
-                        self.debug_statistics_helper(context, new_slotted_page, cell_index, node_depth+1,page_depth, stats)?
-                    }
+                        let occupied_bytes = new_slotted_page.num_occupied_bytes();
+                        let occupied_cells = new_slotted_page.num_occupied_cells();
 
+                        stats.bytes_per_page.update_stats(occupied_bytes);
+                        stats.nodes_per_page.update_stats(occupied_cells);
+                        self.debug_statistics_helper(
+                            context,
+                            new_slotted_page,
+                            cell_index,
+                            node_depth + 1,
+                            page_depth + 1,
+                            stats,
+                        )?
+                    } else {
+                        self.debug_statistics_helper(
+                            context,
+                            new_slotted_page,
+                            cell_index,
+                            node_depth + 1,
+                            page_depth,
+                            stats,
+                        )?
+                    }
                 }
                 Ok(())
             }
-            Node::StorageLeaf { prefix:_, value_rlp: _ } => {
-                StorageEngine::update_stats(&mut stats.trie_depth_pages, page_depth);
-                StorageEngine::update_stats(&mut stats.trie_depth_nodes, node_depth);
+            Node::StorageLeaf { prefix: _, value_rlp: _ } => {
+                stats.depth_of_trie_in_pages.update_stats(page_depth);
+                stats.depth_of_trie_in_nodes.update_stats(node_depth);
                 Ok(())
             }
         }
