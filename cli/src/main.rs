@@ -238,7 +238,7 @@ fn root_page_info(db_path: &str, output_path: &str) -> Result<(), Box<dyn std::e
     };
 
     let output_file = File::create(output_path).unwrap();
-    match db.root_page_info(db_path, &output_file) {
+    match db.root_page_info(output_file, db_path) {
         Ok(_) => println!("Info written to {}", output_path),
         Err(e) => println!("Error printing root page info: {:?}", e),
     }

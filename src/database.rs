@@ -115,12 +115,25 @@ impl Database {
         Ok(())
     }
 
-    pub fn root_page_info<W: io::Write>(self, mut buf: W) -> Result<(), Error> {
+    pub fn root_page_info<W: io::Write>(
+        self,
+        mut buf: W,
+        file_path: impl AsRef<Path>,
+    ) -> Result<(), Error> {
         let metadata = self.inner.metadata.read().clone();
-        let storage_engine = self.inner.storage_engine.read();
-        let orphaned_page_ids =
-            storage_engine.get_orphaned_page_ids().expect("failed to get orphaned page ids");
+        let page_manager =
+            PageManager::options().page_count(256).open(file_path).map_err(Error::PageError)?;
 
+        let root_page_0 = page_manager.get(0, 0).map_err(Error::PageError)?;
+        let root_page_1 = page_manager.get(0, 1).map_err(Error::PageError)?;
+
+        let root_0 = RootPage::try_from(root_page_0).map_err(Error::PageError)?;
+        let root_1 = RootPage::try_from(root_page_1).map_err(Error::PageError)?;
+
+        let root_page = if root_0.snapshot_id() > root_1.snapshot_id() { root_0 } else { root_1 };
+
+        let orphaned_page_ids =
+            root_page.get_orphaned_page_ids(&page_manager).map_err(Error::PageError)?;
         //state root
         writeln!(buf, "State Root: {:?}\n", metadata.state_root).expect("write failed");
 
