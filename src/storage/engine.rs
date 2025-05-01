@@ -168,139 +168,6 @@ impl StorageEngine {
         }
     }
 
-    pub fn print_page<W: io::Write>(
-        &self,
-        context: &TransactionContext,
-        mut buf: W,
-        page_id: Option<u32>,
-    ) -> Result<(), Error> {
-        if context.metadata.root_subtrie_page_id == 0 {
-            return Ok(());
-        }
-
-        let (page_res, print_whole_db) = match page_id {
-            Some(id) => (self.get_page(context, id), false),
-            None => (self.get_page(context, context.metadata.root_subtrie_page_id), true),
-        };
-
-        let page = page_res?;
-
-        let slotted_page = SlottedPage::try_from(page)?;
-        self.print_page_traverse(
-            context,
-            slotted_page,
-            0,
-            String::from(""),
-            buf.by_ref(),
-            print_whole_db,
-        )
-    }
-
-    fn get_slotted_page_and_index<'p>(
-        &self,
-        context: &TransactionContext,
-        pointer: &Pointer,
-        current_slotted_page: SlottedPage<'p>,
-    ) -> Result<(SlottedPage<'p>, u8), Error> {
-        if let Some(page_id) = pointer.location().page_id() {
-            let page = self.get_page(context, page_id)?;
-            let slotted_page = SlottedPage::try_from(page)?;
-            Ok((slotted_page, 0))
-        } else {
-            let cell_index = pointer.location().cell_index().unwrap();
-            Ok((current_slotted_page, cell_index))
-        }
-    }
-
-    fn print_page_traverse(
-        &self,
-        context: &TransactionContext,
-        slotted_page: SlottedPage<'_>,
-        cell_index: u8,
-        indent: String,
-        buf: &mut impl io::Write,
-        print_whole_db: bool,
-    ) -> Result<(), Error> {
-        let node: Node = slotted_page.get_value(cell_index)?;
-
-        let val = match node.value() {
-            Ok(TrieValue::Account(acct)) => {
-                format!("nonce: {:?}, balance: {:?}", acct.nonce, acct.balance)
-            }
-            Ok(TrieValue::Storage(strg)) => strg.to_string(),
-            _ => "".to_string(),
-        };
-
-        match node {
-            Node::AccountLeaf {
-                prefix: _,
-                nonce_rlp: _,
-                balance_rlp: _,
-                code_hash: _,
-                storage_root,
-            } => {
-                writeln!(buf, "{}Account leaf: {:?}", indent, val)?;
-                let mut new_indent = indent.clone();
-                new_indent.push('\t');
-
-                if let Some(direct_child) = storage_root {
-                    let (new_slotted_page, cell_index) =
-                        self.get_slotted_page_and_index(context, &direct_child, slotted_page)?;
-                    // child is on different page, and we are only printing the current page
-                    if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
-                        let child_page_id = direct_child.location().page_id().unwrap();
-                        writeln!(buf, "{}Child on new page: {:?}", new_indent, child_page_id)?;
-                        Ok(())
-                    } else {
-                        self.print_page_traverse(
-                            context,
-                            new_slotted_page,
-                            cell_index,
-                            new_indent,
-                            buf,
-                            print_whole_db,
-                        )
-                    }
-                } else {
-                    writeln!(buf, "{}No direct child", new_indent)?;
-                    Ok(())
-                }
-            }
-
-            Node::Branch { prefix: _, children } => {
-                writeln!(buf, "{}Branch, Page ID: {:?}", indent, slotted_page.id())?;
-                for child in children.into_iter().flatten() {
-                    let mut new_indent = indent.clone();
-                    new_indent.push('\t');
-
-                    //check if child is on same page
-                    let (new_slotted_page, cell_index) =
-                        self.get_slotted_page_and_index(context, &child, slotted_page)?;
-                    // child is on new page, and we are only printing the current page
-                    if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
-                        let child_page_id = child.location().page_id().unwrap();
-                        writeln!(buf, "{}Child on new page: {:?}", new_indent, child_page_id)?;
-                        return Ok(())
-                    } else {
-                        self.print_page_traverse(
-                            context,
-                            new_slotted_page,
-                            cell_index,
-                            new_indent,
-                            buf,
-                            print_whole_db,
-                        )?
-                    }
-                }
-                Ok(())
-            }
-            Node::StorageLeaf { prefix: _, value_rlp: _ } => {
-                writeln!(buf, "{}Storage leaf: {:?}", indent, val)?;
-                Ok(())
-            }
-        }
-    }
-
     /// Retrieves a [TrieValue] from the given page or any of its descendants.
     /// Returns [None] if the path is not found.
     fn get_value_from_page(
@@ -1385,6 +1252,316 @@ impl StorageEngine {
     pub fn size(&self) -> u32 {
         self.page_manager.size()
     }
+
+    fn get_slotted_page_and_index<'p>(
+        &self,
+        context: &TransactionContext,
+        pointer: &Pointer,
+        current_slotted_page: SlottedPage<'p>,
+    ) -> Result<(SlottedPage<'p>, u8), Error> {
+        if let Some(page_id) = pointer.location().page_id() {
+            let page = self.get_page(context, page_id)?;
+            let slotted_page = SlottedPage::try_from(page)?;
+            Ok((slotted_page, 0))
+        } else {
+            let cell_index = pointer.location().cell_index().unwrap();
+            Ok((current_slotted_page, cell_index))
+        }
+    }
+
+    // Below functions are for debugging purposes- see 'cli/README.md' for more information'
+
+    /// Writes the nodes and info of a given page of the trie to file, with children nested under
+    /// parent branches. If page_id is None, writes the entire trie
+    pub fn print_page<W: io::Write>(
+        &self,
+        context: &TransactionContext,
+        mut buf: W,
+        page_id: Option<u32>,
+    ) -> Result<(), Error> {
+        if context.metadata.root_subtrie_page_id == 0 {
+            return Ok(());
+        }
+
+        let (page_res, print_whole_db) = match page_id {
+            Some(id) => (self.get_page(context, id), false),
+            None => (self.get_page(context, context.metadata.root_subtrie_page_id), true),
+        };
+
+        let page = page_res?;
+
+        let slotted_page = SlottedPage::try_from(page)?;
+        self.print_page_helper(
+            context,
+            slotted_page,
+            0,
+            String::from(""),
+            buf.by_ref(),
+            print_whole_db,
+        )
+    }
+
+    fn print_page_helper(
+        &self,
+        context: &TransactionContext,
+        slotted_page: SlottedPage<'_>,
+        cell_index: u8,
+        indent: String,
+        buf: &mut impl io::Write,
+        print_whole_db: bool,
+    ) -> Result<(), Error> {
+        let node: Node = slotted_page.get_value(cell_index)?;
+
+        match node {
+            Node::AccountLeaf {
+                prefix: _,
+                nonce_rlp: _,
+                balance_rlp: _,
+                code_hash: _,
+                ref storage_root,
+            } => {
+                StorageEngine::write_node_value(&node, slotted_page.id(), buf, &indent)?;
+                let mut new_indent = indent.clone();
+                new_indent.push('\t');
+
+                if let Some(direct_child) = storage_root {
+                    let (new_slotted_page, cell_index) =
+                        self.get_slotted_page_and_index(context, direct_child, slotted_page)?;
+                    // child is on different page, and we are only printing the current page
+                    if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
+                        let child_page_id = direct_child.location().page_id().unwrap();
+                        writeln!(buf, "{}Child on new page: {:?}", new_indent, child_page_id)?;
+                        Ok(())
+                    } else {
+                        self.print_page_helper(
+                            context,
+                            new_slotted_page,
+                            cell_index,
+                            new_indent,
+                            buf,
+                            print_whole_db,
+                        )
+                    }
+                } else {
+                    writeln!(buf, "{}No direct child", new_indent)?;
+                    Ok(())
+                }
+            }
+
+            Node::Branch { prefix: _, ref children } => {
+                StorageEngine::write_node_value(&node.clone(), slotted_page.id(), buf, &indent)?;
+                for child in children.iter().flatten() {
+                    let mut new_indent = indent.clone();
+                    new_indent.push('\t');
+
+                    //check if child is on same page
+                    let (new_slotted_page, cell_index) =
+                        self.get_slotted_page_and_index(context, child, slotted_page)?;
+                    // child is on new page, and we are only printing the current page
+                    if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
+                        let child_page_id = child.location().page_id().unwrap();
+                        writeln!(buf, "{}Child on new page: {:?}", new_indent, child_page_id)?;
+                        return Ok(())
+                    } else {
+                        self.print_page_helper(
+                            context,
+                            new_slotted_page,
+                            cell_index,
+                            new_indent,
+                            buf,
+                            print_whole_db,
+                        )?
+                    }
+                }
+                Ok(())
+            }
+            Node::StorageLeaf { prefix: _, value_rlp: _ } => {
+                StorageEngine::write_node_value(&node, slotted_page.id(), buf, &indent)?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Prints information about a given TrieValue.
+    /// Verbose option: writes information about nodes visited along the path to file
+    /// Extra-verbose option: writes information about pages visited along path to file
+    pub fn print_path<W: io::Write>(
+        &self,
+        context: &TransactionContext,
+        path: &Nibbles,
+        mut buf: W,
+        verbosity_level: u32,
+    ) -> Result<(), Error> {
+        let page_id = context.metadata.root_subtrie_page_id;
+        let page = self.get_page(context, page_id)?;
+        let slotted_page = SlottedPage::try_from(page)?;
+
+        // If extra_verbose, print the root page first
+        match verbosity_level {
+            0 => (),
+            1 => {
+                //verbose; print page ID and nodes accessed from page
+                writeln!(buf, "\nNODES ACCESSED FROM PAGE {}\n", page_id)?;
+            }
+            2 => {
+                //extra verbose; print page ID, nodes accessed from page, and page contents
+                writeln!(buf, "PAGE: {}\n", page_id)?;
+
+                self.print_page(context, &mut buf, Some(page_id))?;
+                writeln!(buf, "\nNODES ACCESSED FROM PAGE {}:", page_id)?;
+            }
+            _ => return Err(Error::DebugError("Invalid verbosity level".to_string())),
+        }
+
+        self.print_path_helper(context, path, 0, slotted_page, 0, buf.by_ref(), verbosity_level)
+    }
+
+    fn print_path_helper(
+        &self,
+        context: &TransactionContext,
+        path: &Nibbles,
+        path_offset: usize,
+        slotted_page: SlottedPage<'_>,
+        page_index: u8,
+        buf: &mut impl io::Write,
+        verbosity_level: u32,
+    ) -> Result<(), Error> {
+        let node: Node = slotted_page.get_value(page_index)?;
+
+        if verbosity_level > 0 {
+            // Write node information with indentation
+            StorageEngine::write_node_value(&node, slotted_page.id(), buf, "")?;
+        }
+
+        let common_prefix_length =
+            nybbles::common_prefix_length(&path[path_offset..], node.prefix());
+
+        if common_prefix_length < node.prefix().len() {
+            writeln!(buf, "NODE NOT FOUND\n")?;
+            return Ok(());
+        }
+
+        let remaining_path = &path[path_offset + common_prefix_length..];
+
+        if remaining_path.is_empty() {
+            //write only this node's information to file
+            writeln!(buf, "\n\nREQUESTED NODE:")?;
+            StorageEngine::write_node_value(&node, slotted_page.id(), buf, "")?;
+
+            return Ok(());
+        }
+
+        let (child_pointer, new_path_offset) = match node {
+            AccountLeaf { ref storage_root, .. } => {
+                (storage_root.as_ref(), path_offset + common_prefix_length)
+            }
+            Branch { ref children, .. } => (
+                children[remaining_path[0] as usize].as_ref(),
+                path_offset + common_prefix_length + 1,
+            ),
+            _ => unreachable!(),
+        };
+
+        match child_pointer {
+            Some(child_pointer) => {
+                let (child_slotted_page, child_cell_index) =
+                    self.get_slotted_page_and_index(context, child_pointer, slotted_page)?;
+
+                // If we're moving to a new page and extra_verbose is true, print the new page
+                if child_slotted_page.id() != slotted_page.id() {
+                    if verbosity_level == 2 {
+                        //extra verbose; print new page contents
+                        writeln!(buf, "\n\n\nNEW PAGE: {}\n", child_slotted_page.id())?;
+                        self.print_page(context, &mut *buf, Some(child_slotted_page.id()))?;
+                    }
+
+                    if verbosity_level > 0 {
+                        writeln!(buf, "\nNODES ACCESSED FROM PAGE {}\n", child_slotted_page.id())?;
+                    }
+                }
+
+                self.print_path_helper(
+                    context,
+                    path,
+                    new_path_offset,
+                    child_slotted_page,
+                    child_cell_index,
+                    buf,
+                    verbosity_level,
+                )
+            }
+
+            None => {
+                writeln!(buf, "NODE NOT FOUND\n")?;
+                Ok(())
+            }
+        }
+    }
+
+    // Helper function to convert node information to string for printing/writing to file
+    fn write_node_value<W: io::Write>(
+        node: &Node,
+        page_id: u32,
+        buf: &mut W,
+        indent: &str,
+    ) -> Result<(), Error> {
+        match &node {
+            Node::Branch { prefix, children } => {
+                writeln!(
+                    buf,
+                    "{}Branch Node:  Page ID: {}  Children: {:?}, Prefix: {}",
+                    indent,
+                    page_id,
+                    children
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, child)| child.is_some())
+                        .map(|(i, _)| i.to_string())
+                        .collect::<Vec<_>>(),
+                    alloy_primitives::hex::encode(prefix.pack())
+                )?;
+                Ok(())
+            }
+            Node::AccountLeaf {
+                prefix,
+                nonce_rlp: _,
+                balance_rlp: _,
+                code_hash: _,
+                storage_root: _,
+            } => {
+                match node.value() {
+                    Ok(TrieValue::Account(acct)) => {
+                        writeln!(
+                            buf,
+                            "{}AccountLeaf: nonce: {:?}, balance: {:?}, prefix: {}, code_hash: {:x?}, storage_root: {:?}",
+                            indent,
+                            acct.nonce, acct.balance, alloy_primitives::hex::encode(prefix.pack()), acct.code_hash, acct.storage_root,
+                        )?;
+                    }
+                    _ => {
+                        writeln!(buf, "{}AccountLeaf: no value ", indent)?;
+                    }
+                };
+                Ok(())
+            }
+            Node::StorageLeaf { prefix, value_rlp: _ } => {
+                match node.value() {
+                    Ok(TrieValue::Storage(strg)) => {
+                        let str_prefix = alloy_primitives::hex::encode(prefix.pack());
+                        writeln!(
+                            buf,
+                            "{}StorageLeaf: storage: {:?}, prefix: {}",
+                            indent, strg, str_prefix
+                        )?;
+                    }
+                    _ => {
+                        writeln!(buf, "{}StorageLeaf: no value", indent)?;
+                    }
+                };
+                Ok(())
+            }
+        }
+    }
 }
 
 fn node_location(page_id: PageId, page_index: u8) -> Location {
@@ -1585,6 +1762,7 @@ pub enum Error {
     InvalidCommonPrefixIndex,
     InvalidSnapshotId,
     PageSplit,
+    DebugError(String),
 }
 
 impl From<PageError> for Error {
