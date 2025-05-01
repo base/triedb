@@ -1312,23 +1312,21 @@ impl StorageEngine {
     ) -> Result<(), Error> {
         let node: Node = slotted_page.get_value(cell_index)?;
 
-        let node_val = StorageEngine::node_value_to_string(&node, slotted_page.id());
-
         match node {
             Node::AccountLeaf {
                 prefix: _,
                 nonce_rlp: _,
                 balance_rlp: _,
                 code_hash: _,
-                storage_root,
+                ref storage_root,
             } => {
-                writeln!(buf, "{}Account leaf: {:?}", indent, node_val)?;
+                StorageEngine::write_node_value(&node, slotted_page.id(), buf, &indent)?;
                 let mut new_indent = indent.clone();
                 new_indent.push('\t');
 
                 if let Some(direct_child) = storage_root {
                     let (new_slotted_page, cell_index) =
-                        self.get_slotted_page_and_index(context, &direct_child, slotted_page)?;
+                        self.get_slotted_page_and_index(context, direct_child, slotted_page)?;
                     // child is on different page, and we are only printing the current page
                     if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
                         let child_page_id = direct_child.location().page_id().unwrap();
@@ -1350,15 +1348,15 @@ impl StorageEngine {
                 }
             }
 
-            Node::Branch { prefix: _, children } => {
-                writeln!(buf, "{}Branch, Page ID: {:?}", indent, slotted_page.id())?;
-                for child in children.into_iter().flatten() {
+            Node::Branch { prefix: _, ref children } => {
+                StorageEngine::write_node_value(&node.clone(), slotted_page.id(), buf, &indent)?;
+                for child in children.iter().flatten() {
                     let mut new_indent = indent.clone();
                     new_indent.push('\t');
 
                     //check if child is on same page
                     let (new_slotted_page, cell_index) =
-                        self.get_slotted_page_and_index(context, &child, slotted_page)?;
+                        self.get_slotted_page_and_index(context, child, slotted_page)?;
                     // child is on new page, and we are only printing the current page
                     if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
                         let child_page_id = child.location().page_id().unwrap();
@@ -1378,7 +1376,7 @@ impl StorageEngine {
                 Ok(())
             }
             Node::StorageLeaf { prefix: _, value_rlp: _ } => {
-                writeln!(buf, "{}Storage leaf: {:?}", indent, node_val)?;
+                StorageEngine::write_node_value(&node, slotted_page.id(), buf, &indent)?;
                 Ok(())
             }
         }
@@ -1410,6 +1408,7 @@ impl StorageEngine {
                 writeln!(buf, "PAGE: {}\n", page_id)?;
 
                 self.print_page(context, &mut buf, Some(page_id))?;
+                writeln!(buf, "\nNODES ACCESSED FROM PAGE {}:", page_id)?;
             }
             _ => return Err(Error::DebugError("Invalid verbosity level".to_string())),
         }
@@ -1431,8 +1430,7 @@ impl StorageEngine {
 
         if verbosity_level > 0 {
             // Write node information with indentation
-            let node_string = StorageEngine::node_value_to_string(&node, slotted_page.id());
-            writeln!(buf, "{}", node_string)?;
+            StorageEngine::write_node_value(&node, slotted_page.id(), buf, "")?;
         }
 
         let common_prefix_length =
@@ -1447,8 +1445,8 @@ impl StorageEngine {
 
         if remaining_path.is_empty() {
             //write only this node's information to file
-            let node_string = StorageEngine::node_value_to_string(&node, slotted_page.id());
-            writeln!(buf, "REQUESTED NODE:\n{}", node_string)?;
+            writeln!(buf, "\n\nREQUESTED NODE:")?;
+            StorageEngine::write_node_value(&node, slotted_page.id(), buf, "")?;
 
             return Ok(());
         }
@@ -1501,20 +1499,28 @@ impl StorageEngine {
     }
 
     // Helper function to convert node information to string for printing/writing to file
-    fn node_value_to_string(node: &Node, page_id: u32) -> String {
+    fn write_node_value<W: io::Write>(
+        node: &Node,
+        page_id: u32,
+        buf: &mut W,
+        indent: &str,
+    ) -> Result<(), Error> {
         match &node {
             Node::Branch { prefix, children } => {
-                format!(
-                    "Branch Node:  Page ID: {}  Children: {:?}, Prefix: {}\n",
+                writeln!(
+                    buf,
+                    "{}Branch Node:  Page ID: {}  Children: {:?}, Prefix: {}",
+                    indent,
                     page_id,
                     children
                         .iter()
                         .enumerate()
                         .filter(|(_, child)| child.is_some())
-                        .map(|(i, _)| format!("{}", i))
+                        .map(|(i, _)| i.to_string())
                         .collect::<Vec<_>>(),
                     alloy_primitives::hex::encode(prefix.pack())
-                )
+                )?;
+                Ok(())
             }
             Node::AccountLeaf {
                 prefix,
@@ -1523,33 +1529,38 @@ impl StorageEngine {
                 code_hash: _,
                 storage_root: _,
             } => {
-                let val = match node.value() {
+                match node.value() {
                     Ok(TrieValue::Account(acct)) => {
-                        format!(
-                        "nonce: {:?}, balance: {:?}, prefix: {}, code_hash: {:x?}, storage_root: {:?}",
-                        acct.nonce, acct.balance, alloy_primitives::hex::encode(prefix.pack()), acct.code_hash, acct.storage_root,
-                    )
+                        writeln!(
+                            buf,
+                            "{}AccountLeaf: nonce: {:?}, balance: {:?}, prefix: {}, code_hash: {:x?}, storage_root: {:?}",
+                            indent,
+                            acct.nonce, acct.balance, alloy_primitives::hex::encode(prefix.pack()), acct.code_hash, acct.storage_root,
+                        )?;
                     }
-                    _ => "".to_string(),
+                    _ => {
+                        writeln!(buf, "{}AccountLeaf: no value ", indent)?;
+                    }
                 };
-                format!("AccountLeaf: {}\n", val)
+                Ok(())
             }
             Node::StorageLeaf { prefix, value_rlp: _ } => {
-                let val = match node.value() {
+                match node.value() {
                     Ok(TrieValue::Storage(strg)) => {
                         let str_prefix = alloy_primitives::hex::encode(prefix.pack());
-                        format!("storage: {:?}, prefix: {}", strg, str_prefix)
+                        writeln!(
+                            buf,
+                            "{}StorageLeaf: storage: {:?}, prefix: {}",
+                            indent, strg, str_prefix
+                        )?;
                     }
-                    _ => "".to_string(),
+                    _ => {
+                        writeln!(buf, "{}StorageLeaf: no value", indent)?;
+                    }
                 };
-                format!("StorageLeaf: {}\n", val)
+                Ok(())
             }
         }
-    }
-
-    pub fn get_orphaned_page_ids(&self) -> Result<Vec<&PageId>, Error> {
-        let orphaned_page_ids = self.orphan_manager.iter().collect::<Vec<_>>();
-        Ok(orphaned_page_ids)
     }
 }
 

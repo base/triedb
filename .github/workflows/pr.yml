@@ -19,7 +19,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Build
-      run: cargo build --verbose --profile=${{ profile }}
+      run: cargo build --verbose --profile=${{ matrix.profile }}
 
   format:
     runs-on: ubuntu-latest
@@ -57,7 +57,7 @@ jobs:
     - uses: actions/checkout@v4
     - name: Run unit tests
       run: |
-        make unit-tests cargo_flags='--verbose --profile=${{ profile }}'
+        make unit-tests cargo_flags='--verbose --profile=${{ matrix.profile }}'
 
   integration-tests:
     strategy:
@@ -70,4 +70,4 @@ jobs:
     - uses: actions/checkout@v4
     - name: Run integration tests
       run:
-        make integration-tests cargo_flags=--profile=${{ profile }} test_flags=--nocapture
+        make integration-tests cargo_flags=--profile=${{ matrix.profile }} test_flags=--nocapture
