@@ -33,7 +33,7 @@ Prints the state root, root subtrie page ID, and orphaned pages list.
 ### Page Statistics ###
 `cargo run statistics -d <path to database> [-o <output path>]`
 
-Current stats, all presented with minimum, maxiumum, and mean:
+Current stats, all presented with minimum, maxiumum, and mean:  
   * Nodes per page
   * Bytes per page
   * Depth of trie in nodes
