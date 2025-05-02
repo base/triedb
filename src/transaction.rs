@@ -109,8 +109,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         address_path: AddressPath,
         verbosity_level: u32,
     ) -> Result<(), TransactionError> {
-        let metadata = self.context.metadata.clone();
-        let context = TransactionContext::new(metadata);
+        let context = self.context.clone();
         let storage_engine = self.database.inner.storage_engine.read();
 
         storage_engine
@@ -125,8 +124,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         storage_path: StoragePath,
         verbosity_level: u32,
     ) -> Result<(), TransactionError> {
-        let metadata = self.context.metadata.clone();
-        let context = TransactionContext::new(metadata);
+        let context = self.context.clone();
         let storage_engine = self.database.inner.storage_engine.read();
 
         storage_engine
