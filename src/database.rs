@@ -9,6 +9,7 @@ use crate::{
 use alloy_primitives::B256;
 use alloy_trie::EMPTY_ROOT_HASH;
 use parking_lot::RwLock;
+
 use std::{io, path::Path};
 
 #[derive(Debug)]
@@ -111,6 +112,38 @@ impl Database {
         // compatible. There's probably no reason to use two different error enums here, so maybe
         // we should unify them. Or maybe we could just rely on `std::io::Error`.
         storage_engine.print_page(&context, buf, page_id).expect("write failed");
+        Ok(())
+    }
+
+    pub fn root_page_info<W: io::Write>(
+        self,
+        mut buf: W,
+        file_path: impl AsRef<Path>,
+    ) -> Result<(), Error> {
+        let metadata = self.inner.metadata.read().clone();
+        let page_manager =
+            PageManager::options().page_count(256).open(file_path).map_err(Error::PageError)?;
+
+        let root_page_0 = page_manager.get(0, 0).map_err(Error::PageError)?;
+        let root_page_1 = page_manager.get(0, 1).map_err(Error::PageError)?;
+
+        let root_0 = RootPage::try_from(root_page_0).map_err(Error::PageError)?;
+        let root_1 = RootPage::try_from(root_page_1).map_err(Error::PageError)?;
+
+        let root_page = if root_0.snapshot_id() > root_1.snapshot_id() { root_0 } else { root_1 };
+
+        let orphaned_page_ids =
+            root_page.get_orphaned_page_ids(&page_manager).map_err(Error::PageError)?;
+        //state root
+        writeln!(buf, "State Root: {:?}\n", metadata.state_root).expect("write failed");
+
+        //root subtrie pageID
+        writeln!(buf, "Root Subtrie Page ID: {:?}\n", metadata.root_subtrie_page_id)
+            .expect("write failed");
+
+        //orphaned pages list (grouped by page)
+        writeln!(buf, "Orphaned Pages: {:?}\n", orphaned_page_ids).expect("write failed");
+
         Ok(())
     }
 

@@ -78,6 +78,17 @@ enum Commands {
         verbosity: VerbosityLevel,
     },
 
+    /// Print database information derived from RootPage
+    RootPage {
+        /// Path to the database file
+        #[arg(short = 'd', long = "database")]
+        db_path: String,
+
+        /// Output filepath (optional)
+        #[arg(short = 'o', long = "output", default_value = "./root_page_info")]
+        output_path: String,
+    },
+
     /// Print statistics about the database
     Statistics {
         /// Path to the database file
@@ -171,6 +182,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let identifier_str = identifier.join(" ");
             get_trie_value(&db_path, &identifier_str, &output_path, verbosity)?;
         }
+        Commands::RootPage { db_path, output_path } => {
+            root_page_info(&db_path, &output_path)?;
+        }
         Commands::Statistics { db_path, output_path } => {
             print_statistics(&db_path, &output_path)?;
         }
@@ -244,3 +258,17 @@ fn print_statistics(db_path: &str, output_path: &str) -> Result<(), Box<dyn std:
     }
     Ok(())
 }       
+
+fn root_page_info(db_path: &str, output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let db = match Database::open(db_path) {
+        Ok(db) => db,
+        Err(e) => panic!("Could not open database: {:?}", e),
+    };
+
+    let output_file = File::create(output_path).unwrap();
+    match db.root_page_info(output_file, db_path) {
+        Ok(_) => println!("Info written to {}", output_path),
+        Err(e) => println!("Error printing root page info: {:?}", e),
+    }
+    Ok(())
+}
