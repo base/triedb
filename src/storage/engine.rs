@@ -454,18 +454,11 @@ impl StorageEngine {
                 Ok((PointerChange::Update(pointer), _)) => {
                     return Ok(PointerChange::Update(pointer))
                 }
-                // In the case of a page split, re-attempt the operation from scratch. This ensures
-                // that a page will be consistently evaluated, and not modified in
-                // the middle of an operation, which could result in inconsistent
-                // cell pointers.
+                // In the case of a page split, re-attempt the operation with the remaining changes.
+                // This ensures that a page will be consistently evaluated, and not modified in the
+                // middle of an operation, which could result in inconsistent cell pointers.
                 Err(Error::PageSplit(handled_total)) => {
                     changes = &changes[handled_total..];
-                    // println!(
-                    //     "Root page split, page id: {}, handled_total: {}, remaining changes: {}",
-                    //     page_id,
-                    //     handled_total,
-                    //     changes.len()
-                    // );
                     context.transaction_metrics.inc_pages_split();
                     split_count += 1;
                     // FIXME: this is a temporary limit to prevent infinite loops.
@@ -499,8 +492,7 @@ impl StorageEngine {
     /// - `page_index`: Index of the current node in the page
     ///
     /// # Returns
-    /// - `Ok(Some(Pointer))`: Pointer to the modified node
-    /// - `Ok(None)`: Node was deleted
+    /// - `Ok((PointerChange, usize))`: the pointer change value and the number of changes handled
     /// - `Err(Error)`: Operation failed, possibly due to page split
     fn set_values_in_cloned_page(
         &mut self,
@@ -532,7 +524,6 @@ impl StorageEngine {
             if value.is_none() {
                 let (changes_left, changes_right) = changes.split_at(shortest_common_prefix_idx);
                 let changes_right = &changes_right[1..];
-                // todo: lets not touch the returning index now
                 if changes_right.is_empty() {
                     return self.set_values_in_cloned_page(
                         context,
@@ -698,7 +689,7 @@ impl StorageEngine {
         // skip if the value is the same as the current value
         if &node.value()? == value.unwrap() {
             if remaining_changes.is_empty() {
-                return Ok((PointerChange::None, 0));
+                return Ok((PointerChange::None, 1));
             }
 
             // todo: index + 1???
@@ -1134,14 +1125,6 @@ impl StorageEngine {
             );
             match result {
                 Err(Error::PageSplit(processed)) => {
-                    // println!(
-                    //     "\t\tpage id: {}, total changes: {}, processed: {}, handled_in_children:
-                    // {}, total: {}",     slotted_page.id(),
-                    //     changes.len(),
-                    //     processed,
-                    //     handled_in_children,
-                    //     handled_in_children + processed
-                    // );
                     return Err(Error::PageSplit(handled_in_children + processed));
                 }
                 Err(e) => {

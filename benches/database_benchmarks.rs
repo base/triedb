@@ -643,18 +643,18 @@ fn bench_mixed_operations(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_reads,
+    // bench_reads,
     bench_inserts,
-    bench_updates,
-    bench_deletes,
-    bench_mixed_operations,
-    bench_storage_reads_single_account,
-    bench_storage_reads_multiple_accounts,
-    bench_storage_inserts_single_account,
-    bench_storage_inserts_multiple_accounts,
-    bench_storage_single_account_updates,
-    bench_storage_multiple_account_updates,
-    bench_storage_single_account_deletes,
-    bench_storage_multiple_accounts_deletes
+    // bench_updates,
+    // bench_deletes,
+    // bench_mixed_operations,
+    // bench_storage_reads_single_account,
+    // bench_storage_reads_multiple_accounts,
+    // bench_storage_inserts_single_account,
+    // bench_storage_inserts_multiple_accounts,
+    // bench_storage_single_account_updates,
+    // bench_storage_multiple_account_updates,
+    // bench_storage_single_account_deletes,
+    // bench_storage_multiple_accounts_deletes
 );
 criterion_main!(benches);
