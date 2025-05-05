@@ -70,9 +70,9 @@ enum Commands {
         output_path: String,
 
         /// Verbosity level for output. Options are:
-        /// -v: Print account information
-        /// -vv: Print account/storage information and node accessed along the path
-        /// -vvv: Print pages accessed along the path, along with the "verbose"
+        /// [none] Print account information
+        /// -v Print account/storage information and nodes accessed along the path
+        /// -vv Print pages accessed along the path, along with the "-v"
         ///   information
         #[arg(short = 'v', long = "verbose", action = ArgAction::Count, default_value_t = 0)]
         verbosity: u8,
@@ -266,14 +266,3 @@ fn root_page_info(db_path: &str, output_path: &str) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
-/*
-Consistency check:
-reachable_pages = set
-traverse from root page 0, add page to set whenever we hit new page
-traverse from root page 1, add page to set whenever we hit new page
-get orphaned pages 
-all pages should be equal to reachable_pages + orphaned pages (besides reserved pages in 2-255 range)
-
-pages not in either set should raise error
-orphan pages in reachable pages should raise error
-*/
