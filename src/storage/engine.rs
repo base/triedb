@@ -14,7 +14,7 @@ use crate::{
     path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH, STORAGE_PATH_LENGTH},
     pointer::Pointer,
     snapshot::SnapshotId,
-    storage::value::Value,
+    storage::{debug::DebugPage, value::Value},
 };
 use alloy_primitives::StorageValue;
 use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
@@ -40,57 +40,6 @@ enum PointerChange {
     None,
     Update(Pointer),
     Delete,
-}
-
-#[derive(Default)]
-struct DebugPage {
-    nodes_per_page: DebugStats,
-    bytes_per_page: DebugStats,
-    depth_of_trie_in_nodes: DebugStats,
-    depth_of_trie_in_pages: DebugStats,
-    path_prefix_length: DebugStats,
-    num_children_per_branch: DebugStats,
-    //KALEY TODO ask about these
-    node_size_in_bytes: DebugStats,
-}
-
-impl Debug for DebugPage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "\nnodes_per_page: {:?}\n bytes_per_page: {:?}\n depth_of_trie_in_nodes: {:?}\n depth_of_trie_in_pages: {:?}\n path_prefix_length: {:?}\n num_children_per_branch: {:?}\n node_size_in_bytes: {:?}", self.nodes_per_page, self.bytes_per_page, self.depth_of_trie_in_nodes, self.depth_of_trie_in_pages, self.path_prefix_length, self.num_children_per_branch, self.node_size_in_bytes)
-    }
-}
-
-struct DebugStats {
-    min: usize,
-    max: usize,
-    //mean is a tuple of (mean, count)
-    mean: (f64, usize),
-}
-
-impl DebugStats {
-    fn update_stats(&mut self, new_val: usize) {
-        if new_val > self.max {
-            self.max = new_val;
-        }
-        if new_val < self.min {
-            self.min = new_val;
-        }
-        let total_sum = self.mean.0 * self.mean.1 as f64 + new_val as f64;
-        let new_count = self.mean.1 + 1;
-        self.mean = (total_sum / new_count as f64, new_count);
-    }
-}
-
-impl Default for DebugStats {
-    fn default() -> Self {
-        Self { min: usize::MAX, max: usize::MIN, mean: (0.0, 0) }
-    }
-}
-
-impl Debug for DebugStats {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "min: {}, max: {}, mean: {}", self.min, self.max, self.mean.0)
-    }
 }
 
 impl StorageEngine {
@@ -1364,13 +1313,7 @@ impl StorageEngine {
         let node: Node = slotted_page.get_value(cell_index)?;
 
         match node {
-            Node::AccountLeaf {
-                prefix: _,
-                nonce_rlp: _,
-                balance_rlp: _,
-                code_hash: _,
-                ref storage_root,
-            } => {
+            Node::AccountLeaf { ref storage_root, .. } => {
                 StorageEngine::write_node_value(&node, slotted_page.id(), buf, &indent)?;
                 let mut new_indent = indent.clone();
                 new_indent.push('\t');
@@ -1441,7 +1384,7 @@ impl StorageEngine {
         context: &TransactionContext,
         path: &Nibbles,
         mut buf: W,
-        verbosity_level: u32,
+        verbosity_level: u8,
     ) -> Result<(), Error> {
         let page_id = context.metadata.root_subtrie_page_id;
         let page = self.get_page(context, page_id)?;
@@ -1475,7 +1418,7 @@ impl StorageEngine {
         slotted_page: SlottedPage<'_>,
         page_index: u8,
         buf: &mut impl io::Write,
-        verbosity_level: u32,
+        verbosity_level: u8,
     ) -> Result<(), Error> {
         let node: Node = slotted_page.get_value(page_index)?;
 

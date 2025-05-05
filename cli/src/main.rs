@@ -1,6 +1,6 @@
 use alloy_primitives::{hex, Address, StorageKey};
 use alloy_trie::Nibbles;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum, ArgAction};
 use std::{fs::File, str};
 use triedb::{
     path::{AddressPath, StoragePath},
@@ -70,12 +70,12 @@ enum Commands {
         output_path: String,
 
         /// Verbosity level for output. Options are:
-        /// - Normal: Print account information
-        /// - Verbose: Print account/storage information and node accessed along the path
-        /// - ExtraVerbose: Print pages accessed along the path, along with the "verbose"
+        /// -v: Print account information
+        /// -vv: Print account/storage information and node accessed along the path
+        /// -vvv: Print pages accessed along the path, along with the "verbose"
         ///   information
-        #[arg(short = 'v', long = "verbose", value_enum, default_value_t = VerbosityLevel::Normal)]
-        verbosity: VerbosityLevel,
+        #[arg(short = 'v', long = "verbose", action = ArgAction::Count, default_value_t = 0)]
+        verbosity: u8,
     },
 
     /// Print database information derived from RootPage
@@ -210,7 +210,7 @@ fn get_trie_value(
     db_path: &str,
     identifier: &str,
     output_path: &str,
-    verbosity: VerbosityLevel,
+    verbosity_level: u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = match Database::open(db_path) {
         Ok(db) => db,
@@ -224,13 +224,6 @@ fn get_trie_value(
     let trie_value_path = identifier_to_trie_value_path(&trie_value_id)?;
 
     let output_file = File::create(output_path)?;
-
-    // Convert verbosity level to string
-    let verbosity_level = match verbosity {
-        VerbosityLevel::Normal => 0,
-        VerbosityLevel::Verbose => 1,
-        VerbosityLevel::ExtraVerbose => 2,
-    };
 
     let tx = db.begin_ro()?;
     match trie_value_path {
@@ -272,3 +265,15 @@ fn root_page_info(db_path: &str, output_path: &str) -> Result<(), Box<dyn std::e
     }
     Ok(())
 }
+
+/*
+Consistency check:
+reachable_pages = set
+traverse from root page 0, add page to set whenever we hit new page
+traverse from root page 1, add page to set whenever we hit new page
+get orphaned pages 
+all pages should be equal to reachable_pages + orphaned pages (besides reserved pages in 2-255 range)
+
+pages not in either set should raise error
+orphan pages in reachable pages should raise error
+*/

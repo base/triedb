@@ -7,7 +7,7 @@ To print a single page of a database:
 `cargo run print -d <path to database> [-p <page_id of page to print>] [-o <output path>]`
 
 To print the whole database, omit the `page_id`:  
-`cargo run print -d <path to database>` 
+`cargo run print -d <path to database> [-o <output path>]`
 
 
 ### Print TrieValue Info ###
@@ -21,8 +21,8 @@ Node identifier must be in one of these formats:
 
 Verbose options vary the level of information written to file:  
   1. None: only the account/storage node information
-  2. Verbose (-v verbose): Node information for every node accessed along path to specified node
-  3. Extra Verbose (-v extra-verbose): Information for each page accessed followed by information for each node accessed from that page along path to specified node
+  2. Verbose (-v): Node information for every node accessed along path to specified node
+  3. Extra Verbose (-vv): Information for each page accessed followed by information for each node accessed from that page along path to specified node
 
 
 ### Print Root Page Info ###
@@ -33,7 +33,7 @@ Prints the state root, root subtrie page ID, and orphaned pages list.
 ### Page Statistics ###
 `cargo run statistics -d <path to database> [-o <output path>]`
 
-Current stats, all presented with minimum, maxiumum, and mean:  
+Current stats, all presented with minimum, maximum, and mean:  
   * Nodes per page
   * Bytes per page
   * Depth of trie in nodes

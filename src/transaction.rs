@@ -107,7 +107,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         &self,
         output_file: &std::fs::File,
         address_path: AddressPath,
-        verbosity_level: u32,
+        verbosity_level: u8,
     ) -> Result<(), TransactionError> {
         let metadata = self.context.metadata.clone();
         let context = TransactionContext::new(metadata);
@@ -123,7 +123,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         &self,
         output_file: &std::fs::File,
         storage_path: StoragePath,
-        verbosity_level: u32,
+        verbosity_level: u8,
     ) -> Result<(), TransactionError> {
         let metadata = self.context.metadata.clone();
         let context = TransactionContext::new(metadata);
