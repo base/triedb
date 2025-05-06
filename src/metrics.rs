@@ -1,9 +1,6 @@
-use std::mem;
-
 use metrics::{Counter, Histogram};
 use metrics_derive::Metrics;
-
-use parking_lot::RwLock;
+use std::cell::Cell;
 
 #[derive(Metrics, Clone)]
 #[metrics(scope = "triedb")]
@@ -31,106 +28,86 @@ pub(crate) struct DatabaseMetrics {
     pub(crate) cache_storage_read_miss: Counter,
 }
 
-#[derive(Debug, Default, Clone)]
-struct TransactionMetricsInner {
-    pages_read: u32,
-    pages_allocated: u32,
-    pages_reallocated: u32,
-    pages_split: u32,
-    cache_storage_read_hit: u32,
-    cache_storage_read_miss: u32,
-}
-
-// Compile-time assertion to ensure that `TransactionMetricsInner` is `Sync`
-const _: fn() = || {
-    fn consumer<T: Sync + Send>() {}
-    consumer::<TransactionMetricsInner>();
-    consumer::<TransactionMetricsInner>();
-};
-
-#[derive(Debug, Default)]
+#[derive(Default, Clone, Debug)]
 pub(crate) struct TransactionMetrics {
-    inner: RwLock<TransactionMetricsInner>,
+    pages_read: Cell<u32>,
+    pages_allocated: Cell<u32>,
+    pages_reallocated: Cell<u32>,
+    pages_split: Cell<u32>,
+    cache_storage_read_hit: Cell<u32>,
+    cache_storage_read_miss: Cell<u32>,
 }
 
 impl TransactionMetrics {
     pub(crate) fn inc_pages_read(&self) {
-        self.inner.write().pages_read += 1;
+        self.pages_read.set(self.pages_read.get() + 1);
     }
 
     pub(crate) fn inc_pages_split(&self) {
-        self.inner.write().pages_split += 1;
+        self.pages_split.set(self.pages_split.get() + 1);
     }
 
     pub(crate) fn inc_pages_allocated(&self) {
-        self.inner.write().pages_allocated += 1;
+        self.pages_allocated.set(self.pages_allocated.get() + 1);
     }
 
     pub(crate) fn inc_pages_reallocated(&self) {
-        self.inner.write().pages_reallocated += 1;
+        self.pages_reallocated.set(self.pages_reallocated.get() + 1);
     }
 
     /// Increment the cache storage read hit
     pub(crate) fn inc_cache_storage_read_hit(&self) {
-        self.inner.write().cache_storage_read_hit += 1;
+        self.cache_storage_read_hit.set(self.cache_storage_read_hit.get() + 1);
     }
 
     /// Increment the cache storage read miss
     pub(crate) fn inc_cache_storage_read_miss(&self) {
-        self.inner.write().cache_storage_read_miss += 1;
+        self.cache_storage_read_miss.set(self.cache_storage_read_miss.get() + 1);
     }
 
     pub(crate) fn take_pages_read(&self) -> u32 {
-        let mut inner = self.inner.write();
-        mem::take(&mut inner.pages_read)
+        self.pages_read.take()
     }
 
     pub(crate) fn take_pages_split(&self) -> u32 {
-        let mut inner = self.inner.write();
-        mem::take(&mut inner.pages_split)
+        self.pages_split.take()
     }
 
     pub(crate) fn take_pages_allocated(&self) -> u32 {
-        let mut inner = self.inner.write();
-        mem::take(&mut inner.pages_allocated)
+        self.pages_allocated.take()
     }
 
     pub(crate) fn take_pages_reallocated(&self) -> u32 {
-        let mut inner = self.inner.write();
-        mem::take(&mut inner.pages_reallocated)
+        self.pages_reallocated.take()
     }
 
     /// Take the cache storage read hit and miss
     pub(crate) fn take_cache_storage_read(&self) -> (u32, u32) {
-        let mut inner = self.inner.write();
-        let cache_storage_read_hit = mem::take(&mut inner.cache_storage_read_hit);
-        let cache_storage_read_miss = mem::take(&mut inner.cache_storage_read_miss);
-        (cache_storage_read_hit, cache_storage_read_miss)
+        (self.cache_storage_read_hit.take(), self.cache_storage_read_miss.take())
     }
 
     #[cfg(test)]
     pub(crate) fn get_pages_read(&self) -> u32 {
-        self.inner.read().pages_read
+        self.pages_read.get()
     }
 
     #[cfg(test)]
     pub(crate) fn get_pages_split(&self) -> u32 {
-        self.inner.read().pages_split
+        self.pages_split.get()
     }
 
     #[cfg(test)]
     pub(crate) fn get_pages_allocated(&self) -> u32 {
-        self.inner.read().pages_allocated
+        self.pages_allocated.get()
     }
 
     #[cfg(test)]
     pub(crate) fn get_pages_reallocated(&self) -> u32 {
-        self.inner.read().pages_reallocated
+        self.pages_reallocated.get()
     }
 
     #[cfg(test)]
     pub(crate) fn get_cache_storage_read(&self) -> (u32, u32) {
-        let metrics = self.inner.read();
-        (metrics.cache_storage_read_hit, metrics.cache_storage_read_miss)
+        (self.cache_storage_read_hit.get(), self.cache_storage_read_miss.get())
     }
 }

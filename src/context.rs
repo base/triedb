@@ -6,7 +6,7 @@ use crate::{database::Metadata, metrics::TransactionMetrics, page::PageId};
 
 /// A map of 64 nibbles (64 bytes). 64 bytes is used instead of 32 bytes to avoid new memory
 /// allocations from Nibbles. This is used to store the nibbles of an address in the context.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct B512Map<V>(HashMap<FixedBytes<64>, V, FbBuildHasher<64>>);
 
 impl<V> B512Map<V>
@@ -48,7 +48,7 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TransactionContext {
     pub(crate) metadata: Metadata,
     pub(crate) transaction_metrics: TransactionMetrics,
