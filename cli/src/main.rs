@@ -48,7 +48,7 @@ enum Commands {
         page_id: Option<u32>,
 
         /// Output filepath (optional)
-        #[arg(short = 'o', long = "output", default_value = "./printed_page")]
+        #[arg(short = 'o', long = "output", default_value = "/dev/stdout")]
         output_path: String,
     },
 
@@ -66,7 +66,7 @@ enum Commands {
         identifier: Vec<String>,
 
         /// Output filepath (optional)
-        #[arg(short = 'o', long = "output", default_value = "./account_info")]
+        #[arg(short = 'o', long = "output", default_value = "/dev/stdout")]
         output_path: String,
 
         /// Verbosity level for output. Options are:
@@ -85,7 +85,7 @@ enum Commands {
         db_path: String,
 
         /// Output filepath (optional)
-        #[arg(short = 'o', long = "output", default_value = "./root_page_info")]
+        #[arg(short = 'o', long = "output", default_value = "/dev/stdout")]
         output_path: String,
     },
 
@@ -96,7 +96,7 @@ enum Commands {
         db_path: String,
 
         /// Output filepath (optional)
-        #[arg(short = 'o', long = "output", default_value = "./db_statistics")]
+        #[arg(short = 'o', long = "output", default_value = "/dev/stdout")]
         output_path: String,
     },
 }
