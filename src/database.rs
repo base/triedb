@@ -80,8 +80,11 @@ impl Database {
     }
 
     pub fn open(file_path: impl AsRef<Path>) -> Result<Self, Error> {
-        let mut page_manager =
-            PageManager::options().page_count(256).open(file_path).map_err(Error::PageError)?;
+        let mut page_manager = PageManager::options()
+            .create(false)
+            .page_count(256)
+            .open(file_path)
+            .map_err(Error::PageError)?;
 
         let root_page_0 = page_manager.get(0, 0).map_err(Error::PageError)?;
         let root_page_1 = page_manager.get(0, 1).map_err(Error::PageError)?;
