@@ -327,7 +327,7 @@ mod tests {
     #[test]
     fn test_add_get_orphan_page_ids() {
         // GIVEN: a root page with orphan ids
-        let mut page_manager = PageManager::new_anon(20, 0).unwrap();
+        let mut page_manager = PageManager::open_temp_file().unwrap();
         let page = page_manager.allocate(42).unwrap();
         let mut root_page = RootPageMut::new(page, B256::default(), 0, 0);
         let my_orphan_page_ids: &[PageId] = &[2, 3, 4, 5, 6, 7, 8, 9, 10];
@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn test_get_empty_orphan_page_ids() {
         // GIVEN: a root page with no orphan ids
-        let mut page_manager = PageManager::new_anon(20, 0).unwrap();
+        let mut page_manager = PageManager::open_temp_file().unwrap();
         let page = page_manager.allocate(42).unwrap();
         let root_page = RootPageMut::new(page, B256::default(), 0, 0);
 
@@ -357,7 +357,7 @@ mod tests {
     #[test]
     fn test_2_page_orphan_page_ids() {
         // GIVEN: a root page with a list of orphan page ids spanning into page 2
-        let mut page_manager = PageManager::new_anon(20, 0).unwrap();
+        let mut page_manager = PageManager::open_temp_file().unwrap();
         let page0 = page_manager.allocate(42).unwrap();
         let _page1 = page_manager.allocate(42).unwrap();
         let mut page2 = page_manager.allocate(42).unwrap();
@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn test_add_replaces_used_slots() {
         // GIVEN: a root page with a list of orphan page ids
-        let mut page_manager = PageManager::new_anon(20, 0).unwrap();
+        let mut page_manager = PageManager::open_temp_file().unwrap();
         let page = page_manager.allocate(42).unwrap();
         let mut root_page = RootPageMut::new(page, B256::default(), 0, 0);
         let my_orphan_page_ids: &[PageId] = &[1, 2, 3, 4, 5, 6, 7, 8, 9];
@@ -427,7 +427,7 @@ mod tests {
     #[test]
     fn test_add_replaces_used_slots_across_pages() {
         // GIVEN: a root page with a list of orphan page ids spanning 2 pages
-        let mut page_manager = PageManager::new_anon(20, 0).unwrap();
+        let mut page_manager = PageManager::open_temp_file().unwrap();
         let page = page_manager.allocate(42).unwrap();
         let mut root_page = RootPageMut::new(page, B256::default(), 0, 0);
 
@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn test_add_replaces_used_slots_and_adds_to_end() {
         // GIVEN: a root page with a list of orphan page ids spanning 2 pages
-        let mut page_manager = PageManager::new_anon(20, 0).unwrap();
+        let mut page_manager = PageManager::open_temp_file().unwrap();
         let page = page_manager.allocate(42).unwrap();
         let mut root_page = RootPageMut::new(page, B256::default(), 0, 0);
 
@@ -511,7 +511,7 @@ mod tests {
     #[test]
     fn test_root_0_doesnt_spill_into_root_1() {
         // GIVEN: 2 root pages
-        let mut page_manager = PageManager::new_anon(257, 0).unwrap();
+        let mut page_manager = PageManager::open_temp_file().unwrap();
         let page0 = page_manager.allocate(42).unwrap();
         assert_eq!(page0.id(), 0);
         let mut root_page = RootPageMut::new(page0, B256::default(), 0, 0);
@@ -538,7 +538,7 @@ mod tests {
     #[test]
     fn test_orphan_list_writes_reserved_pages() {
         // GIVEN: 2 root pages with PageId 0 and PageId 1
-        let mut page_manager = PageManager::new_anon(20, 0).unwrap();
+        let mut page_manager = PageManager::open_temp_file().unwrap();
         let page0 = page_manager.allocate(42).unwrap();
         assert_eq!(page0.id(), 0);
         let mut root_page = RootPageMut::new(page0, B256::default(), 0, 0);
@@ -579,7 +579,7 @@ mod tests {
     #[test]
     fn test_orphan_list_allocates_after_reserved_pages() {
         // GIVEN: 256 pages with PageIds [0-255]
-        let mut page_manager = PageManager::new_anon(257, 0).unwrap();
+        let mut page_manager = PageManager::open_temp_file().unwrap();
         let page = page_manager.allocate(42).unwrap();
         assert_eq!(page.id(), 0);
         let mut root_page = RootPageMut::new(page, B256::default(), 0, 0);
@@ -627,7 +627,7 @@ mod tests {
     #[test]
     fn test_orphan_list_shrinks_to_empty() {
         // GIVEN: 256 pages with PageIds [0-255]
-        let mut page_manager = PageManager::new_anon(257, 0).unwrap();
+        let mut page_manager = PageManager::open_temp_file().unwrap();
         let page = page_manager.allocate(42).unwrap();
         assert_eq!(page.id(), 0);
         let mut root_page = RootPageMut::new(page, B256::default(), 0, 0);
@@ -664,7 +664,7 @@ mod tests {
     #[test]
     fn test_vecdeque_rotate_orphan_page_ids() {
         // GIVEN: a root page with orphan ids
-        let mut page_manager = PageManager::new_anon(20, 0).unwrap();
+        let mut page_manager = PageManager::open_temp_file().unwrap();
         let page = page_manager.allocate(42).unwrap();
         let mut root_page = RootPageMut::new(page, B256::default(), 0, 0);
         let my_orphan_page_ids: &[PageId] = &[2, 3, 4, 5, 6, 7, 8, 9, 10];

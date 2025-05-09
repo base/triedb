@@ -1,56 +1,114 @@
-use std::{fs::File, path::Path};
-
 use crate::{
-    page::{Page, PageError, PageId, PageMut},
+    page::{Page, PageError, PageId, PageManagerOptions, PageMut},
     snapshot::SnapshotId,
 };
-use memmap2::{Advice, MmapMut};
+use memmap2::{Advice, MmapMut, MmapOptions};
+use std::{fs::File, path::Path};
 
 // Manages pages in a memory mapped file.
 #[derive(Debug)]
 pub struct PageManager {
     mmap: MmapMut,
-    file: Option<File>,
+    file: File,
+    file_len: u64,
     next_page_id: PageId,
 }
 
 impl PageManager {
-    pub fn open(file_path: impl AsRef<Path>) -> Result<Self, PageError> {
-        let file = File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(file_path)
-            .map_err(PageError::IO)?;
+    pub fn options() -> PageManagerOptions {
+        PageManagerOptions::new()
+    }
+
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, PageError> {
+        Self::options().open(path)
+    }
+
+    pub fn from_file(file: File) -> Result<Self, PageError> {
+        Self::options().wrap(file)
+    }
+
+    #[cfg(test)]
+    pub fn open_temp_file() -> Result<Self, PageError> {
+        Self::options().open_temp_file()
+    }
+
+    pub(super) fn open_with_options(
+        opts: &PageManagerOptions,
+        path: impl AsRef<Path>,
+    ) -> Result<Self, PageError> {
+        let file = opts.open_options.open(path).map_err(PageError::IO)?;
+        Self::from_file_with_options(opts, file)
+    }
+
+    pub(super) fn from_file_with_options(
+        opts: &PageManagerOptions,
+        file: File,
+    ) -> Result<Self, PageError> {
+        // Allocate a memory map as large as possible, so that remapping will never be needed. If
+        // `opts.max_page == PageId::MAX == 2 ** 32 - 1` and `Page::SIZE == 2 ** 12 == 4096`, then
+        // we are requesting `2 ** 44` bytes of memory.
+        //
+        // Allocating such a large memory map is does not actually allocate any memory, nor causes
+        // the backing file to grow to match the memory map size. It simply reserves the required
+        // address space.
+        //
+        // This is safe and sound on 64-bit systems:
+        //
+        // - The size of the memory map may be larger than the amount of memory on the system. The
+        //   kernel will take care of loading/unloading pages as needed.
+        // - On systems where the virtual address space is 48 bits, there is room for *at least* 16
+        //   of such contiguous memory maps, which is more than enough for a single process.
+        //
+        // This can fail if:
+        //
+        // - This is running on a 32-bit system (but this should not be supported).
+        // - The process memory is highly fragmented.
+        // - An rlimit is limiting the maximum memory that the process can obtain.
+        // - Many `PageManager` structs are constructed in parallel (this can happen in tests, but
+        //   should not happen in real-world application).
+        //
+        // Note that even if the memory map has a certain size, reading/writing to it still
+        // requires the backing file to be large enough; failure to do so will result in a SIGBUS.
+        let mmap_len = (opts.max_pages as usize) * Page::SIZE;
+
         // SAFETY: we assume that we have full ownership of the file, even though in practice
         // there's no way to guarantee it
-        let mmap = unsafe { MmapMut::map_mut(&file).map_err(PageError::IO)? };
-        Self::new(mmap, Some(file), None)
-    }
-
-    /// Creates a new `PageManager` with the given memory mapped file.
-    pub fn new(
-        mmap: MmapMut,
-        file: Option<File>,
-        next_page_id: Option<PageId>,
-    ) -> Result<Self, PageError> {
-        let max_pages = (mmap.len() / Page::SIZE).try_into().expect("memory map too large");
-        let next_page_id = next_page_id.unwrap_or(max_pages);
-        if next_page_id > max_pages {
-            panic!("`next_page_id` is greater than the number of pages in the memory map");
-        }
-
+        let mmap =
+            unsafe { MmapOptions::new().len(mmap_len).map_mut(&file).map_err(PageError::IO)? };
         mmap.advise(Advice::Random).map_err(PageError::IO)?;
 
-        Ok(Self { mmap, file, next_page_id })
+        let file_len = file.metadata().map_err(PageError::IO)?.len();
+        let min_file_len = (opts.page_count as u64) * (Page::SIZE as u64);
+        assert!(
+            file_len >= min_file_len,
+            "page_count ({}) exceeds the number of pages in the file ({})",
+            opts.page_count,
+            file_len / (Page::SIZE as u64)
+        );
+
+        Ok(Self { mmap, file, file_len, next_page_id: opts.page_count })
     }
 
-    /// Creates a new `PageManager` with an anonymous memory map.
-    #[cfg(test)]
-    pub(crate) fn new_anon(capacity: PageId, next_page_id: PageId) -> Result<Self, PageError> {
-        let mmap = MmapMut::map_anon(capacity as usize * Page::SIZE).map_err(PageError::IO)?;
-        Self::new(mmap, None, Some(next_page_id))
+    /// Returns the number of pages currently stored in the file.
+    pub fn size(&self) -> u32 {
+        self.next_page_id
+    }
+
+    /// Sets the number of pages currently stored in the file.
+    pub fn set_size(&mut self, size: u32) {
+        assert!(size <= self.capacity(), "size ({}) exceeds capacity ({})", size, self.capacity());
+        assert!(
+            size as u64 <= self.file_len / (Page::SIZE as u64),
+            "size ({}) exceeds the number of pages in the file ({})",
+            size,
+            self.file_len / (Page::SIZE as u64)
+        );
+        self.next_page_id = size;
+    }
+
+    /// Returns the maximum number of pages that can be allocated to the file.
+    pub fn capacity(&self) -> u32 {
+        (self.mmap.len() / Page::SIZE).min(u32::MAX as usize) as u32
     }
 
     // Returns a mutable reference to the data of the page with the given id.
@@ -66,9 +124,14 @@ impl PageManager {
     // Allocates a new page in the memory mapped file.
     fn allocate_page_data<'p>(&mut self) -> Result<(PageId, &'p mut [u8; Page::SIZE]), PageError> {
         let page_id = self.next_page_id;
+        let new_len =
+            page_id.checked_add(1).ok_or(PageError::OutOfBounds(page_id))? as usize * Page::SIZE;
 
-        if (page_id + 1) as usize * Page::SIZE > self.mmap.len() {
+        if new_len > self.mmap.len() {
             return Err(PageError::OutOfBounds(page_id));
+        }
+        if new_len as u64 > self.file_len {
+            self.grow()?;
         }
 
         self.next_page_id += 1;
@@ -76,9 +139,26 @@ impl PageManager {
         page_data.fill(0);
         Ok((page_id, page_data))
     }
-}
 
-impl PageManager {
+    /// Grows the size of the underlaying file (if any) to make room for additional pages.
+    ///
+    /// This will increase the file size by a constant factor of 1024, or a relative factor of
+    /// 12.5%, whichever is greater, without exceeding the maximum capacity of the file.
+    ///
+    /// If this `PageManager` is not backed by any file, then this method returns an error.
+    fn grow(&mut self) -> Result<(), PageError> {
+        let cur_len = self.file_len;
+        let increment = (cur_len / 8).max(1024 * Page::SIZE as u64);
+        let new_len = cur_len + increment;
+        let new_len = new_len.min(self.mmap.len() as u64);
+
+        assert!(new_len > cur_len, "reached max capacity");
+
+        self.file.set_len(new_len).map_err(PageError::IO)?;
+        self.file_len = new_len;
+        Ok(())
+    }
+
     /// Retrieves a page from the memory mapped file.
     pub fn get<'p>(
         &self,
@@ -107,61 +187,8 @@ impl PageManager {
         Ok(PageMut::with_snapshot(page_id, snapshot_id, page_data))
     }
 
-    /// Resizes the memory mapped file to the given number of pages.
-    ///
-    /// If the file size is reduced, the file is truncated and the next page is is lowered to match
-    /// the new file size.
-    pub fn resize(&mut self, new_page_count: PageId) -> Result<(), PageError> {
-        // SAFETY: This is currently unsafe, but so was the previous implementation
-        unsafe {
-            let old_len = self.mmap.len();
-            let new_len = (new_page_count as usize) * Page::SIZE;
-
-            if let Some(ref file) = self.file {
-                // MacOS does not support flushing an empty file
-                if old_len > 0 {
-                    self.mmap.flush().map_err(PageError::IO)?;
-                }
-                file.set_len(new_len as u64).map_err(PageError::IO)?;
-            }
-
-            #[cfg(target_os = "linux")]
-            {
-                self.mmap
-                    .remap(new_len, memmap2::RemapOptions::new().may_move(true))
-                    .map_err(PageError::IO)?;
-            }
-
-            #[cfg(not(target_os = "linux"))]
-            {
-                self.mmap = match self.file {
-                    Some(ref file) => MmapMut::map_mut(file).map_err(PageError::IO)?,
-                    None => {
-                        let mut new_map =
-                            memmap2::MmapMut::map_anon(new_len).map_err(PageError::IO)?;
-                        let common = std::cmp::min(old_len, new_len);
-                        new_map[..common].copy_from_slice(&self.mmap[..common]);
-                        new_map
-                    }
-                };
-                self.mmap.advise(Advice::Random).map_err(PageError::IO)?;
-            }
-
-            if new_len < old_len {
-                self.next_page_id = new_page_count;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Returns the maximum number of pages that may be allocated.
-    pub fn size(&self) -> u32 {
-        (self.mmap.len() / Page::SIZE) as u32
-    }
-
     /// Syncs pages to the backing file.
-    pub fn commit(&mut self, _snapshot_id: SnapshotId) -> Result<(), PageError> {
+    pub fn commit(&mut self) -> Result<(), PageError> {
         self.mmap.flush().map_err(PageError::IO)
     }
 }
@@ -169,11 +196,10 @@ impl PageManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     #[test]
     fn test_allocate_get() {
-        let mut manager = PageManager::new_anon(10, 0).unwrap();
+        let mut manager = PageManager::options().max_pages(10).open_temp_file().unwrap();
 
         for i in 0..10 {
             let err = manager.get(42, i).unwrap_err();
@@ -196,7 +222,7 @@ mod tests {
 
     #[test]
     fn test_allocate_get_mut() {
-        let mut manager = PageManager::new_anon(10, 0).unwrap();
+        let mut manager = PageManager::open_temp_file().unwrap();
 
         let mut page = manager.allocate(42).unwrap();
         assert_eq!(page.id(), 0);
@@ -205,7 +231,7 @@ mod tests {
 
         page.contents_mut()[0] = 1;
 
-        manager.commit(42).unwrap();
+        manager.commit().unwrap();
 
         let old_page = manager.get(42, 0).unwrap();
         assert_eq!(old_page.id(), 0);
@@ -228,142 +254,119 @@ mod tests {
 
         assert_eq!(page1_mut.contents()[0], 2);
 
-        manager.commit(42).unwrap();
+        manager.commit().unwrap();
 
         let page1 = manager.get(42, page1.id()).unwrap();
         assert_eq!(page1.contents()[0], 2);
     }
 
     #[test]
-    fn test_resize_file() {
-        // remove the existing file if it already exists
-        let _ = std::fs::remove_file("test.mmap");
+    fn auto_growth() {
+        let snapshot = 123;
 
-        let mut manager = PageManager::open("test.mmap").unwrap();
-        assert_eq!(manager.next_page_id, 0);
+        let f = tempfile::tempfile().expect("temporary file creation failed");
+        let mut m = PageManager::from_file(f.try_clone().unwrap()).expect("mmap creation failed");
 
-        // attempt to allocate, expect error because the file is empty
-        let err = manager.allocate(42).unwrap_err();
-        assert!(matches!(err, PageError::OutOfBounds(0)));
+        fn len(f: &File) -> usize {
+            f.metadata().expect("fetching file metadata failed").len().try_into().unwrap()
+        }
 
-        manager.resize(1).unwrap();
-        assert_eq!(manager.next_page_id, 0);
+        // No page has been allocated; file should be empty
+        assert_eq!(len(&f), 0);
 
-        let mut page = manager.allocate(42).unwrap();
+        // Allocate a page; verify that the size of the file grew by `1024 * Page::SIZE` (the
+        // minimum growth factor)
 
-        assert_eq!(page.id(), 0);
-        assert_eq!(page.contents(), &mut [0; Page::DATA_SIZE]);
-        assert_eq!(page.snapshot_id(), 42);
-        assert_eq!(manager.next_page_id, 1);
+        // For the first 8 * 1024 pages, the automatic growth should be of a constant factor of
+        // `1024 * Page::SIZE`
+        for i in 0..8 {
+            for j in 0..1024 {
+                let p = m.allocate(snapshot).expect("page allocation failed");
+                assert_eq!(p.id() as usize, i * 1024 + j);
+                assert_eq!(len(&f), (i + 1) * 1024 * Page::SIZE);
+            }
+        }
 
-        // write some data to the page
-        page.contents_mut().write_all(b"abc").expect("write failed");
-        manager.commit(42).unwrap();
-
-        // attempt to allocate again, expect error because the file is full
-        let err = manager.allocate(42).unwrap_err();
-        assert!(matches!(err, PageError::OutOfBounds(1)));
-
-        // resize so that there's room for a new page
-        manager.resize(2).unwrap();
-        assert_eq!(manager.next_page_id, 1);
-
-        // verify that the previous page contents were preserved
-        let page = manager.get(42, 0).unwrap();
-        assert_eq!(page.id(), 0);
-        let mut expected_contents = [0; Page::DATA_SIZE];
-        (&mut expected_contents[..]).write_all(b"abc").expect("write failed");
-        assert_eq!(page.contents(), &expected_contents);
-        assert_eq!(page.snapshot_id(), 42);
-        assert_eq!(manager.next_page_id, 1);
-
-        // verify that there's a new empty page
-        let page = manager.allocate(42).unwrap();
-        assert_eq!(page.id(), 1);
-        assert_eq!(page.contents(), &mut [0; Page::DATA_SIZE]);
-        assert_eq!(page.snapshot_id(), 42);
-        assert_eq!(manager.next_page_id, 2);
-
-        manager.commit(42).unwrap();
-
-        // attempt to allocate again, expect error because the file is full
-        let err = manager.allocate(42).unwrap_err();
-        assert!(matches!(err, PageError::OutOfBounds(2)));
-
-        let file = manager.file.as_ref().unwrap();
-        let metadata = file.metadata().unwrap();
-        assert_eq!(metadata.len(), 2 * Page::SIZE as u64);
-
-        manager.resize(1).unwrap();
-        assert_eq!(manager.next_page_id, 1);
-
-        let file = manager.file.as_ref().unwrap();
-        let metadata = file.metadata().unwrap();
-        assert_eq!(metadata.len(), Page::SIZE as u64);
-
-        let err = manager.allocate(42).unwrap_err();
-        assert!(matches!(err, PageError::OutOfBounds(1)));
-
-        manager.resize(10).unwrap();
-        assert_eq!(manager.next_page_id, 1);
-
-        let file = manager.file.as_ref().unwrap();
-        let metadata = file.metadata().unwrap();
-        assert_eq!(metadata.len(), 10 * Page::SIZE as u64);
-
-        let page = manager.allocate(42).unwrap();
-        assert_eq!(page.id(), 1);
-        assert_eq!(page.contents(), &mut [0; Page::DATA_SIZE]);
-        assert_eq!(page.snapshot_id(), 42);
-        assert_eq!(manager.next_page_id, 2);
-
-        // clean up
-        let _ = std::fs::remove_file("test.mmap");
+        // From this point on, the automatic growth should be 12.5% (1/8).
+        for id in (8 * 1024)..(9 * 1024) {
+            let p = m.allocate(snapshot).expect("page allocation failed");
+            assert_eq!(p.id(), id);
+            assert_eq!(len(&f), 9 * 1024 * Page::SIZE);
+        }
+        for id in (9 * 1024)..10368 {
+            let p = m.allocate(snapshot).expect("page allocation failed");
+            assert_eq!(p.id(), id);
+            assert_eq!(len(&f), 10368 * Page::SIZE);
+        }
+        for id in 10368..11664 {
+            let p = m.allocate(snapshot).expect("page allocation failed");
+            assert_eq!(p.id(), id);
+            assert_eq!(len(&f), 11664 * Page::SIZE);
+        }
     }
 
     #[test]
-    fn test_resize_anon() {
-        let mut manager = PageManager::new_anon(10, 0).unwrap();
+    fn persistence() {
+        let snapshot = 123;
 
-        // allocate 10 times
-        for i in 0..10 {
-            let mut page = manager.allocate(42).unwrap();
-            assert_eq!(page.id(), i);
-            assert_eq!(page.contents(), &[0; Page::DATA_SIZE]);
-            assert_eq!(page.snapshot_id(), 42);
-            assert_eq!(manager.next_page_id, i + 1);
-            write!(page.contents_mut(), "this is page #{i}").expect("write failed");
+        let f = tempfile::tempfile().expect("temporary file creation failed");
+        let mut m = PageManager::from_file(f.try_clone().unwrap()).expect("mmap creation failed");
+
+        fn len(f: &File) -> usize {
+            f.metadata().expect("fetching file metadata failed").len().try_into().unwrap()
         }
 
-        // attempt to allocate, expect error
-        let err = manager.allocate(42).unwrap_err();
-        assert!(matches!(err, PageError::OutOfBounds(10)));
-
-        // resize to 20
-        manager.resize(20).unwrap();
-
-        // verify the contents of the first 10 pages
-        for i in 0..10 {
-            let page = manager.get(42, i).unwrap();
-            assert_eq!(page.id(), i);
-            assert_eq!(page.snapshot_id(), 42);
-
-            let mut expected_contents = [0; Page::DATA_SIZE];
-            write!(&mut expected_contents[..], "this is page #{i}").expect("write failed");
-            assert_eq!(page.contents(), &expected_contents);
+        fn read(mut f: &File, n: usize) -> Vec<u8> {
+            use std::io::Read;
+            let mut buf = vec![0; n];
+            f.read_exact(&mut buf).expect("read failed");
+            buf
         }
 
-        // allocate 10 more times
-        for i in 10..20 {
-            let page = manager.allocate(42).unwrap();
-            assert_eq!(page.id(), i);
-            assert_eq!(page.contents(), &[0; Page::DATA_SIZE]);
-            assert_eq!(page.snapshot_id(), 42);
-            assert_eq!(manager.next_page_id, i + 1);
+        fn rewind(mut f: &File) {
+            use std::io::Seek;
+            f.rewind().expect("rewind failed");
         }
 
-        // attempt to allocate, expect error
-        let err = manager.allocate(42).unwrap_err();
-        assert!(matches!(err, PageError::OutOfBounds(20)));
+        // No page has been allocated; file should be empty
+        assert_eq!(len(&f), 0);
+
+        // Allocate a page; verify that the size of the file grew by `1024 * Page::SIZE` (the
+        // minimum growth factor) and that the file contents are as expected
+        let mut p = m.allocate(snapshot).expect("page allocation failed");
+        m.commit().expect("commit failed");
+        assert_eq!(len(&f), 1024 * Page::SIZE);
+        assert_eq!(read(&f, 8), snapshot.to_le_bytes());
+        assert_eq!(read(&f, Page::DATA_SIZE), [0; Page::DATA_SIZE]);
+        assert_eq!(read(&f, 1023 * Page::DATA_SIZE), [0; 1023 * Page::DATA_SIZE]);
+        rewind(&f);
+
+        // Write some data to the page
+        p.contents_mut().iter_mut().for_each(|byte| *byte = 0xab);
+        m.commit().expect("commit failed");
+        assert_eq!(len(&f), 1024 * Page::SIZE);
+        assert_eq!(read(&f, 8), snapshot.to_le_bytes());
+        assert_eq!(read(&f, Page::DATA_SIZE), [0xab; Page::DATA_SIZE]);
+        assert_eq!(read(&f, 1023 * Page::DATA_SIZE), [0; 1023 * Page::DATA_SIZE]);
+        rewind(&f);
+
+        // Repeat the test with more pages
+        for new_page_id in 1..=255 {
+            let mut p = m.allocate(snapshot).expect("page allocation failed");
+            p.contents_mut().iter_mut().for_each(|byte| *byte = 0xab ^ (new_page_id as u8));
+            m.commit().expect("commit failed");
+
+            assert_eq!(len(&f), 1024 * Page::SIZE);
+
+            for stored_page_id in 0..=new_page_id {
+                assert_eq!(read(&f, 8), snapshot.to_le_bytes());
+                assert_eq!(
+                    read(&f, Page::DATA_SIZE),
+                    [0xab ^ (stored_page_id as u8); Page::DATA_SIZE]
+                );
+            }
+
+            rewind(&f);
+        }
     }
 }

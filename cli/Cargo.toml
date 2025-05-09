@@ -5,3 +5,12 @@ edition = "2021"
 
 [dependencies]
 triedb = { path = ".." }
+clap = { version = "4.4", features = ["derive"] }
+hex = "0.4"
+alloy-trie = { version = "0.7.6", features = ["arbitrary", "ethereum"] }
+alloy-primitives = { version = "0.8.21", features = ["arbitrary", "rand"] }
+
+[[bin]]
+name = "cli"
+path = "src/main.rs"
+

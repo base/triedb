@@ -7,7 +7,6 @@ use crate::{
     database::Database,
     node::TrieValue,
     path::{AddressPath, StoragePath},
-    storage::engine::StorageEngine,
 };
 use alloy_primitives::{StorageValue, B256};
 use alloy_trie::Nibbles;
@@ -45,32 +44,26 @@ pub struct Transaction<K: TransactionKind> {
     context: TransactionContext,
     database: Arc<Database>,
     pending_changes: HashMap<Nibbles, Option<TrieValue>>,
-    _lock: Option<StorageEngine>,
     _marker: std::marker::PhantomData<K>,
 }
 
 impl<K: TransactionKind> Transaction<K> {
-    pub(crate) fn new(
-        context: TransactionContext,
-        database: Arc<Database>,
-        lock: Option<StorageEngine>,
-    ) -> Self {
+    pub(crate) fn new(context: TransactionContext, database: Arc<Database>) -> Self {
         Self {
             committed: false,
             context,
             database,
             pending_changes: HashMap::new(),
-            _lock: lock,
             _marker: std::marker::PhantomData,
         }
     }
 
     pub fn get_account(
-        &self,
+        &mut self,
         address_path: AddressPath,
     ) -> Result<Option<Account>, TransactionError> {
         let storage_engine = self.database.inner.storage_engine.read();
-        let account = storage_engine.get_account(&self.context, address_path).unwrap();
+        let account = storage_engine.get_account(&mut self.context, address_path).unwrap();
 
         self.database.update_metrics_ro(&self.context);
 
@@ -78,11 +71,11 @@ impl<K: TransactionKind> Transaction<K> {
     }
 
     pub fn get_storage_slot(
-        &self,
+        &mut self,
         storage_path: StoragePath,
     ) -> Result<Option<StorageValue>, TransactionError> {
         let storage_engine = self.database.inner.storage_engine.read();
-        let storage_slot = storage_engine.get_storage(&self.context, storage_path).unwrap();
+        let storage_slot = storage_engine.get_storage(&mut self.context, storage_path).unwrap();
 
         self.database.update_metrics_ro(&self.context);
         Ok(storage_slot)
@@ -109,6 +102,38 @@ impl<K: TransactionKind> Transaction<K> {
         let result = storage_engine.get_storage_with_proof(&self.context, storage_path).unwrap();
         Ok(result)
     }
+
+    pub fn debug_account(
+        &self,
+        output_file: &std::fs::File,
+        address_path: AddressPath,
+        verbosity_level: u32,
+    ) -> Result<(), TransactionError> {
+        let metadata = self.context.metadata.clone();
+        let context = TransactionContext::new(metadata);
+        let storage_engine = self.database.inner.storage_engine.read();
+
+        storage_engine
+            .print_path(&context, address_path.to_nibbles(), output_file, verbosity_level)
+            .unwrap();
+        Ok(())
+    }
+
+    pub fn debug_storage(
+        &self,
+        output_file: &std::fs::File,
+        storage_path: StoragePath,
+        verbosity_level: u32,
+    ) -> Result<(), TransactionError> {
+        let metadata = self.context.metadata.clone();
+        let context = TransactionContext::new(metadata);
+        let storage_engine = self.database.inner.storage_engine.read();
+
+        storage_engine
+            .print_path(&context, &storage_path.full_path(), output_file, verbosity_level)
+            .unwrap();
+        Ok(())
+    }
 }
 
 impl Transaction<RW> {
@@ -131,27 +156,15 @@ impl Transaction<RW> {
     }
 
     pub fn commit(mut self) -> Result<(), TransactionError> {
-        let storage_engine = self.database.inner.storage_engine.read();
+        let mut storage_engine = self.database.inner.storage_engine.write();
         let mut changes =
             self.pending_changes.drain().collect::<Vec<(Nibbles, Option<TrieValue>)>>();
 
         if !changes.is_empty() {
-            // Assume the worst case scenario where each account and storage slot requires a new
-            // page, plus an extra buffer TODO: page buffer and grow_by should be
-            // configurable, but for now 1000 is assumed to be good enough.
-            // It's also possible that we could use a more sophisticated algorithm to estimate the
-            // number of pages required. Note that resizing the current memory-mapped
-            // page manager requires remapping all pages, and cannot be done while any readers are
-            // open.
-            storage_engine
-                .ensure_page_buffer(&self.context, changes.len() as u32 + 1000, 1.2)
-                .unwrap();
-
             storage_engine.set_values(&mut self.context, changes.as_mut()).unwrap();
         }
 
         let mut transaction_manager = self.database.inner.transaction_manager.write();
-        let storage_engine = self.database.inner.storage_engine.read();
         storage_engine.commit(&self.context).unwrap();
 
         let mut metadata = self.database.inner.metadata.write();

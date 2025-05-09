@@ -2,6 +2,7 @@ use alloy_primitives::{B256, U256};
 use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
 use proptest::prelude::*;
 use proptest_derive::Arbitrary;
+use reth_primitives_traits::Account as RethAccount;
 
 #[derive(Debug, Clone, PartialEq, Eq, Arbitrary)]
 pub struct Account {
@@ -11,6 +12,17 @@ pub struct Account {
     pub storage_root: B256,
     #[proptest(strategy = "prop_oneof!(any::<B256>(), Just(KECCAK_EMPTY))")]
     pub code_hash: B256,
+}
+
+impl From<RethAccount> for Account {
+    fn from(reth_account: RethAccount) -> Self {
+        Account::new(
+            reth_account.nonce,
+            reth_account.balance,
+            EMPTY_ROOT_HASH,
+            reth_account.get_bytecode_hash(),
+        )
+    }
 }
 
 impl Account {

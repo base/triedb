@@ -27,7 +27,7 @@ fn bench_reads(c: &mut Criterion) {
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
         group.bench_with_input(BenchmarkId::new("random_reads", size), &size, |b, _| {
             b.iter(|| {
-                let tx = db.begin_ro().unwrap();
+                let mut tx = db.begin_ro().unwrap();
                 for addr in &addresses {
                     let a = tx.get_account(addr.clone()).unwrap();
                     assert!(a.is_some());
@@ -60,7 +60,7 @@ fn bench_storage_reads_single_account(c: &mut Criterion) {
             &size,
             |b, _| {
                 b.iter(|| {
-                    let tx = db.begin_ro().unwrap();
+                    let mut tx = db.begin_ro().unwrap();
                     for storage_path in &storage_paths {
                         let a = tx.get_storage_slot(storage_path.clone()).unwrap();
                         assert!(a.is_some());
@@ -88,11 +88,11 @@ fn bench_storage_reads_multiple_accounts(c: &mut Criterion) {
 
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
         group.bench_with_input(
-            BenchmarkId::new("random_mutiple_account_storage_reads", size),
+            BenchmarkId::new("random_multiple_account_storage_reads", size),
             &size,
             |b, _| {
                 b.iter(|| {
-                    let tx = db.begin_ro().unwrap();
+                    let mut tx = db.begin_ro().unwrap();
                     for storage_path in &storage_paths {
                         let a = tx.get_storage_slot(storage_path.clone()).unwrap();
                         assert!(a.is_some());
@@ -115,16 +115,31 @@ fn bench_inserts(c: &mut Criterion) {
             (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+        let mut first_iteration = true;
         group.bench_with_input(BenchmarkId::new("batch_inserts", size), &size, |b, _| {
-            b.iter(|| {
-                let mut tx = db.begin_rw().unwrap();
-                for addr in &addresses {
-                    let account =
-                        Account::new(1, U256::from(1000u64), EMPTY_ROOT_HASH, KECCAK_EMPTY);
-                    tx.set_account(addr.clone(), Some(account)).unwrap();
-                }
-                tx.commit().unwrap();
-            });
+            b.iter_with_setup(
+                || {
+                    // Not to clean up before the first iteration.
+                    if first_iteration {
+                        first_iteration = false;
+                        return;
+                    }
+                    let mut tx = db.begin_rw().unwrap();
+                    for addr in &addresses {
+                        tx.set_account(addr.clone(), None).unwrap();
+                    }
+                    tx.commit().unwrap();
+                },
+                |_| {
+                    let mut tx = db.begin_rw().unwrap();
+                    for addr in &addresses {
+                        let account =
+                            Account::new(1, U256::from(1000u64), EMPTY_ROOT_HASH, KECCAK_EMPTY);
+                        tx.set_account(addr.clone(), Some(account)).unwrap();
+                    }
+                    tx.commit().unwrap();
+                },
+            );
         });
     }
     group.finish();
@@ -154,17 +169,33 @@ fn bench_storage_inserts_single_account(c: &mut Criterion) {
         tx.commit().unwrap();
 
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+        let mut first_iteration = true;
         group.bench_with_input(
             BenchmarkId::new("batch_inserts_single_account_storage", size),
             &size,
             |b, _| {
-                b.iter(|| {
-                    let mut tx = db.begin_rw().unwrap();
-                    for (storage_path, storage_value) in &storage_paths_values {
-                        tx.set_storage_slot(storage_path.clone(), Some(*storage_value)).unwrap();
-                    }
-                    tx.commit().unwrap();
-                });
+                b.iter_with_setup(
+                    || {
+                        // Not to clean up before the first iteration.
+                        if first_iteration {
+                            first_iteration = false;
+                            return;
+                        }
+                        let mut tx = db.begin_rw().unwrap();
+                        for (storage_path, _) in &storage_paths_values {
+                            tx.set_storage_slot(storage_path.clone(), None).unwrap();
+                        }
+                        tx.commit().unwrap();
+                    },
+                    |_| {
+                        let mut tx = db.begin_rw().unwrap();
+                        for (storage_path, storage_value) in &storage_paths_values {
+                            tx.set_storage_slot(storage_path.clone(), Some(*storage_value))
+                                .unwrap();
+                        }
+                        tx.commit().unwrap();
+                    },
+                );
             },
         );
     }
@@ -172,7 +203,7 @@ fn bench_storage_inserts_single_account(c: &mut Criterion) {
 }
 
 fn bench_storage_inserts_multiple_accounts(c: &mut Criterion) {
-    let mut group = c.benchmark_group("insert_mutliple_accounts_storage_operations");
+    let mut group = c.benchmark_group("insert_multiple_accounts_storage_operations");
 
     for &size in SIZES {
         let (_dir, db) = setup_database_with_storage(size);
@@ -202,17 +233,33 @@ fn bench_storage_inserts_multiple_accounts(c: &mut Criterion) {
         tx.commit().unwrap();
 
         group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+        let mut first_iteration = true;
         group.bench_with_input(
             BenchmarkId::new("batch_inserts_multiple_account_storage", size),
             &size,
             |b, _| {
-                b.iter(|| {
-                    let mut tx = db.begin_rw().unwrap();
-                    for (storage_path, storage_value) in &storage_paths_values {
-                        tx.set_storage_slot(storage_path.clone(), Some(*storage_value)).unwrap();
-                    }
-                    tx.commit().unwrap();
-                });
+                b.iter_with_setup(
+                    || {
+                        // Not to clean up before the first iteration.
+                        if first_iteration {
+                            first_iteration = false;
+                            return;
+                        }
+                        let mut tx = db.begin_rw().unwrap();
+                        for (storage_path, _) in &storage_paths_values {
+                            tx.set_storage_slot(storage_path.clone(), None).unwrap();
+                        }
+                        tx.commit().unwrap();
+                    },
+                    |_| {
+                        let mut tx = db.begin_rw().unwrap();
+                        for (storage_path, storage_value) in &storage_paths_values {
+                            tx.set_storage_slot(storage_path.clone(), Some(*storage_value))
+                                .unwrap();
+                        }
+                        tx.commit().unwrap();
+                    },
+                );
             },
         );
     }
@@ -387,7 +434,7 @@ fn bench_storage_single_account_deletes(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_storage_mutliple_accounts_deletes(c: &mut Criterion) {
+fn bench_storage_multiple_accounts_deletes(c: &mut Criterion) {
     let mut group = c.benchmark_group("delete_multiple_accounts_storage_operations");
 
     for &size in SIZES {
@@ -425,11 +472,12 @@ fn bench_mixed_operations(c: &mut Criterion) {
 
     for &size in SIZES {
         let (_dir, db) = setup_database(size);
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = StdRng::seed_from_u64(42); // Same seed with setup_database
+        let mut new_rng = StdRng::seed_from_u64(43); // Different seed with setup_database
         let existing_addresses: Vec<AddressPath> =
             (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
         let new_addresses: Vec<AddressPath> =
-            (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
+            (0..BATCH_SIZE).map(|_| generate_random_address(&mut new_rng)).collect();
         let existing_accounts_with_storage: Vec<AddressPath> =
             (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
@@ -471,6 +519,8 @@ fn bench_mixed_operations(c: &mut Criterion) {
             }
         }
 
+        let inserted_accounts: RefCell<HashSet<AddressPath>> = RefCell::new(HashSet::new());
+        let inserted_storage: RefCell<HashSet<StoragePath>> = RefCell::new(HashSet::new());
         let deleted_accounts: RefCell<HashSet<AddressPath>> = RefCell::new(HashSet::new());
         let deleted_storage: RefCell<HashSet<StoragePath>> = RefCell::new(HashSet::new());
 
@@ -478,14 +528,22 @@ fn bench_mixed_operations(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("mixed_workload", size), &size, |b, _| {
             b.iter_with_setup(
                 || {
-                    // repopulate deleted values
                     let mut tx = db.begin_rw().unwrap();
+
+                    // delete inserted values
+                    for inserted_account_address in inserted_accounts.borrow().clone().into_iter() {
+                        tx.set_account(inserted_account_address.clone(), None).unwrap();
+                    }
+                    for inserted_storage_path in inserted_storage.borrow().clone().into_iter() {
+                        tx.set_storage_slot(inserted_storage_path.clone(), None).unwrap();
+                    }
+
+                    // repopulate deleted values
                     for deleted_account_address in deleted_accounts.borrow().clone().into_iter() {
                         let account =
                             Account::new(1, U256::from(1000u64), EMPTY_ROOT_HASH, KECCAK_EMPTY);
                         tx.set_account(deleted_account_address.clone(), Some(account)).unwrap();
                     }
-
                     for deleted_storage_path in deleted_storage.borrow().clone().into_iter() {
                         let mut new_value = deleted_storage_path.get_slot().pack();
                         new_value.reverse();
@@ -496,6 +554,8 @@ fn bench_mixed_operations(c: &mut Criterion) {
 
                     tx.commit().unwrap();
 
+                    inserted_accounts.borrow_mut().clear();
+                    inserted_storage.borrow_mut().clear();
                     deleted_accounts.borrow_mut().clear();
                     deleted_storage.borrow_mut().clear();
                 },
@@ -520,6 +580,7 @@ fn bench_mixed_operations(c: &mut Criterion) {
                                     KECCAK_EMPTY,
                                 );
                                 tx.set_account(address.clone(), Some(account)).unwrap();
+                                inserted_accounts.borrow_mut().insert(address);
                             }
                             2 => {
                                 // Update
@@ -550,7 +611,9 @@ fn bench_mixed_operations(c: &mut Criterion) {
                                 let (storage_path, storage_value) =
                                     new_storage_slots_in_existing_accounts_with_storage[i].clone();
 
-                                tx.set_storage_slot(storage_path, Some(storage_value)).unwrap();
+                                tx.set_storage_slot(storage_path.clone(), Some(storage_value))
+                                    .unwrap();
+                                inserted_storage.borrow_mut().insert(storage_path);
                             }
                             6 => {
                                 // Update storage
@@ -592,6 +655,6 @@ criterion_group!(
     bench_storage_single_account_updates,
     bench_storage_multiple_account_updates,
     bench_storage_single_account_deletes,
-    bench_storage_mutliple_accounts_deletes
+    bench_storage_multiple_accounts_deletes
 );
 criterion_main!(benches);
