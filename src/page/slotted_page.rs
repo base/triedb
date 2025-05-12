@@ -1,5 +1,6 @@
 use super::{Page, PageError, PageMut};
 use crate::storage::value::{Value, ValueRef};
+use arrayvec::ArrayVec;
 use cell_pointer::CellPointer;
 use std::{
     cmp::{max, Ordering},
@@ -9,7 +10,7 @@ use std::{
 
 pub(crate) mod cell_pointer;
 
-const MAX_NUM_CELLS: u8 = 255; // With 1 byte for the number of cells, the maximum number of cells is 255.
+const MAX_NUM_CELLS: usize = 255; // With 1 byte for the number of cells, the maximum number of cells is 255.
 pub const CELL_POINTER_SIZE: usize = 3;
 
 // A page that contains a sequence of pointers to variable-length values,
@@ -217,7 +218,7 @@ impl SlottedPageMut<'_> {
                 return Ok(i);
             }
         }
-        if num_cells == MAX_NUM_CELLS {
+        if num_cells as usize == MAX_NUM_CELLS {
             return Err(PageError::NoFreeCells);
         }
         Ok(num_cells)
@@ -313,9 +314,9 @@ impl SlottedPageMut<'_> {
         let num_cells = self.num_cells();
         let new_num_cells = max(num_cells, index + 1);
         let header_size = new_num_cells as usize * CELL_POINTER_SIZE + 1;
-        let mut used_space = Vec::new();
-        for i in 0..num_cells {
-            let cp = self.get_cell_pointer(i)?;
+
+        let mut used_space = ArrayVec::<_, MAX_NUM_CELLS>::new();
+        for cp in self.cell_pointers_iter() {
             if cp.is_deleted() {
                 continue;
             }
