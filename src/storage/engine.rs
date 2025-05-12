@@ -22,6 +22,7 @@ use std::{
     cmp::{max, Ordering},
     fmt::Debug,
     io,
+    sync::Arc,
 };
 
 /// The [StorageEngine] is responsible for managing the storage of data in the database.
@@ -1784,9 +1785,9 @@ impl StorageEngine {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Error {
-    IO(io::Error),
+    IO(Arc<io::Error>),
     NodeError(NodeError),
     PageError(PageError),
     InvalidCommonPrefixIndex,
@@ -1809,7 +1810,7 @@ impl From<NodeError> for Error {
 
 impl From<io::Error> for Error {
     fn from(error: io::Error) -> Self {
-        Self::IO(error)
+        Self::IO(error.into())
     }
 }
 

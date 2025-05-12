@@ -3,7 +3,7 @@ use crate::{
     snapshot::SnapshotId,
 };
 use memmap2::{Advice, MmapMut, MmapOptions};
-use std::{fs::File, path::Path};
+use std::{fs::File, path::Path, sync::Arc};
 
 // Manages pages in a memory mapped file.
 #[derive(Debug)]
@@ -36,7 +36,7 @@ impl PageManager {
         opts: &PageManagerOptions,
         path: impl AsRef<Path>,
     ) -> Result<Self, PageError> {
-        let file = opts.open_options.open(path).map_err(PageError::IO)?;
+        let file = opts.open_options.open(path)?;
         Self::from_file_with_options(opts, file)
     }
 
@@ -73,11 +73,15 @@ impl PageManager {
 
         // SAFETY: we assume that we have full ownership of the file, even though in practice
         // there's no way to guarantee it
-        let mmap =
-            unsafe { MmapOptions::new().len(mmap_len).map_mut(&file).map_err(PageError::IO)? };
-        mmap.advise(Advice::Random).map_err(PageError::IO)?;
+        let mmap = unsafe {
+            MmapOptions::new()
+                .len(mmap_len)
+                .map_mut(&file)
+                .map_err(|err| PageError::IO(Arc::new(err)))?
+        };
+        mmap.advise(Advice::Random)?;
 
-        let file_len = file.metadata().map_err(PageError::IO)?.len();
+        let file_len = file.metadata()?.len();
         let min_file_len = (opts.page_count as u64) * (Page::SIZE as u64);
         assert!(
             file_len >= min_file_len,
@@ -154,7 +158,7 @@ impl PageManager {
 
         assert!(new_len > cur_len, "reached max capacity");
 
-        self.file.set_len(new_len).map_err(PageError::IO)?;
+        self.file.set_len(new_len)?;
         self.file_len = new_len;
         Ok(())
     }
@@ -189,7 +193,7 @@ impl PageManager {
 
     /// Syncs pages to the backing file.
     pub fn commit(&mut self) -> Result<(), PageError> {
-        self.mmap.flush().map_err(PageError::IO)
+        Ok(self.mmap.flush()?)
     }
 }
 

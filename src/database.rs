@@ -45,7 +45,7 @@ impl Metadata {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Error {
     PageError(PageError),
     CloseError(engine::Error),
