@@ -1,6 +1,5 @@
 use super::{Page, PageError, PageMut};
 use crate::storage::value::{Value, ValueRef};
-use arrayvec::ArrayVec;
 use cell_pointer::CellPointer;
 use std::{
     cmp::{max, Ordering},
@@ -315,7 +314,7 @@ impl SlottedPageMut<'_> {
         let new_num_cells = max(num_cells, index + 1);
         let header_size = new_num_cells as usize * CELL_POINTER_SIZE + 1;
 
-        let mut used_space = ArrayVec::<_, MAX_NUM_CELLS>::new();
+        let mut used_space = Vec::with_capacity(num_cells as usize);
         for cp in self.cell_pointers_iter() {
             if cp.is_deleted() {
                 continue;
