@@ -9,7 +9,7 @@ use std::{
 
 pub(crate) mod cell_pointer;
 
-const MAX_NUM_CELLS: usize = 255; // With 1 byte for the number of cells, the maximum number of cells is 255.
+const MAX_NUM_CELLS: u8 = 255; // With 1 byte for the number of cells, the maximum number of cells is 255.
 pub const CELL_POINTER_SIZE: usize = 3;
 
 // A page that contains a sequence of pointers to variable-length values,
@@ -217,7 +217,7 @@ impl SlottedPageMut<'_> {
                 return Ok(i);
             }
         }
-        if num_cells as usize == MAX_NUM_CELLS {
+        if num_cells == MAX_NUM_CELLS {
             return Err(PageError::NoFreeCells);
         }
         Ok(num_cells)
