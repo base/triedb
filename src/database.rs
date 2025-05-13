@@ -1,13 +1,12 @@
 use crate::{
     context::TransactionContext,
+    meta::{MetadataManager, OpenMetadataError},
     metrics::DatabaseMetrics,
-    page::{OrphanPageManager, PageError, PageId, PageManager, RootPage},
-    snapshot::SnapshotId,
+    page::{PageError, PageManager},
     storage::engine::{self, StorageEngine},
     transaction::{Transaction, TransactionError, TransactionManager, RO, RW},
 };
 use alloy_primitives::B256;
-use alloy_trie::EMPTY_ROOT_HASH;
 use parking_lot::RwLock;
 use std::{io, path::Path};
 
@@ -19,116 +18,72 @@ pub struct Database {
 
 #[derive(Debug)]
 pub(crate) struct Inner {
-    pub(crate) metadata: RwLock<Metadata>,
     pub(crate) storage_engine: RwLock<StorageEngine>,
     pub(crate) transaction_manager: RwLock<TransactionManager>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Metadata {
-    pub(crate) root_page_id: PageId,
-    pub(crate) root_subtrie_page_id: PageId,
-    pub(crate) max_page_number: PageId,
-    pub(crate) snapshot_id: SnapshotId,
-    pub(crate) state_root: B256,
-}
-
-impl Metadata {
-    pub fn next(&self) -> Self {
-        Self {
-            snapshot_id: self.snapshot_id + 1,
-            root_page_id: (self.root_page_id + 1) % 2,
-            max_page_number: self.max_page_number,
-            root_subtrie_page_id: self.root_subtrie_page_id,
-            state_root: self.state_root,
-        }
-    }
 }
 
 #[derive(Debug)]
 pub enum Error {
     PageError(PageError),
-    CloseError(engine::Error),
+    EngineError(engine::Error),
+}
+
+#[derive(Debug)]
+pub enum OpenError {
+    PageError(PageError),
+    MetadataError(OpenMetadataError),
+    IO(io::Error),
 }
 
 impl Database {
-    pub fn create(file_path: impl AsRef<Path>) -> Result<Self, Error> {
-        let mut page_manager =
-            PageManager::options().create_new(true).open(file_path).map_err(Error::PageError)?;
-        // allocate the first 256 pages for the root, orphans, and root subtrie
+    pub fn create(path: impl AsRef<Path>) -> Result<Self, OpenError> {
+        let db_file_path = path.as_ref();
+
+        let mut meta_file_path = db_file_path.to_path_buf();
+        meta_file_path.as_mut_os_string().push(".meta");
+        let mut meta_manager =
+            MetadataManager::open(meta_file_path).map_err(OpenError::MetadataError)?;
+
+        let mut page_manager = PageManager::options()
+            .create_new(true)
+            .open(db_file_path)
+            .map_err(OpenError::PageError)?;
+
+        // TODO: Allocate the first 256 pages because the existing code requires them. Remove this
+        // later.
         for i in 0..256 {
-            let page = page_manager.allocate(0).map_err(Error::PageError)?;
+            let page = page_manager.allocate(0).map_err(OpenError::PageError)?;
             assert_eq!(page.id(), i);
         }
+        meta_manager.dirty_slot_mut().set_page_count(256);
 
-        let orphan_manager = OrphanPageManager::new();
+        page_manager.commit().map_err(OpenError::PageError)?;
+        meta_manager.commit().map_err(OpenError::IO)?;
 
-        let metadata = Metadata {
-            snapshot_id: 0,
-            root_page_id: 0,
-            max_page_number: 255,
-            root_subtrie_page_id: 0,
-            state_root: EMPTY_ROOT_HASH,
-        };
-
-        let db = Self::new(metadata, StorageEngine::new(page_manager, orphan_manager));
-
-        let tx = db.begin_rw().unwrap();
-        tx.commit().unwrap();
-
-        Ok(db)
+        Ok(Self::new(StorageEngine::new(page_manager, meta_manager)))
     }
 
-    pub fn open(file_path: impl AsRef<Path>) -> Result<Self, Error> {
-        let mut page_manager = PageManager::options()
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, OpenError> {
+        let db_file_path = path.as_ref();
+
+        let mut meta_file_path = db_file_path.to_path_buf();
+        meta_file_path.as_mut_os_string().push(".meta");
+        let meta_manager =
+            MetadataManager::open(meta_file_path).map_err(OpenError::MetadataError)?;
+
+        let page_count = meta_manager.active_slot().page_count();
+        let page_manager = PageManager::options()
             .create(false)
-            .page_count(256)
-            .open(file_path)
-            .map_err(Error::PageError)?;
+            .page_count(page_count)
+            .open(db_file_path)
+            .map_err(OpenError::PageError)?;
 
-        let root_page_0 = page_manager.get(0, 0).map_err(Error::PageError)?;
-        let root_page_1 = page_manager.get(0, 1).map_err(Error::PageError)?;
-
-        let root_0 = RootPage::try_from(root_page_0).map_err(Error::PageError)?;
-        let root_1 = RootPage::try_from(root_page_1).map_err(Error::PageError)?;
-
-        let root_page = if root_0.snapshot_id() > root_1.snapshot_id() { root_0 } else { root_1 };
-
-        let orphaned_page_ids =
-            root_page.get_orphaned_page_ids(&page_manager).map_err(Error::PageError)?;
-        let orphan_manager = OrphanPageManager::new_with_unlocked_page_ids(orphaned_page_ids);
-
-        let metadata: Metadata = root_page.into();
-        page_manager.set_size(metadata.max_page_number + 1);
-
-        let storage_engine = StorageEngine::new(page_manager, orphan_manager);
-        Ok(Self::new(metadata, storage_engine))
+        Ok(Self::new(StorageEngine::new(page_manager, meta_manager)))
     }
 
-    pub fn print_page<W: io::Write>(self, buf: W, page_id: Option<u32>) -> Result<(), Error> {
-        let metadata = self.inner.metadata.read().clone();
-
-        let context = TransactionContext::new(metadata);
-        let storage_engine = self.inner.storage_engine.read();
-        // TODO: Must use `expect()` because `storage::engine::Error` and `database::Error` are not
-        // compatible. There's probably no reason to use two different error enums here, so maybe
-        // we should unify them. Or maybe we could just rely on `std::io::Error`.
-        storage_engine.print_page(&context, buf, page_id).expect("write failed");
-        Ok(())
-    }
-}
-
-impl Drop for Database {
-    fn drop(&mut self) {
-        self.commit().expect("failed to close database")
-    }
-}
-
-impl Database {
-    pub fn new(metadata: Metadata, storage_engine: StorageEngine) -> Self {
+    pub fn new(storage_engine: StorageEngine) -> Self {
         Self {
             inner: Inner {
-                metadata: RwLock::new(metadata),
                 storage_engine: RwLock::new(storage_engine),
                 transaction_manager: RwLock::new(TransactionManager::new()),
             },
@@ -136,29 +91,39 @@ impl Database {
         }
     }
 
+    pub fn print_page<W: io::Write>(self, buf: W, page_id: Option<u32>) -> Result<(), Error> {
+        let storage_engine = self.inner.storage_engine.read();
+        let context = storage_engine.read_context();
+        // TODO: Must use `expect()` because `storage::engine::Error` and `database::Error` are not
+        // compatible. There's probably no reason to use two different error enums here, so maybe
+        // we should unify them. Or maybe we could just rely on `std::io::Error`.
+        storage_engine.print_page(&context, buf, page_id).expect("write failed");
+        Ok(())
+    }
+
     pub fn begin_rw(&self) -> Result<Transaction<'_, RW>, TransactionError> {
         let mut transaction_manager = self.inner.transaction_manager.write();
         let mut storage_engine = self.inner.storage_engine.write();
-        let metadata = self.inner.metadata.read().next();
-        let min_snapshot_id = transaction_manager.begin_rw(metadata.snapshot_id)?;
+        let metadata = storage_engine.metadata().dirty_slot();
+        let min_snapshot_id = transaction_manager.begin_rw(metadata.snapshot_id())?;
         if min_snapshot_id > 0 {
             storage_engine.unlock(min_snapshot_id - 1);
         }
-        let context = TransactionContext::new(metadata);
+        let context = storage_engine.write_context();
         Ok(Transaction::new(context, self))
     }
 
     pub fn begin_ro(&self) -> Result<Transaction<'_, RO>, TransactionError> {
         let mut transaction_manager = self.inner.transaction_manager.write();
-        let metadata = self.inner.metadata.read().clone();
-        transaction_manager.begin_ro(metadata.snapshot_id)?;
-        let context = TransactionContext::new(metadata);
+        let storage_engine = self.inner.storage_engine.read();
+        let metadata = storage_engine.metadata().active_slot();
+        transaction_manager.begin_ro(metadata.snapshot_id())?;
+        let context = storage_engine.read_context();
         Ok(Transaction::new(context, self))
     }
 
     pub fn state_root(&self) -> B256 {
-        let metadata = self.inner.metadata.read();
-        metadata.state_root
+        self.inner.storage_engine.read().metadata().active_slot().root_node_hash()
     }
 
     pub fn close(mut self) -> Result<(), Error> {
@@ -167,10 +132,8 @@ impl Database {
 
     fn commit(&mut self) -> Result<(), Error> {
         let mut storage_engine = self.inner.storage_engine.write();
-        let metadata = self.inner.metadata.read();
-        let context = TransactionContext::new(metadata.clone());
-        storage_engine.commit(&context).map_err(Error::CloseError)?;
-        Ok(())
+        let context = storage_engine.write_context();
+        storage_engine.commit(&context).map_err(Error::EngineError)
     }
 
     pub fn size(&self) -> u32 {
@@ -205,22 +168,16 @@ impl Database {
     }
 }
 
-impl<'p> From<RootPage<'p>> for Metadata {
-    fn from(root_page: RootPage<'p>) -> Self {
-        Self {
-            root_page_id: root_page.id(),
-            root_subtrie_page_id: root_page.root_subtrie_page_id(),
-            max_page_number: root_page.max_page_number(),
-            snapshot_id: root_page.snapshot_id(),
-            state_root: root_page.state_root(),
-        }
+impl Drop for Database {
+    fn drop(&mut self) {
+        self.commit().expect("failed to close database")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{address, U256};
-    use alloy_trie::KECCAK_EMPTY;
+    use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
     use std::fs::File;
     use tempdir::TempDir;
 

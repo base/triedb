@@ -94,18 +94,6 @@ impl PageManager {
         self.next_page_id
     }
 
-    /// Sets the number of pages currently stored in the file.
-    pub fn set_size(&mut self, size: u32) {
-        assert!(size <= self.capacity(), "size ({}) exceeds capacity ({})", size, self.capacity());
-        assert!(
-            size as u64 <= self.file_len / (Page::SIZE as u64),
-            "size ({}) exceeds the number of pages in the file ({})",
-            size,
-            self.file_len / (Page::SIZE as u64)
-        );
-        self.next_page_id = size;
-    }
-
     /// Returns the maximum number of pages that can be allocated to the file.
     pub fn capacity(&self) -> u32 {
         (self.mmap.len() / Page::SIZE).min(u32::MAX as usize) as u32

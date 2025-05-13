@@ -82,7 +82,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
     }
 
     pub fn state_root(&self) -> B256 {
-        self.context.metadata.state_root
+        self.context.root_node_hash
     }
 
     pub fn get_account_with_proof(
@@ -165,27 +165,20 @@ impl Transaction<'_, RW> {
         let mut transaction_manager = self.database.inner.transaction_manager.write();
         storage_engine.commit(&self.context).unwrap();
 
-        let mut metadata = self.database.inner.metadata.write();
-        *metadata = self.context.metadata.clone();
-
         self.database.update_metrics_rw(&self.context);
 
-        transaction_manager.remove_transaction(self.context.metadata.snapshot_id, true)?;
+        transaction_manager.remove_transaction(self.context.snapshot_id, true)?;
 
         self.committed = true;
         Ok(())
     }
 
     pub fn rollback(mut self) -> Result<(), TransactionError> {
-        let mut transaction_manager = self.database.inner.transaction_manager.write();
-        let storage_engine = self.database.inner.storage_engine.read();
-        // TODO: this is temperorary until we actually implement rollback.
-        // we need to update the metadata to the next snapshot id.
-        let mut metadata = self.database.inner.metadata.write();
-        *metadata = self.context.metadata.clone();
-
+        let storage_engine = self.database.inner.storage_engine.write();
         storage_engine.rollback(&self.context).unwrap();
-        transaction_manager.remove_transaction(self.context.metadata.snapshot_id, true)?;
+
+        let mut transaction_manager = self.database.inner.transaction_manager.write();
+        transaction_manager.remove_transaction(self.context.snapshot_id, true)?;
 
         self.committed = false;
         Ok(())
@@ -195,7 +188,7 @@ impl Transaction<'_, RW> {
 impl Transaction<'_, RO> {
     pub fn commit(mut self) -> Result<(), TransactionError> {
         let mut transaction_manager = self.database.inner.transaction_manager.write();
-        transaction_manager.remove_transaction(self.context.metadata.snapshot_id, false)?;
+        transaction_manager.remove_transaction(self.context.snapshot_id, false)?;
 
         self.committed = true;
         Ok(())
