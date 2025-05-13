@@ -496,15 +496,26 @@ impl StorageEngine {
         common_prefix: Nibbles,
         common_prefix_length: usize,
     ) -> Result<PointerChange, Error> {
-        // Ensure page has enough space for a new branch and leaf node
-        // TODO: use a more accurate threshold
-        if slotted_page.num_free_bytes() < 1000 {
+        // Create a new branch node with the common prefix
+        let mut new_parent_branch = Node::new_branch(common_prefix)?;
+
+        // Ensure page has enough space for a new branch + a new leaf node.
+        // a. New leaf node created in next free cell index.
+        // b. New branch node created by updating the existing node at page_index. Usually the
+        // branch node with 2 children size is (2+2+2*37 = 78 bytes) + prefix_length, the account
+        // node (not contract) is smaller, hence will delete the current cell and allocate new cell.
+        //
+        // Another approach could be more efficient to consider:
+        // a. Update current cell with new node (smaller size since the prefix is shorter), create
+        // new pointer to this cell.
+        // b. Create a new cell for the new branch node. Update page_index to point to this new
+        // branch.
+        //
+        // This approach allocate only 1 new slotted page for the branch node.
+        if slotted_page.num_free_bytes() < node.size() + new_parent_branch.size() {
             self.split_page(context, slotted_page)?;
             return Err(Error::PageSplit(0));
         }
-
-        // Create a new branch node with the common prefix
-        let mut new_parent_branch = Node::new_branch(common_prefix)?;
 
         // Update the prefix of the existing node and insert it into the page
         let node_branch_index = node.prefix()[common_prefix_length];
