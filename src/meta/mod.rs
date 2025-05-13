@@ -92,7 +92,6 @@ mod error;
 use crate::{page::PageId, snapshot::SnapshotId};
 use alloy_primitives::B256;
 use memmap2::MmapMut;
-use siphasher::sip::SipHasher;
 use std::{
     cmp::Ordering,
     fs::File,
@@ -273,7 +272,7 @@ impl MetadataSlot {
     #[inline]
     #[must_use]
     fn hash(&self) -> u64 {
-        SipHasher::new().hash(self.as_bytes())
+        fxhash::hash64(self.as_bytes())
     }
 }
 
