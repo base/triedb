@@ -313,9 +313,9 @@ impl SlottedPageMut<'_> {
         let num_cells = self.num_cells();
         let new_num_cells = max(num_cells, index + 1);
         let header_size = new_num_cells as usize * CELL_POINTER_SIZE + 1;
-        let mut used_space = Vec::new();
-        for i in 0..num_cells {
-            let cp = self.get_cell_pointer(i)?;
+
+        let mut used_space = Vec::with_capacity(num_cells as usize);
+        for cp in self.cell_pointers_iter() {
             if cp.is_deleted() {
                 continue;
             }
