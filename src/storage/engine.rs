@@ -19,11 +19,7 @@ use crate::{
 };
 use alloy_primitives::StorageValue;
 use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
-use std::{
-    cmp::{max, Ordering},
-    fmt::Debug,
-    io,
-};
+use std::{cmp::Ordering, fmt::Debug, io};
 
 /// The [StorageEngine] is responsible for managing the storage of data in the database.
 /// It handles reading and writing account and storage values, as well as managing the lifecycle of
@@ -114,17 +110,18 @@ impl StorageEngine {
         context: &mut TransactionContext,
         address_path: AddressPath,
     ) -> Result<Option<Account>, Error> {
-        if context.root_node_page_id == 0 {
-            return Ok(None);
-        }
+        match context.root_node_page_id {
+            None => Ok(None),
+            Some(root_node_page_id) => {
+                let page = self.get_page(context, root_node_page_id)?;
+                let slotted_page = SlottedPage::try_from(page)?;
+                let path: Nibbles = address_path.into();
 
-        let page = self.get_page(context, context.root_node_page_id)?;
-        let slotted_page = SlottedPage::try_from(page)?;
-        let path: Nibbles = address_path.into();
-
-        match self.get_value_from_page(context, &path, 0, slotted_page, 0)? {
-            Some(TrieValue::Account(account)) => Ok(Some(account)),
-            _ => Ok(None),
+                match self.get_value_from_page(context, &path, 0, slotted_page, 0)? {
+                    Some(TrieValue::Account(account)) => Ok(Some(account)),
+                    _ => Ok(None),
+                }
+            }
         }
     }
 
@@ -135,9 +132,11 @@ impl StorageEngine {
         context: &mut TransactionContext,
         storage_path: StoragePath,
     ) -> Result<Option<StorageValue>, Error> {
-        if context.root_node_page_id == 0 {
-            return Ok(None);
-        }
+        let root_node_page_id = match context.root_node_page_id {
+            None => return Ok(None),
+            Some(page_id) => page_id,
+        };
+
         let original_path: Nibbles = storage_path.full_path();
 
         // check the cache
@@ -171,8 +170,7 @@ impl StorageEngine {
             None => {
                 context.transaction_metrics.inc_cache_storage_read_miss();
 
-                let page_id = context.root_node_page_id;
-                let page = self.get_page(context, page_id)?;
+                let page = self.get_page(context, root_node_page_id)?;
                 let slotted_page = SlottedPage::try_from(page)?;
                 (slotted_page, 0, 0)
             }
@@ -271,7 +269,7 @@ impl StorageEngine {
         mut changes: &mut [(Nibbles, Option<TrieValue>)],
     ) -> Result<(), Error> {
         changes.sort_by(|a, b| a.0.cmp(&b.0));
-        if context.root_node_page_id == 0 {
+        if context.root_node_page_id.is_none() {
             // Handle empty trie case, inserting the first new value before traversing the trie.
             let page = self.allocate_page(context)?;
             let mut slotted_page = SlottedPageMut::try_from(page)?;
@@ -279,7 +277,7 @@ impl StorageEngine {
             let value = value.as_ref().expect("unable to delete from empty trie");
             let root_pointer =
                 self.initialize_empty_trie(context, path, value, &mut slotted_page)?;
-            context.root_node_page_id = root_pointer.location().page_id().unwrap();
+            context.root_node_page_id = root_pointer.location().page_id();
             context.root_node_hash = root_pointer.rlp().as_hash().unwrap();
             if remaining_changes.is_empty() {
                 return Ok(());
@@ -295,14 +293,14 @@ impl StorageEngine {
         });
 
         let pointer_change =
-            self.set_values_in_page(context, changes, 0, context.root_node_page_id)?;
+            self.set_values_in_page(context, changes, 0, context.root_node_page_id.unwrap())?;
         match pointer_change {
             PointerChange::Update(pointer) => {
-                context.root_node_page_id = pointer.location().page_id().unwrap();
+                context.root_node_page_id = pointer.location().page_id();
                 context.root_node_hash = pointer.rlp().as_hash().unwrap();
             }
             PointerChange::Delete => {
-                context.root_node_page_id = 0;
+                context.root_node_page_id = None;
                 context.root_node_hash = EMPTY_ROOT_HASH;
             }
             PointerChange::None => (),
@@ -1254,7 +1252,7 @@ impl StorageEngine {
     fn orphan_subtrie(
         &mut self,
         context: &mut TransactionContext,
-        page_id: u32,
+        page_id: PageId,
     ) -> Result<(), Error> {
         let page = self.get_page(context, page_id)?;
         let slotted_page = SlottedPage::try_from(page)?;
@@ -1333,18 +1331,17 @@ impl StorageEngine {
         &self,
         context: &TransactionContext,
         mut buf: W,
-        page_id: Option<u32>,
+        page_id: Option<PageId>,
     ) -> Result<(), Error> {
-        if context.root_node_page_id == 0 {
-            return Ok(());
-        }
-
-        let (page_res, print_whole_db) = match page_id {
-            Some(id) => (self.get_page(context, id), false),
-            None => (self.get_page(context, context.root_node_page_id), true),
+        let root_node_page_id = match context.root_node_page_id {
+            None => return Ok(()),
+            Some(page_id) => page_id,
         };
 
-        let page = page_res?;
+        let (page, print_whole_db) = match page_id {
+            Some(id) => (self.get_page(context, id)?, false),
+            None => (self.get_page(context, root_node_page_id)?, true),
+        };
 
         let slotted_page = SlottedPage::try_from(page)?;
         self.print_page_helper(
@@ -1448,7 +1445,10 @@ impl StorageEngine {
         mut buf: W,
         verbosity_level: u32,
     ) -> Result<(), Error> {
-        let page_id = context.root_node_page_id;
+        let page_id = match context.root_node_page_id {
+            None => return Ok(()),
+            Some(page_id) => page_id,
+        };
         let page = self.get_page(context, page_id)?;
         let slotted_page = SlottedPage::try_from(page)?;
 
@@ -1557,7 +1557,7 @@ impl StorageEngine {
     // Helper function to convert node information to string for printing/writing to file
     fn write_node_value<W: io::Write>(
         node: &Node,
-        page_id: u32,
+        page_id: PageId,
         buf: &mut W,
         indent: &str,
     ) -> Result<(), Error> {
@@ -1756,7 +1756,7 @@ impl StorageEngine {
             page
         };
 
-        context.page_count = max(context.page_count, page_to_return.id() + 1);
+        context.page_count = self.page_manager.size();
 
         Ok(page_to_return)
     }
@@ -1825,10 +1825,10 @@ impl From<io::Error> for Error {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
+    use super::*;
     use crate::{
         account::Account,
+        page::page_id,
         storage::{
             engine::PageError,
             test_utils::{
@@ -1843,8 +1843,7 @@ mod tests {
     };
     use proptest::prelude::*;
     use rand::{rngs::StdRng, seq::SliceRandom, Rng, RngCore, SeedableRng};
-
-    use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_allocate_get_mut_clone() {
@@ -1852,7 +1851,7 @@ mod tests {
 
         // Initial allocation
         let mut page = storage_engine.allocate_page(&mut context).unwrap();
-        assert_eq!(page.id(), 256);
+        assert_eq!(page.id(), page_id!(1));
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 1);
         assert_metrics(&context, 0, 1, 0, 0);
@@ -1864,15 +1863,15 @@ mod tests {
         context = storage_engine.write_context();
 
         // reading mutated page
-        let page = storage_engine.get_page(&context, 256).unwrap();
-        assert_eq!(page.id(), 256);
+        let page = storage_engine.get_page(&context, page_id!(1)).unwrap();
+        assert_eq!(page.id(), page_id!(1));
         assert_eq!(page.contents()[0], 123);
         assert_eq!(page.snapshot_id(), 1);
         assert_metrics(&context, 1, 0, 0, 0);
 
         // cloning a page should allocate a new page and orphan the original page
-        let cloned_page = storage_engine.get_mut_clone(&mut context, 256).unwrap();
-        assert_eq!(cloned_page.id(), 257);
+        let cloned_page = storage_engine.get_mut_clone(&mut context, page_id!(1)).unwrap();
+        assert_eq!(cloned_page.id(), page_id!(2));
         assert_eq!(cloned_page.contents()[0], 123);
         assert_eq!(cloned_page.snapshot_id(), 2);
         assert_ne!(cloned_page.id(), page.id());
@@ -1881,7 +1880,7 @@ mod tests {
         // the next allocation should not come from the orphaned page, as the snapshot id is the
         // same as when the page was orphaned
         let page = storage_engine.allocate_page(&mut context).unwrap();
-        assert_eq!(page.id(), 258);
+        assert_eq!(page.id(), 3);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 2);
         assert_metrics(&context, 2, 2, 0, 0);
@@ -1893,7 +1892,7 @@ mod tests {
         // the next allocation should not come from the orphaned page, as the snapshot has not been
         // unlocked yet
         let page = storage_engine.allocate_page(&mut context).unwrap();
-        assert_eq!(page.id(), 259);
+        assert_eq!(page.id(), 4);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 3);
         assert_metrics(&context, 0, 1, 0, 0);
@@ -1903,32 +1902,33 @@ mod tests {
         // the next allocation should come from the orphaned page because the snapshot id has
         // increased. The page data should be zeroed out.
         let page = storage_engine.allocate_page(&mut context).unwrap();
-        assert_eq!(page.id(), 256);
+        assert_eq!(page.id(), 1);
         assert_eq!(page.contents()[0], 0);
         assert_eq!(page.snapshot_id(), 3);
         assert_metrics(&context, 1, 1, 1, 0);
 
         // assert that the metadata tracks the largest page number
-        assert_eq!(context.page_count, 260);
+        assert_eq!(context.page_count, 4);
     }
 
     #[test]
     fn test_shared_page_mutability() {
-        let (mut storage_engine, context) = create_test_engine(300);
+        let (mut storage_engine, mut context) = create_test_engine(300);
 
-        let page1 = storage_engine.get_page(&context, 1).unwrap();
+        let page1 = storage_engine.allocate_page(&mut context).unwrap();
+        assert_eq!(page1.id(), page_id!(1));
         assert_eq!(page1.contents()[0], 0);
-        assert_metrics(&context, 1, 0, 0, 0);
+        assert_metrics(&context, 0, 1, 0, 0);
 
-        let mut page2 = storage_engine.get_mut_page(&context, 1).unwrap();
+        let mut page2 = storage_engine.get_mut_page(&context, page_id!(1)).unwrap();
         page2.contents_mut()[0] = 123;
-        assert_metrics(&context, 2, 0, 0, 0);
+        assert_metrics(&context, 1, 1, 0, 0);
 
         storage_engine.commit(&context).unwrap();
 
         assert_eq!(page1.contents()[0], 123);
         assert_eq!(page2.contents()[0], 123);
-        assert_metrics(&context, 2, 0, 0, 0);
+        assert_metrics(&context, 1, 1, 0, 0);
     }
 
     #[test]
@@ -1944,7 +1944,7 @@ mod tests {
                     .as_mut(),
             )
             .unwrap();
-        assert_eq!(context.root_node_page_id, 256);
+        assert_eq!(context.root_node_page_id, Some(page_id!(1)));
         assert_metrics(&context, 0, 1, 0, 0);
 
         let test_cases = vec![
@@ -2302,7 +2302,7 @@ mod tests {
         }
 
         // Split the page
-        let page = storage_engine.get_mut_page(&context, 256).unwrap();
+        let page = storage_engine.get_mut_page(&context, page_id!(1)).unwrap();
         let mut slotted_page = SlottedPageMut::try_from(page).unwrap();
         storage_engine.split_page(&mut context, &mut slotted_page).unwrap();
 
@@ -2438,7 +2438,7 @@ mod tests {
             // the account should be cached
             let account_cache_location =
                 context.contract_account_loc_cache.get(address_path.to_nibbles()).unwrap();
-            assert_eq!(account_cache_location.0, 256);
+            assert_eq!(account_cache_location.0, 1);
             assert_eq!(account_cache_location.1, 2); // 0 is the branch page, 1 is the first EOA
                                                      // account, 2 is the this contract account
 
@@ -2543,7 +2543,7 @@ mod tests {
                     .as_mut(),
             )
             .unwrap();
-        assert_eq!(context.root_node_page_id, 256);
+        assert_eq!(context.root_node_page_id, Some(page_id!(1)));
 
         let test_cases = vec![
             (
@@ -2612,7 +2612,7 @@ mod tests {
                     .as_mut(),
             )
             .unwrap();
-        assert_eq!(context.root_node_page_id, 256);
+        assert_eq!(context.root_node_page_id, Some(page_id!(1)));
 
         let test_cases = vec![
             (
@@ -2820,7 +2820,7 @@ mod tests {
 
         // Force multiple splits to stress the system
         // Find all pages in the trie and split them recursively
-        let mut pages_to_split = vec![context.root_node_page_id];
+        let mut pages_to_split = vec![context.root_node_page_id.unwrap()];
         while let Some(page_id) = pages_to_split.pop() {
             let page_result = storage_engine.get_mut_page(&context, page_id);
             if matches!(page_result, Err(Error::PageError(PageError::PageNotFound(_)))) {
@@ -2831,7 +2831,7 @@ mod tests {
             // Try to split this page
             if storage_engine.split_page(&mut context, &mut slotted_page).is_ok() {
                 // If split succeeded, add the new pages to be processed
-                pages_to_split.push(page_id + 1); // New page created by split
+                pages_to_split.push(page_id.inc().unwrap()); // New page created by split
             }
         }
 
@@ -2943,7 +2943,7 @@ mod tests {
         // Get all pages and force splits on them
         let mut page_ids = Vec::new();
         // Start with the root page
-        page_ids.push(context.root_node_page_id);
+        page_ids.push(context.root_node_page_id.unwrap());
 
         // Process each page
         for i in 0..page_ids.len() {
@@ -3069,7 +3069,7 @@ mod tests {
                     .as_mut(),
             )
             .unwrap();
-        assert_eq!(context.root_node_page_id, 256);
+        assert_eq!(context.root_node_page_id, Some(page_id!(1)));
 
         let test_cases = vec![
             (address!("0x4200000000000000000000000000000000000015"), create_test_account(123, 456)),
@@ -3139,7 +3139,7 @@ mod tests {
                     .as_mut(),
             )
             .unwrap();
-        assert_eq!(context.root_node_page_id, 256);
+        assert_eq!(context.root_node_page_id, Some(page_id!(1)));
 
         let test_cases = vec![
             (address!("0x4200000000000000000000000000000000000015"), create_test_account(123, 456)),
@@ -3217,7 +3217,7 @@ mod tests {
                     .as_mut(),
             )
             .unwrap();
-        assert_eq!(context.root_node_page_id, 256);
+        assert_eq!(context.root_node_page_id, Some(page_id!(1)));
 
         let test_cases = vec![
             (
@@ -3325,7 +3325,7 @@ mod tests {
                     .as_mut(),
             )
             .unwrap();
-        assert_eq!(context.root_node_page_id, 256);
+        assert_eq!(context.root_node_page_id, Some(page_id!(1)));
 
         let test_cases = vec![
             (
@@ -3453,9 +3453,9 @@ mod tests {
                 .as_mut(),
             )
             .unwrap();
-        assert_eq!(context.root_node_page_id, 256);
+        assert_eq!(context.root_node_page_id, Some(page_id!(1)));
 
-        let page = storage_engine.get_page(&context, context.root_node_page_id).unwrap();
+        let page = storage_engine.get_page(&context, context.root_node_page_id.unwrap()).unwrap();
         let slotted_page = SlottedPage::try_from(page).unwrap();
         let node: Node = slotted_page.get_value(0).unwrap();
         assert!(node.is_branch());
@@ -3483,7 +3483,7 @@ mod tests {
         assert_eq!(read_account2, Some(account2));
 
         // check the the root node is a leaf
-        let page = storage_engine.get_page(&context, context.root_node_page_id).unwrap();
+        let page = storage_engine.get_page(&context, context.root_node_page_id.unwrap()).unwrap();
         let slotted_page = SlottedPage::try_from(page).unwrap();
         let node: Node = slotted_page.get_value(0).unwrap();
         assert!(!node.is_branch());
@@ -3526,9 +3526,9 @@ mod tests {
                 .as_mut(),
             )
             .unwrap();
-        assert_eq!(context.root_node_page_id, 256);
+        assert_eq!(context.root_node_page_id, Some(page_id!(1)));
 
-        let page = storage_engine.get_page(&context, context.root_node_page_id).unwrap();
+        let page = storage_engine.get_page(&context, context.root_node_page_id.unwrap()).unwrap();
         let slotted_page = SlottedPage::try_from(page).unwrap();
         let mut root_node: Node = slotted_page.get_value(0).unwrap();
         assert!(root_node.is_branch());
@@ -3538,7 +3538,8 @@ mod tests {
         // next we will force add a branch node in the middle of the root node (index 5)
 
         // page1 will hold our root node and the branch node
-        let page1 = storage_engine.get_mut_page(&context, context.root_node_page_id).unwrap();
+        let page1 =
+            storage_engine.get_mut_page(&context, context.root_node_page_id.unwrap()).unwrap();
         let mut slotted_page1 = SlottedPageMut::try_from(page1).unwrap();
 
         // page2 will hold our 1st child
@@ -3697,7 +3698,7 @@ mod tests {
             .expect("can set child");
 
         let root_node_page = storage_engine.allocate_page(&mut context).unwrap();
-        context.root_node_page_id = root_node_page.id();
+        context.root_node_page_id = Some(root_node_page.id());
         let mut slotted_page = SlottedPageMut::try_from(root_node_page).unwrap();
         let root_index = slotted_page.insert_value(&root_node).unwrap();
         assert_eq!(root_index, 0);
@@ -3727,7 +3728,8 @@ mod tests {
 
         // THEN: the root branch node should be deleted and the root node should be the leaf of
         // child 2 on the child's page
-        let root_node_page = storage_engine.get_page(&context, context.root_node_page_id).unwrap();
+        let root_node_page =
+            storage_engine.get_page(&context, context.root_node_page_id.unwrap()).unwrap();
         let root_node_slotted = SlottedPage::try_from(root_node_page).unwrap();
         let root_node: Node = root_node_slotted.get_value(0).unwrap();
         assert!(!root_node.is_branch());
@@ -3761,9 +3763,9 @@ mod tests {
                     .as_mut(),
             )
             .unwrap();
-        assert_eq!(context.root_node_page_id, 256);
+        assert_eq!(context.root_node_page_id, Some(page_id!(1)));
         let root_subtrie_page =
-            storage_engine.get_page(&context, context.root_node_page_id).unwrap();
+            storage_engine.get_page(&context, context.root_node_page_id.unwrap()).unwrap();
         let root_subtrie_contents_before = root_subtrie_page.contents().to_vec();
 
         // WHEN: an account with a similiar but divergent path is deleted
@@ -3779,7 +3781,7 @@ mod tests {
 
         // THEN: the trie should remain unchanged
         let root_subtrie_page =
-            storage_engine.get_page(&context, context.root_node_page_id).unwrap();
+            storage_engine.get_page(&context, context.root_node_page_id.unwrap()).unwrap();
         let root_subtrie_contents_after = root_subtrie_page.contents().to_vec();
         assert_eq!(root_subtrie_contents_before, root_subtrie_contents_after);
 
@@ -3794,7 +3796,8 @@ mod tests {
                     .as_mut(),
             )
             .unwrap();
-        let root_node_page = storage_engine.get_page(&context, context.root_node_page_id).unwrap();
+        let root_node_page =
+            storage_engine.get_page(&context, context.root_node_page_id.unwrap()).unwrap();
         let root_subtrie_contents_before = root_node_page.contents().to_vec();
         let root_node_slotted_page = SlottedPage::try_from(root_node_page).unwrap();
         let root_node: Node = root_node_slotted_page.get_value(0).unwrap();
@@ -3811,7 +3814,7 @@ mod tests {
 
         // THEN: the trie should remain unchanged
         let root_subtrie_page =
-            storage_engine.get_page(&context, context.root_node_page_id).unwrap();
+            storage_engine.get_page(&context, context.root_node_page_id.unwrap()).unwrap();
         let root_subtrie_contents_after = root_subtrie_page.contents().to_vec();
         assert_eq!(root_subtrie_contents_before, root_subtrie_contents_after);
     }

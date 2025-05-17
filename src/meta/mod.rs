@@ -89,7 +89,10 @@
 
 mod error;
 
-use crate::{page::PageId, snapshot::SnapshotId};
+use crate::{
+    page::{PageId, RawPageId},
+    snapshot::SnapshotId,
+};
 use alloy_primitives::B256;
 use memmap2::MmapMut;
 use std::{
@@ -162,9 +165,9 @@ pub struct MetadataSlot {
     /// Hash of the root node
     root_node_hash: [u8; 32],
     /// Link to the page containing the root node
-    root_node_page_id: PageId,
+    root_node_page_id: RawPageId,
     /// Number of pages contained in the data file
-    page_count: PageId,
+    page_count: u32,
     /// Total size of `orphan_pages` (including reclaimed pages)
     orphan_pages_len: u32,
     /// Index of the first reclaimed page inside of `orphan_pages`
@@ -194,8 +197,8 @@ impl MetadataSlot {
     /// Returns the ID of the page containing the root node.
     #[inline]
     #[must_use]
-    pub fn root_node_page_id(&self) -> PageId {
-        self.root_node_page_id
+    pub fn root_node_page_id(&self) -> Option<PageId> {
+        self.root_node_page_id.try_into().ok()
     }
 
     /// Returns the total number of pages contained in the data file.
@@ -203,7 +206,7 @@ impl MetadataSlot {
     /// This count includes both used and orphaned pages.
     #[inline]
     #[must_use]
-    pub fn page_count(&self) -> PageId {
+    pub fn page_count(&self) -> u32 {
         self.page_count
     }
 
@@ -232,15 +235,15 @@ impl MetadataSlot {
 
     /// Sets the ID of the page containing the root node.
     #[inline]
-    pub fn set_root_node_page_id(&mut self, root_node_page_id: PageId) {
-        self.root_node_page_id = root_node_page_id;
+    pub fn set_root_node_page_id(&mut self, root_node_page_id: Option<PageId>) {
+        self.root_node_page_id = root_node_page_id.map(RawPageId::from).unwrap_or_default();
     }
 
     /// Sets the total number of pages contained in the data file.
     ///
     /// This count must include both used and orphaned pages.
     #[inline]
-    pub fn set_page_count(&mut self, page_count: PageId) {
+    pub fn set_page_count(&mut self, page_count: u32) {
         self.page_count = page_count;
     }
 
@@ -464,11 +467,11 @@ impl MetadataManager {
 
     /// Returns a slice containing the orphaned and reclaimed page IDs.
     #[inline]
-    fn raw_orphan_pages(&self) -> &[PageId] {
+    fn raw_orphan_pages(&self) -> &[RawPageId] {
         let (_, remaining_bytes) = MetadataSlots::ref_from_prefix(self.mmap.as_ref())
             .expect("memory map should have the right size and alignment");
-        let len = remaining_bytes.len() / mem::size_of::<PageId>();
-        <[PageId]>::ref_from_bytes_with_elems(remaining_bytes, len)
+        let len = remaining_bytes.len() / mem::size_of::<RawPageId>();
+        <[RawPageId]>::ref_from_bytes_with_elems(remaining_bytes, len)
             .expect("memory map should have the right size and alignment")
     }
 
@@ -478,12 +481,12 @@ impl MetadataManager {
     /// This convenience method is necessary because Rust borrow rules don't allow obtaining two
     /// mutable references to the same object.
     #[inline]
-    fn parts_mut(&mut self) -> (&HashedMetadataSlot, &mut HashedMetadataSlot, &mut [PageId]) {
+    fn parts_mut(&mut self) -> (&HashedMetadataSlot, &mut HashedMetadataSlot, &mut [RawPageId]) {
         let (meta, list) = MetadataSlots::mut_from_prefix(self.mmap.as_mut())
             .expect("memory map should have the right size and alignment");
 
         let list_len = list.len() / mem::size_of::<PageId>();
-        let list = <[PageId]>::mut_from_bytes_with_elems(list, list_len)
+        let list = <[RawPageId]>::mut_from_bytes_with_elems(list, list_len)
             .expect("memory map should have the right size and alignment");
 
         let [active, dirty] = meta
@@ -589,7 +592,11 @@ impl<'a> OrphanPages<'a> {
     pub fn iter(&self) -> impl FusedIterator<Item = PageId> + use<'_> {
         let list = self.manager.raw_orphan_pages();
         let (left, right) = self.manager.dirty_slot().actual_orphans_ranges();
-        list[right].iter().copied().chain(list[left].iter().copied())
+        list[right]
+            .iter()
+            .copied()
+            .chain(list[left].iter().copied())
+            .map(|id| PageId::new(id).expect("invalid page id in orphan list"))
     }
 
     /// Adds a page to the orphan page list, increasing the capacity of the list if necessary.
@@ -623,12 +630,12 @@ impl<'a> OrphanPages<'a> {
 
         if !intersection.is_empty() {
             if intersection.start == dirty_reclaimed_range.start {
-                list[dirty_reclaimed_range.start] = page_id;
+                list[dirty_reclaimed_range.start] = page_id.into();
                 dirty.reclaimed_orphans_start += 1;
                 dirty.reclaimed_orphans_end -= 1;
                 return Ok(());
             } else if intersection.end == dirty_reclaimed_range.end {
-                list[dirty_reclaimed_range.end - 1] = page_id;
+                list[dirty_reclaimed_range.end - 1] = page_id.into();
                 dirty.reclaimed_orphans_end -= 1;
                 return Ok(());
             }
@@ -640,7 +647,7 @@ impl<'a> OrphanPages<'a> {
         let (_, dirty_orphans_range) = dirty.actual_orphans_ranges();
         let index = active_orphans_range.end.max(dirty_orphans_range.end);
         if index < list.len() {
-            list[index] = page_id;
+            list[index] = page_id.into();
             dirty.orphan_pages_len += 1;
             return Ok(());
         }
@@ -656,11 +663,11 @@ impl<'a> OrphanPages<'a> {
 
         if !right.is_empty() {
             dirty.reclaimed_orphans_end += 1;
-            Some(list[right.start])
+            Some(list[right.start].try_into().expect("invalid page id in orphan list"))
         } else if !left.is_empty() {
             dirty.reclaimed_orphans_start -= 1;
             dirty.reclaimed_orphans_end += 1;
-            Some(list[left.end - 1])
+            Some(list[left.end - 1].try_into().expect("invalid page id in orphan list"))
         } else {
             None
         }
@@ -675,7 +682,7 @@ impl<'a> OrphanPages<'a> {
             let right_bound = right.start;
 
             for index in right {
-                let page_id = list[index];
+                let page_id = list[index].try_into().expect("invalid page id in orphan list");
                 if predicate(page_id) {
                     list.swap(index, right_bound);
                     dirty.reclaimed_orphans_end += 1;
@@ -688,7 +695,7 @@ impl<'a> OrphanPages<'a> {
             let left_bound = left.end - 1;
 
             for index in left {
-                let page_id = list[index];
+                let page_id = list[index].try_into().expect("invalid page id in orphan list");
                 if predicate(page_id) {
                     list.swap(index, left_bound);
                     dirty.reclaimed_orphans_start -= 1;
@@ -705,6 +712,7 @@ impl<'a> OrphanPages<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::page::page_id;
 
     #[test]
     fn persistence() {
@@ -718,12 +726,12 @@ mod tests {
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
             25, 26, 27, 28, 29, 30, 31, 32,
         ]));
-        dirty.set_root_node_page_id(123);
+        dirty.set_root_node_page_id(Some(page_id!(123)));
         dirty.set_page_count(456);
-        manager.orphan_pages().push(0xaa).expect("push failed");
-        manager.orphan_pages().push(0xbb).expect("push failed");
-        manager.orphan_pages().push(0xcc).expect("push failed");
-        manager.orphan_pages().push(0xdd).expect("push failed");
+        manager.orphan_pages().push(page_id!(0xaa)).expect("push failed");
+        manager.orphan_pages().push(page_id!(0xbb)).expect("push failed");
+        manager.orphan_pages().push(page_id!(0xcc)).expect("push failed");
+        manager.orphan_pages().push(page_id!(0xdd)).expect("push failed");
 
         manager.commit().expect("commit failed");
         manager.close().expect("close failed");
@@ -740,7 +748,7 @@ mod tests {
                 24, 25, 26, 27, 28, 29, 30, 31, 32
             ])
         );
-        assert_eq!(active.root_node_page_id(), 123);
+        assert_eq!(active.root_node_page_id(), Some(page_id!(123)));
         assert_eq!(active.page_count(), 456);
         assert_eq!(manager.orphan_pages().iter().collect::<Vec<_>>(), [0xaa, 0xbb, 0xcc, 0xdd]);
     }
@@ -774,7 +782,7 @@ mod tests {
             let page_id = *next_page_id;
             expected.insert(page_id);
             manager.orphan_pages().push(page_id).expect("push failed");
-            *next_page_id += 1;
+            *next_page_id = next_page_id.inc().expect("page id overflow");
         }
 
         fn pop(manager: &mut MetadataManager, expected: &mut HashSet<PageId>) {
@@ -846,7 +854,7 @@ mod tests {
                 MetadataManager::from_file(f).expect("failed to initialize metadata manager");
 
             let mut expected = HashSet::new();
-            let mut next_page_id = 0;
+            let mut next_page_id = page_id!(1);
 
             for snapshot_id in 1..=50 {
                 random_push_pop_cycle(&mut manager, &mut expected, &mut next_page_id, 100_000);
@@ -869,7 +877,7 @@ mod tests {
                     .expect("failed to initialize metadata manager");
 
             let mut expected = HashSet::new();
-            let mut next_page_id = 0;
+            let mut next_page_id = page_id!(1);
 
             for snapshot_id in 1..=50 {
                 let expected_at_previous_snapshot = expected.clone();

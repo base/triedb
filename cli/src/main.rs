@@ -5,6 +5,7 @@ use std::{fs::File, str};
 use triedb::{
     path::{AddressPath, StoragePath},
     Database,
+    page::PageId,
 };
 
 #[derive(Debug)]
@@ -45,7 +46,7 @@ enum Commands {
 
         /// Page ID to print (optional)
         #[arg(short = 'p', long = "page")]
-        page_id: Option<u32>,
+        page_id: Option<PageId>,
 
         /// Output filepath (optional)
         #[arg(short = 'o', long = "output", default_value = "./printed_page")]
@@ -165,7 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn print_page(db_path: &str, page_id: Option<u32>, output_path: &str) {
+fn print_page(db_path: &str, page_id: Option<PageId>, output_path: &str) {
     let db = match Database::open(db_path) {
         Ok(db) => db,
         Err(e) => panic!("Could not open database: {:?}", e),

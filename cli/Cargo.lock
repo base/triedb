@@ -2608,6 +2608,7 @@ dependencies = [
  "proptest-derive",
  "reth-trie-common",
  "sealed",
+ "static_assertions",
  "zerocopy 0.8.24",
 ]
 

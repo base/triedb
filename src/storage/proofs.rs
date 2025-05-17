@@ -57,11 +57,12 @@ impl StorageEngine {
         context: &TransactionContext,
         path: Nibbles,
     ) -> Result<Option<(TrieValue, MultiProof)>, Error> {
-        if context.root_node_page_id == 0 {
-            return Ok(None);
-        }
+        let root_node_page_id = match context.root_node_page_id {
+            None => return Ok(None),
+            Some(page_id) => page_id,
+        };
 
-        let slotted_page = self.get_slotted_page(context, context.root_node_page_id)?;
+        let slotted_page = self.get_slotted_page(context, root_node_page_id)?;
         let mut proof = MultiProof::default();
         let value =
             self.get_value_with_proof_from_page(context, &path, 0, slotted_page, 0, &mut proof)?;
