@@ -1207,6 +1207,46 @@ impl StorageEngine {
         Ok(())
     }
 
+    // Split the page into two, moving the parent of the node at cell_index to a new child page.
+    fn split_page_1<'p>(
+        &mut self,
+        context: &mut TransactionContext,
+        page: &mut SlottedPageMut<'_>,
+        cell_index: u8,
+    ) -> Result<(), Error> {
+        let x = find_path_to_node(page, 0, cell_index)?;
+        let x = x.unwrap();
+        // println!("\tpath to cell {}: {:?}", cell_index, x);
+        assert!(x.len() >= 1, "expected path to cell {} to be at least 1", cell_index);
+
+        let idx = min(3, x.len() - 1);
+        let (parent_cell_index, child_index) = x[idx];
+        // println!("\tparent cell index: {}, child index: {}", parent_cell_index, child_index);
+
+        // let result = find_parent_node(page, 0, cell_index)?;
+        // assert!(result.is_some(), "expected parent node for cell {}", cell_index);
+        // let (parent_cell_index, child_index) = result.unwrap();
+        let mut parent_node: Node = page.get_value(parent_cell_index)?;
+        let child_pointer = parent_node.child(child_index)?.unwrap();
+
+        let mut child_slotted_page = self.allocate_slotted_page(context)?;
+        // Move all child nodes that are in the current page
+        let location = move_subtrie_nodes(
+            page,
+            child_pointer.location().cell_index().unwrap(),
+            &mut child_slotted_page,
+        )?;
+        assert!(location.page_id().is_some(), "expected subtrie to be moved to a new page");
+        // Update the pointer in the root node to point to the new page
+        parent_node.set_child(
+            child_index,
+            Pointer::new(Location::for_page(child_slotted_page.id()), child_pointer.rlp().clone()),
+        )?;
+        page.set_value(parent_cell_index, &parent_node)?;
+
+        Ok(())
+    }
+
     // Recursively deletes a subtrie from the page, orphaning any pages that become fully
     // unreferenced as a result.
     fn delete_subtrie(
@@ -1728,6 +1768,37 @@ fn move_subtrie_nodes(
     Ok(node_location(target_page.id(), new_index))
 }
 
+// Returns the path to the node at look_for_cell_index from the node at cell_index.
+// The path is a list of (parent cell index, child index) tuples.
+// The parent cell index is in [0, 255] range.  The child index is in [0, 15] range.
+fn find_path_to_node(
+    page: &SlottedPageMut<'_>,
+    cell_index: u8,
+    look_for_cell_index: u8,
+) -> Result<Option<Vec<(u8, u8)>>, Error> {
+    let node: Node = page.get_value(cell_index)?;
+    if !node.has_children() {
+        return Ok(None);
+    }
+
+    let children = node.enumerate_children()?;
+    for (child_index, child_pointer) in children {
+        if let Some(child_cell_index) = child_pointer.location().cell_index() {
+            if child_cell_index == look_for_cell_index {
+                return Ok(Some(vec![(cell_index, child_index)]));
+            }
+            match find_path_to_node(page, child_cell_index, look_for_cell_index)? {
+                Some(mut result) => {
+                    result.push((cell_index, child_index));
+                    return Ok(Some(result));
+                }
+                None => {}
+            }
+        }
+    }
+    Ok(None)
+}
+
 impl StorageEngine {
     /// Allocates a new page from the underlying page manager.
     /// If there is an orphaned page available as of the given [SnapshotId],
@@ -1759,6 +1830,14 @@ impl StorageEngine {
         context.page_count = self.page_manager.size();
 
         Ok(page_to_return)
+    }
+
+    fn allocate_slotted_page(
+        &mut self,
+        context: &mut TransactionContext,
+    ) -> Result<SlottedPageMut<'_>, Error> {
+        let page = self.allocate_page(context)?;
+        Ok(SlottedPageMut::try_from(page)?)
     }
 
     pub fn commit(&mut self, context: &TransactionContext) -> Result<(), Error> {
