@@ -19,7 +19,11 @@ use crate::{
 };
 use alloy_primitives::StorageValue;
 use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
-use std::{cmp::Ordering, fmt::Debug, io};
+use std::{
+    cmp::{min, Ordering},
+    fmt::Debug,
+    io,
+};
 
 /// The [StorageEngine] is responsible for managing the storage of data in the database.
 /// It handles reading and writing account and storage values, as well as managing the lifecycle of
@@ -348,7 +352,7 @@ impl StorageEngine {
                     context.transaction_metrics.inc_pages_split();
                     split_count += 1;
                     // FIXME: this is a temporary limit to prevent infinite loops.
-                    if split_count > 20 {
+                    if split_count > 1000 {
                         return Err(Error::PageError(PageError::PageSplitLimitReached));
                     }
                 }
@@ -533,7 +537,10 @@ impl StorageEngine {
         //
         // This approach allocate only 1 new slotted page for the branch node.
         if slotted_page.num_free_bytes() < node.size() + new_parent_branch.size() {
-            self.split_page(context, slotted_page)?;
+            // println!("splitting at: page_id {:?}, cell_idx {:?}", slotted_page.id(), page_index);
+
+            // self.split_page(context, slotted_page)?;
+            self.split_page_1(context, slotted_page, page_index)?;
             return Err(Error::PageSplit(0));
         }
 
