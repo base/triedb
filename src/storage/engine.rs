@@ -619,7 +619,8 @@ impl StorageEngine {
         if new_node_size > old_node_size {
             let node_size_incr = new_node_size - old_node_size;
             if slotted_page.num_free_bytes() < node_size_incr {
-                self.split_page(context, slotted_page)?;
+                // self.split_page(context, slotted_page)?;
+                self.split_page_1(context, slotted_page, page_index)?;
                 return Err(Error::PageSplit(0));
             }
         }
@@ -774,7 +775,8 @@ impl StorageEngine {
         // 3. and add new cell pointer for the new leaf node (3 bytes)
         // when adding the new child, split the page.
         if slotted_page.num_free_bytes() < node_size_incr + new_node.size() + CELL_POINTER_SIZE {
-            self.split_page(context, slotted_page)?;
+            // self.split_page(context, slotted_page)?;
+            self.split_page_1(context, slotted_page, page_index)?;
             return Err(Error::PageSplit(0));
         }
 
@@ -968,7 +970,15 @@ impl StorageEngine {
                 if slotted_page.num_free_bytes() <
                     node_size_incr + new_node.size() + CELL_POINTER_SIZE
                 {
-                    self.split_page(context, slotted_page)?;
+                    // self.split_page(context, slotted_page)?;
+                    // fixme: do we need to split the page here? Or can we just move the new node to
+                    // new page???
+                    println!(
+                        "splitting at: page_id {:?}, cell_idx {:?}",
+                        slotted_page.id(),
+                        page_index
+                    );
+                    self.split_page_1(context, slotted_page, page_index)?;
                     return Err(Error::PageSplit(0));
                 }
 
