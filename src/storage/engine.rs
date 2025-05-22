@@ -537,9 +537,6 @@ impl StorageEngine {
         //
         // This approach allocate only 1 new slotted page for the branch node.
         if slotted_page.num_free_bytes() < node.size() + new_parent_branch.size() {
-            // println!("splitting at: page_id {:?}, cell_idx {:?}", slotted_page.id(), page_index);
-
-            // self.split_page(context, slotted_page)?;
             self.split_page_1(context, slotted_page, page_index)?;
             return Err(Error::PageSplit(0));
         }
@@ -970,15 +967,9 @@ impl StorageEngine {
                 if slotted_page.num_free_bytes() <
                     node_size_incr + new_node.size() + CELL_POINTER_SIZE
                 {
-                    // self.split_page(context, slotted_page)?;
-                    // fixme: do we need to split the page here? Or can we just move the new node to
-                    // new page???
-                    println!(
-                        "splitting at: page_id {:?}, cell_idx {:?}",
-                        slotted_page.id(),
-                        page_index
-                    );
-                    self.split_page_1(context, slotted_page, page_index)?;
+                    // TODO: consider to create new node in new page to avoid splitting the page
+                    // here
+                    self.split_page(context, slotted_page)?;
                     return Err(Error::PageSplit(0));
                 }
 
