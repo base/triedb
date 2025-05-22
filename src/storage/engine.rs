@@ -537,7 +537,7 @@ impl StorageEngine {
         //
         // This approach allocate only 1 new slotted page for the branch node.
         if slotted_page.num_free_bytes() < node.size() + new_parent_branch.size() {
-            self.split_page_1(context, slotted_page, page_index)?;
+            self.move_subtrie_to_new_page(context, slotted_page, page_index)?;
             return Err(Error::PageSplit(0));
         }
 
@@ -616,8 +616,7 @@ impl StorageEngine {
         if new_node_size > old_node_size {
             let node_size_incr = new_node_size - old_node_size;
             if slotted_page.num_free_bytes() < node_size_incr {
-                // self.split_page(context, slotted_page)?;
-                self.split_page_1(context, slotted_page, page_index)?;
+                self.move_subtrie_to_new_page(context, slotted_page, page_index)?;
                 return Err(Error::PageSplit(0));
             }
         }
@@ -772,8 +771,7 @@ impl StorageEngine {
         // 3. and add new cell pointer for the new leaf node (3 bytes)
         // when adding the new child, split the page.
         if slotted_page.num_free_bytes() < node_size_incr + new_node.size() + CELL_POINTER_SIZE {
-            // self.split_page(context, slotted_page)?;
-            self.split_page_1(context, slotted_page, page_index)?;
+            self.move_subtrie_to_new_page(context, slotted_page, page_index)?;
             return Err(Error::PageSplit(0));
         }
 
@@ -1216,36 +1214,34 @@ impl StorageEngine {
     }
 
     // Split the page into two, moving the parent of the node at cell_index to a new child page.
-    fn split_page_1<'p>(
+    // Condition is current page have the cell_index.
+    fn move_subtrie_to_new_page<'p>(
         &mut self,
         context: &mut TransactionContext,
         page: &mut SlottedPageMut<'_>,
         cell_index: u8,
     ) -> Result<(), Error> {
-        let x = find_path_to_node(page, 0, cell_index)?;
-        let x = x.unwrap();
-        // println!("\tpath to cell {}: {:?}", cell_index, x);
-        assert!(x.len() >= 1, "expected path to cell {} to be at least 1", cell_index);
+        // paths from the cell index 0 to the cell_index.
+        let paths = find_path_to_node(page, 0, cell_index)?;
+        let paths = paths.unwrap();
+        assert!(paths.len() >= 1, "expected paths to cell {} to be at least 1", cell_index);
 
-        let idx = min(3, x.len() - 1);
-        let (parent_cell_index, child_index) = x[idx];
-        // println!("\tparent cell index: {}, child index: {}", parent_cell_index, child_index);
-
-        // let result = find_parent_node(page, 0, cell_index)?;
-        // assert!(result.is_some(), "expected parent node for cell {}", cell_index);
-        // let (parent_cell_index, child_index) = result.unwrap();
+        // Take max 2 predecesors from the node.
+        const MAX_PREDECESSORS: usize = 2;
+        let idx = min(MAX_PREDECESSORS + 1, paths.len() - 1);
+        let (parent_cell_index, child_index) = paths[idx];
         let mut parent_node: Node = page.get_value(parent_cell_index)?;
         let child_pointer = parent_node.child(child_index)?.unwrap();
 
         let mut child_slotted_page = self.allocate_slotted_page(context)?;
-        // Move all child nodes that are in the current page
+        // Move all child nodes that are in the current page.
         let location = move_subtrie_nodes(
             page,
             child_pointer.location().cell_index().unwrap(),
             &mut child_slotted_page,
         )?;
         assert!(location.page_id().is_some(), "expected subtrie to be moved to a new page");
-        // Update the pointer in the root node to point to the new page
+        // Update the pointer in the root node to point to the new page.
         parent_node.set_child(
             child_index,
             Pointer::new(Location::for_page(child_slotted_page.id()), child_pointer.rlp().clone()),
