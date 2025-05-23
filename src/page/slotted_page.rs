@@ -223,7 +223,7 @@ impl SlottedPageMut<'_> {
     }
 
     // Returns the index of the next free cell in the page, which may include deleted cells.
-    fn next_free_cell_index(&self) -> Result<u8, PageError> {
+    pub fn next_free_cell_index(&self) -> Result<u8, PageError> {
         let num_cells = self.num_cells();
         for i in 0..num_cells {
             if self.get_cell_pointer(i)?.is_deleted() {

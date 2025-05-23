@@ -533,7 +533,7 @@ impl StorageEngine {
         //
         // This approach allocate only 1 new slotted page for the branch node.
         // todo: remove node.size()
-        if slotted_page.num_free_bytes() < node.size() + new_parent_branch.size() {
+        if slotted_page.num_free_bytes() < new_parent_branch.size() + CELL_POINTER_SIZE {
             self.split_page(context, slotted_page)?;
             return Err(Error::PageSplit(0));
         }
@@ -546,19 +546,20 @@ impl StorageEngine {
         let rlp_node = node.as_rlp_node();
         slotted_page.set_value(cell_index, node)?;
 
-        // Set node as one of the children of the new branch node
-        new_parent_branch.set_child(
-            node_branch_index,
-            Pointer::new(Location::for_cell(cell_index), rlp_node.clone()),
-        )?;
-        let new_parent_branch_cell_index = slotted_page.insert_value(&new_parent_branch)?;
-
-        slotted_page.swap_cell_pointers(cell_index, new_parent_branch_cell_index)?;
+        // Make sure there is no insertions until the new branch node is inserted
+        let new_parent_branch_cell_index = slotted_page.next_free_cell_index()?;
+        // Set child location to new_parent_branch_cell_index since it will be swapped with the
+        // existing node later.
         new_parent_branch.set_child(
             node_branch_index,
             Pointer::new(Location::for_cell(new_parent_branch_cell_index), rlp_node),
         )?;
-        slotted_page.set_value(cell_index, &new_parent_branch)?;
+        let inserted_branch_cell_index = slotted_page.insert_value(&new_parent_branch)?;
+        assert_eq!(
+            inserted_branch_cell_index, new_parent_branch_cell_index,
+            "new parent branch cell index should be the same as the next free cell index, a different caused by interruption between the next_free_cell_index and insert_value"
+        );
+        slotted_page.swap_cell_pointers(cell_index, new_parent_branch_cell_index)?;
 
         // println!(
         //     "cell_index: {:?}, new_parent_branch_cell_index: {:?}",
