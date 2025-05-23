@@ -1178,12 +1178,11 @@ impl StorageEngine {
         children_with_count.sort_by(|a, b| b.2.cmp(&a.2));
 
         let mut rest: &[(u8, &Pointer, u8)] = &children_with_count;
+        let mut root_node: Node = page.get_value(0)?;
 
         while page.num_free_bytes() < Page::DATA_SIZE / 4_usize {
             let child_page = self.allocate_page(context)?;
             let mut child_slotted_page = SlottedPageMut::try_from(child_page)?;
-
-            let mut root_node: Node = page.get_value(0)?;
 
             // Find the child with the largest subtrie
             let largest_child: &(u8, &Pointer, u8);
@@ -1205,8 +1204,8 @@ impl StorageEngine {
                     largest_child_pointer.rlp().clone(),
                 ),
             )?;
-            page.set_value(0, &root_node)?;
         }
+        page.set_value(0, &root_node)?;
 
         Ok(())
     }
