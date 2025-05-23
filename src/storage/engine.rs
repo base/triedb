@@ -1164,7 +1164,7 @@ impl StorageEngine {
         context: &mut TransactionContext,
         page: &mut SlottedPageMut<'_>,
     ) -> Result<(), Error> {
-        // count subtrie node and short in desc order
+        // count subtrie node and sort in desc order
         let root_node: Node = page.get_value(0)?;
         let children = root_node.enumerate_children()?;
         let mut children_with_count = children
@@ -1176,7 +1176,6 @@ impl StorageEngine {
             })
             .collect::<Vec<_>>();
         children_with_count.sort_by(|a, b| b.2.cmp(&a.2));
-        // println!("children_with_count: {:?}", children_with_count);
 
         let mut rest: &[(u8, &Pointer, u8)] = &children_with_count;
 
@@ -1191,22 +1190,6 @@ impl StorageEngine {
             (largest_child, rest) = rest.split_first().unwrap();
             let (largest_child_index, largest_child_pointer, _) = *largest_child;
 
-            // let (largest_child_index, largest_child_pointer) = root_node
-            //     .enumerate_children()?
-            //     .into_iter()
-            //     .max_by_key(|(_, ptr)| {
-            //         // If pointer points to a cell in current page, count nodes in that subtrie
-            //         if let Some(cell_index) = ptr.location().cell_index() {
-            //             count_subtrie_nodes(page, cell_index).unwrap_or(0)
-            //         } else {
-            //             // If pointer points to another page, count as 0
-            //             0
-            //         }
-            //     })
-            //     .ok_or(Error::PageError(PageError::PageIsFull))?;
-
-            // println!("moved: index {:?}, pointer {:?}", largest_child_index,
-            // largest_child_pointer); Move all child nodes that are in the current page
             let location = move_subtrie_nodes(
                 page,
                 largest_child_pointer.location().cell_index().unwrap(),
@@ -1223,24 +1206,6 @@ impl StorageEngine {
                 ),
             )?;
             page.set_value(0, &root_node)?;
-
-            // // Move the subtrie to the new page
-            // if let Some(cell_index) = largest_child_pointer.location().cell_index() {
-            //     // Move all child nodes that are in the current page
-            //     let location = move_subtrie_nodes(page, cell_index, &mut child_slotted_page)?;
-            //     assert!(location.page_id().is_some(), "expected subtrie to be moved to a new
-            // page");
-
-            //     // Update the pointer in the root node to point to the new page
-            //     root_node.set_child(
-            //         largest_child_index,
-            //         Pointer::new(
-            //             Location::for_page(child_slotted_page.id()),
-            //             largest_child_pointer.rlp().clone(),
-            //         ),
-            //     )?;
-            //     page.set_value(0, &root_node)?;
-            // }
         }
 
         Ok(())
