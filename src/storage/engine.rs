@@ -1774,6 +1774,14 @@ impl StorageEngine {
         Ok(())
     }
 
+    pub fn commit_meta(&mut self, context: &TransactionContext) -> Result<(), Error> {
+        let dirty_meta = self.meta_manager.dirty_slot_mut();
+        context.update_metadata(dirty_meta);
+        self.meta_manager.commit()?;
+
+        Ok(())
+    }
+
     /// Retrieves a mutable [Page] from the underlying [PageManager].
     pub fn get_mut_page<'p>(
         &mut self,

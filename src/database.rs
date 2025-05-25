@@ -116,13 +116,13 @@ impl Database {
     }
 
     pub fn close(mut self) -> Result<(), Error> {
-        self.commit()
+        self.commit_meta()
     }
 
-    fn commit(&mut self) -> Result<(), Error> {
+    fn commit_meta(&mut self) -> Result<(), Error> {
         let mut storage_engine = self.inner.storage_engine.write();
         let context = storage_engine.write_context();
-        storage_engine.commit(&context).map_err(Error::EngineError)
+        storage_engine.commit_meta(&context).map_err(Error::EngineError)
     }
 
     pub fn size(&self) -> u32 {
@@ -159,7 +159,8 @@ impl Database {
 
 impl Drop for Database {
     fn drop(&mut self) {
-        self.commit().expect("failed to close database")
+        println!("drop database");
+        self.commit_meta().expect("failed to close database")
     }
 }
 
