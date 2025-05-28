@@ -153,7 +153,7 @@ impl Transaction<RW> {
         Ok(())
     }
 
-    pub fn commit(mut self) -> Result<(), TransactionError> {
+    pub fn commit(&mut self) -> Result<(), TransactionError> {
         let mut storage_engine = self.database.inner.storage_engine.write();
         let mut changes =
             self.pending_changes.drain().collect::<Vec<(Nibbles, Option<TrieValue>)>>();

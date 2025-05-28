@@ -74,7 +74,7 @@ impl Database {
         let db = Self::new(metadata, StorageEngine::new(page_manager, orphan_manager));
         let db_arc = Arc::new(db);
 
-        let tx = db_arc.begin_rw().unwrap();
+        let mut tx = db_arc.begin_rw().unwrap();
         tx.commit().unwrap();
 
         Ok(Arc::try_unwrap(db_arc).unwrap())
