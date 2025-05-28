@@ -1,7 +1,7 @@
 use alloy_primitives::{hex, Address, StorageKey};
 use alloy_trie::Nibbles;
 use clap::{Parser, Subcommand, ValueEnum, ArgAction};
-use std::{fs::File, str};
+use std::{fs::File, str, io::Write};
 use triedb::{
     path::{AddressPath, StoragePath},
     Database,
@@ -48,8 +48,8 @@ enum Commands {
         page_id: Option<u32>,
 
         /// Output filepath (optional)
-        #[arg(short = 'o', long = "output", default_value = "/dev/stdout")]
-        output_path: String,
+        #[arg(short = 'o', long = "output")]
+        output_path: Option<String>,
     },
 
     /// Get information about a specific Trie Value
@@ -66,8 +66,8 @@ enum Commands {
         identifier: Vec<String>,
 
         /// Output filepath (optional)
-        #[arg(short = 'o', long = "output", default_value = "/dev/stdout")]
-        output_path: String,
+        #[arg(short = 'o', long = "output")]
+        output_path: Option<String>,
 
         /// Verbosity level for output. Options are:
         /// [none] Print account information
@@ -85,8 +85,8 @@ enum Commands {
         db_path: String,
 
         /// Output filepath (optional)
-        #[arg(short = 'o', long = "output", default_value = "/dev/stdout")]
-        output_path: String,
+        #[arg(short = 'o', long = "output")]
+        output_path: Option<String>,
     },
 
     /// Print statistics about the database
@@ -96,8 +96,8 @@ enum Commands {
         db_path: String,
 
         /// Output filepath (optional)
-        #[arg(short = 'o', long = "output", default_value = "/dev/stdout")]
-        output_path: String,
+        #[arg(short = 'o', long = "output")]
+        output_path: Option<String>,
     },
 }
 
@@ -176,40 +176,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match args.command {
         Commands::Print { db_path, page_id, output_path } => {
-            print_page(&db_path, page_id, &output_path);
+            print_page(&db_path, page_id, output_path)?;
         }
         Commands::TrieValue { db_path, identifier, output_path, verbosity } => {
             let identifier_str = identifier.join(" ");
-            get_trie_value(&db_path, &identifier_str, &output_path, verbosity)?;
+            get_trie_value(&db_path, &identifier_str, output_path, verbosity)?;
         }
         Commands::RootPage { db_path, output_path } => {
-            root_page_info(&db_path, &output_path)?;
+            root_page_info(&db_path, output_path)?;
         }
         Commands::Statistics { db_path, output_path } => {
-            print_statistics(&db_path, &output_path)?;
+            print_statistics(&db_path, output_path)?;
         }
     } 
 
     Ok(())
 }
 
-fn print_page(db_path: &str, page_id: Option<u32>, output_path: &str) {
+fn print_page(db_path: &str, page_id: Option<u32>, output_path: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     let db = match Database::open(db_path) {
         Ok(db) => db,
         Err(e) => panic!("Could not open database: {:?}", e),
     };
 
-    let output_file = File::create(output_path).unwrap();
-    match db.print_page(&output_file, page_id) {
-        Ok(_) => println!("Page printed to {}", output_path),
+    let output: Box<dyn Write> = if let Some(ref output_path) = output_path {
+        Box::new(File::create(output_path)?)
+    } else {
+        Box::new(std::io::stdout())
+    };
+
+    match db.print_page(output, page_id) {
+        Ok(_) => {
+            if let Some(output_path) = output_path {
+                println!("Page printed to {}", output_path);
+            }
+        }
         Err(e) => println!("Error printing page: {:?}", e),
     }
+    Ok(())
 }
 
 fn get_trie_value(
     db_path: &str,
     identifier: &str,
-    output_path: &str,
+    output_path: Option<String>,
     verbosity_level: u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = match Database::open(db_path) {
@@ -223,44 +233,66 @@ fn get_trie_value(
     // Convert to AddressPath or StoragePath
     let trie_value_path = identifier_to_trie_value_path(&trie_value_id)?;
 
-    let output_file = File::create(output_path)?;
+    let output: Box<dyn Write> = if let Some(output_path) = output_path {
+        Box::new(File::create(output_path)?)
+    } else {
+        Box::new(std::io::stdout())
+    };
 
     let tx = db.begin_ro()?;
     match trie_value_path {
         TrieValuePath::Account(address_path) => {
-            tx.debug_account(&output_file, address_path, verbosity_level)?;
+            tx.debug_account(output, address_path, verbosity_level)?;
         }
         TrieValuePath::Storage(storage_path) => {
-            tx.debug_storage(&output_file, storage_path, verbosity_level)?;
+            tx.debug_storage(output, storage_path, verbosity_level)?;
         }
     }
 
     Ok(())
 }
 
-fn print_statistics(db_path: &str, output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn print_statistics(db_path: &str, output_path: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     let db = match Database::open(db_path) {
         Ok(db) => db,
         Err(e) => panic!("Could not open database: {:?}", e),
     };
 
-    let output_file = File::create(output_path)?;
-    match db.print_statistics(&output_file) {
-        Ok(_) => println!("Statistics printed to {}", output_path),
+    let output: Box<dyn Write> = if let Some(ref output_path) = output_path {
+        Box::new(File::create(output_path)?)
+    } else {
+        Box::new(std::io::stdout())
+    };
+
+    match db.print_statistics(output) {
+        Ok(_) => {
+            if let Some(output_path) = output_path {
+                println!("Statistics printed to {}", output_path);
+            }
+        }
         Err(e) => println!("Error printing statistics: {:?}", e),
     }
     Ok(())
 }       
 
-fn root_page_info(db_path: &str, output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn root_page_info(db_path: &str, output_path: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     let db = match Database::open(db_path) {
         Ok(db) => db,
         Err(e) => panic!("Could not open database: {:?}", e),
     };
 
-    let output_file = File::create(output_path).unwrap();
-    match db.root_page_info(output_file, db_path) {
-        Ok(_) => println!("Info written to {}", output_path),
+    let output: Box<dyn Write> = if let Some(ref output_path) = output_path {
+        Box::new(File::create(output_path)?)
+    } else {
+        Box::new(std::io::stdout())
+    };
+
+    match db.root_page_info(output, db_path) {
+        Ok(_) => {
+            if let Some(output_path) = output_path {
+                println!("Info written to {}", output_path);
+            }
+        }
         Err(e) => println!("Error printing root page info: {:?}", e),
     }
     Ok(())
