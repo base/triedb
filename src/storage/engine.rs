@@ -1738,6 +1738,67 @@ impl StorageEngine {
             }
         }
     }
+
+    /// Traverses the trie from the given root node page id and returns a list of all reachable PageIds.
+    pub fn consistency_check(
+        &self,
+        root_node_page_id: Option<PageId>,
+        context: &TransactionContext,
+    ) -> Result<Vec<PageId>, Error> {
+        use std::collections::HashSet;
+        let mut reachable = HashSet::new();
+
+        // Start from the provided root node page id (if any)
+        if let Some(root_page_id) = root_node_page_id {
+            self.consistency_check_helper(context, root_page_id, 0, &mut reachable)?;
+        }
+        // If there is a second root (e.g. for a second trie), traverse from there as well
+        // (add logic here if needed for a second root)
+
+        let mut ids: Vec<PageId> = reachable.into_iter().collect();
+        ids.sort_by_key(|id| id.as_u32());
+        Ok(ids)
+    }
+
+    fn consistency_check_helper(
+        &self,
+        context: &TransactionContext,
+        page_id: PageId,
+        cell_index: u8,
+        reachable: &mut std::collections::HashSet<PageId>,
+    ) -> Result<(), Error> {
+        let page = self.get_page(context, page_id)?;
+        let slotted_page = SlottedPage::try_from(page)?;
+        let node: Node = slotted_page.get_value(cell_index)?;
+        match node {
+            Node::AccountLeaf { ref storage_root, .. } => {
+                if let Some(direct_child) = storage_root {
+                    let (new_slotted_page, new_cell_index) =
+                        self.get_slotted_page_and_index(context, direct_child, slotted_page)?;
+                    // If child is on a new page,insert the page into the set andrecurse
+                    if new_slotted_page.id() != page_id {
+                        reachable.insert(new_slotted_page.id());
+                        self.consistency_check_helper(context, new_slotted_page.id(), new_cell_index, reachable)?;
+                    } else {
+                        self.consistency_check_helper(context, page_id, new_cell_index, reachable)?;
+                    }
+                }
+            }
+            Node::Branch { ref children, .. } => {
+                for child in children.iter().flatten() {
+                    let (new_slotted_page, new_cell_index) =
+                        self.get_slotted_page_and_index(context, child, slotted_page.clone())?;
+                    if new_slotted_page.id() != page_id {
+                        self.consistency_check_helper(context, new_slotted_page.id(), new_cell_index, reachable)?;
+                    } else {
+                        self.consistency_check_helper(context, page_id, new_cell_index, reachable)?;
+                    }
+                }
+            }
+            Node::StorageLeaf { .. } => {}
+        }
+        Ok(())
+    }
 }
 
 fn node_location(page_id: PageId, page_index: u8) -> Location {

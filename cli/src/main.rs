@@ -100,6 +100,17 @@ enum Commands {
         #[arg(short = 'o', long = "output")]
         output_path: Option<String>,
     },
+
+    /// Run consistency checks on the database
+    ConsistencyCheck {
+        /// Path to the database file
+        #[arg(short = 'd', long = "database")]
+        db_path: String,
+
+        /// Output filepath (optional)
+        #[arg(short = 'o', long = "output")]
+        output_path: Option<String>,
+    },
 }
 
 fn parse_trie_value_identifier(
@@ -188,6 +199,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Statistics { db_path, output_path } => {
             print_statistics(&db_path, output_path)?;
+        }
+        Commands::ConsistencyCheck { db_path, output_path } => {
+            check_consistency(&db_path, output_path)?;
         }
     }
 
@@ -305,6 +319,32 @@ fn root_page_info(
             }
         }
         Err(e) => println!("Error printing root page info: {:?}", e),
+    }
+    Ok(())
+}
+
+fn check_consistency(
+    db_path: &str,
+    output_path: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = match Database::open(db_path) {
+        Ok(db) => db,
+        Err(e) => panic!("Could not open database: {:?}", e),
+    };
+
+    let output: Box<dyn Write> = if let Some(ref output_path) = output_path {
+        Box::new(File::create(output_path)?)
+    } else {
+        Box::new(std::io::stdout())
+    };
+
+    match db.consistency_check(output) {
+        Ok(_) => {
+            if let Some(output_path) = output_path {
+                println!("Consistency check results written to {}", output_path);
+            }
+        }
+        Err(e) => println!("Error during consistency check: {:?}", e),
     }
     Ok(())
 }

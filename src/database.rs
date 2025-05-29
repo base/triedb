@@ -126,6 +126,15 @@ impl Database {
         Ok(())
     }
 
+    pub fn consistency_check<W: io::Write>(self, buf: W) -> Result<(), Error> {
+        let storage_engine = self.inner.storage_engine.read();
+        let context = storage_engine.read_context();
+        let active_slot_page_id = storage_engine.metadata().active_slot().root_node_page_id();
+        let dirty_slot_page_id = storage_engine.metadata().dirty_slot().root_node_page_id();
+        storage_engine.consistency_check(&context, buf).expect("write failed");
+        Ok(())
+    }
+
     pub fn begin_rw(&self) -> Result<Transaction<'_, RW>, TransactionError> {
         let mut transaction_manager = self.inner.transaction_manager.write();
         let mut storage_engine = self.inner.storage_engine.write();
