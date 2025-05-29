@@ -1,8 +1,9 @@
 use alloy_primitives::{hex, Address, StorageKey};
 use alloy_trie::Nibbles;
-use clap::{Parser, Subcommand, ValueEnum, ArgAction};
-use std::{fs::File, str, io::Write};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use std::{fs::File, io::Write, str};
 use triedb::{
+    page::PageId,
     path::{AddressPath, StoragePath},
     Database,
 };
@@ -45,7 +46,7 @@ enum Commands {
 
         /// Page ID to print (optional)
         #[arg(short = 'p', long = "page")]
-        page_id: Option<u32>,
+        page_id: Option<PageId>,
 
         /// Output filepath (optional)
         #[arg(short = 'o', long = "output")]
@@ -188,12 +189,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Statistics { db_path, output_path } => {
             print_statistics(&db_path, output_path)?;
         }
-    } 
+    }
 
     Ok(())
 }
 
-fn print_page(db_path: &str, page_id: Option<u32>, output_path: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+fn print_page(
+    db_path: &str,
+    page_id: Option<PageId>,
+    output_path: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let db = match Database::open(db_path) {
         Ok(db) => db,
         Err(e) => panic!("Could not open database: {:?}", e),
@@ -252,7 +257,10 @@ fn get_trie_value(
     Ok(())
 }
 
-fn print_statistics(db_path: &str, output_path: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+fn print_statistics(
+    db_path: &str,
+    output_path: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let db = match Database::open(db_path) {
         Ok(db) => db,
         Err(e) => panic!("Could not open database: {:?}", e),
@@ -273,9 +281,12 @@ fn print_statistics(db_path: &str, output_path: Option<String>) -> Result<(), Bo
         Err(e) => println!("Error printing statistics: {:?}", e),
     }
     Ok(())
-}       
+}
 
-fn root_page_info(db_path: &str, output_path: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+fn root_page_info(
+    db_path: &str,
+    output_path: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let db = match Database::open(db_path) {
         Ok(db) => db,
         Err(e) => panic!("Could not open database: {:?}", e),
@@ -297,4 +308,3 @@ fn root_page_info(db_path: &str, output_path: Option<String>) -> Result<(), Box<
     }
     Ok(())
 }
-

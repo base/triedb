@@ -57,11 +57,12 @@ impl StorageEngine {
         context: &TransactionContext,
         path: Nibbles,
     ) -> Result<Option<(TrieValue, MultiProof)>, Error> {
-        if context.metadata.root_subtrie_page_id == 0 {
-            return Ok(None);
-        }
+        let root_node_page_id = match context.root_node_page_id {
+            None => return Ok(None),
+            Some(page_id) => page_id,
+        };
 
-        let slotted_page = self.get_slotted_page(context, context.metadata.root_subtrie_page_id)?;
+        let slotted_page = self.get_slotted_page(context, root_node_page_id)?;
         let mut proof = MultiProof::default();
         let value =
             self.get_value_with_proof_from_page(context, &path, 0, slotted_page, 0, &mut proof)?;
@@ -381,7 +382,7 @@ mod tests {
         assert_eq!(proof.storages.len(), 0);
 
         let account_proof = proof.account_proof(address, &[]).unwrap();
-        account_proof.verify(context.metadata.state_root).unwrap();
+        account_proof.verify(context.root_node_hash).unwrap();
 
         // 2. insert a new account so that both accounts are under the same top-level branch node
         let address2 = address!("0x0000000000000000000000000000000000000002");
@@ -412,7 +413,7 @@ mod tests {
         assert_eq!(proof.storages.len(), 0);
 
         let account_proof = proof.account_proof(address, &[]).unwrap();
-        account_proof.verify(context.metadata.state_root).unwrap();
+        account_proof.verify(context.root_node_hash).unwrap();
 
         // 3. insert a new storage slot for the first account
         let storage_path = StoragePath::for_address_and_slot(

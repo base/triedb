@@ -13,6 +13,7 @@ pub mod account;
 pub mod context;
 pub mod database;
 pub mod location;
+pub mod meta;
 pub mod metrics;
 pub mod node;
 pub mod page;

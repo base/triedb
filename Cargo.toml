@@ -17,6 +17,8 @@ metrics = "0.24.1"
 zerocopy = { version = "0.8.24", features = ["derive"] }
 reth-trie-common = { git = "https://github.com/paradigmxyz/reth", tag = "v1.3.8" }
 parking_lot = { version = "0.12.3", features = ["send_guard"] }
+fxhash = "0.2.1"
+static_assertions = "1.1.0"
 
 [dev-dependencies]
 criterion = "0.5"

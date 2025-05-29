@@ -13,7 +13,7 @@ pub struct DebugPage {
 
 impl Debug for DebugPage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "\nnodes_per_page: {:?}\nbytes_per_page: {:?}\ndepth_of_trie_in_nodes: {:?}\ndepth_of_trie_in_pages: {:?}\npath_prefix_length: {:?}\nnum_children_per_branch: {:?}\nnode_size_in_bytes: {:?}", self.nodes_per_page, self.bytes_per_page, self.depth_of_trie_in_nodes, self.depth_of_trie_in_pages, self.path_prefix_length, self.num_children_per_branch, self.node_size_in_bytes)
+        write!(f, "\nNodes Per Page: {:?}\nBytes Per Page: {:?}\nDepth of Trie in Nodes: {:?}\nDepth of Trie in Pages: {:?}\nPath Prefix Length: {:?}\nNum Children Per Branch: {:?}\nNode Size in Bytes: {:?}", self.nodes_per_page, self.bytes_per_page, self.depth_of_trie_in_nodes, self.depth_of_trie_in_pages, self.path_prefix_length, self.num_children_per_branch, self.node_size_in_bytes)
     }
 }
 
