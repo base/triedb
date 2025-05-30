@@ -19,7 +19,11 @@ use crate::{
 };
 use alloy_primitives::StorageValue;
 use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
-use std::{cmp::{min, Ordering}, fmt::Debug, io};
+use std::{
+    cmp::{min, Ordering},
+    fmt::Debug,
+    io,
+};
 
 /// The [StorageEngine] is responsible for managing the storage of data in the database.
 /// It handles reading and writing account and storage values, as well as managing the lifecycle of
@@ -534,6 +538,9 @@ impl StorageEngine {
         // This approach allocate only 1 new slotted page for the branch node.
         if slotted_page.num_free_bytes() < node.size() + new_parent_branch.size() {
             self.split_page(context, slotted_page)?;
+            let required_space = node.size() + new_parent_branch.size() + CELL_POINTER_SIZE;
+
+            self.move_subtrie_to_new_page(context, slotted_page, page_index, required_space)?;
             return Err(Error::PageSplit(0));
         }
 
@@ -1207,6 +1214,24 @@ impl StorageEngine {
         Ok(())
     }
 
+    // Split the page into two with following orders
+    // 1. if could move a subtrie to new page (condition is cell_index != 0), move it.
+    // 2. if cell_index = 0, move subtrie one by one.
+    // Condition is current page have the cell_index.
+    fn split_page_1<'p>(
+        &mut self,
+        context: &mut TransactionContext,
+        page: &mut SlottedPageMut<'_>,
+        cell_index: u8,
+        _required_space: usize,
+    ) -> Result<(), Error> {
+        if cell_index == 0 {
+            return self.split_page(context, page);
+        }
+
+        return self.move_subtrie_to_new_page(context, page, cell_index);
+    }
+
     // Split the page into two, moving the parent of the node at cell_index to a new child page.
     // Condition is current page have the cell_index.
     fn move_subtrie_to_new_page<'p>(
@@ -1214,7 +1239,6 @@ impl StorageEngine {
         context: &mut TransactionContext,
         page: &mut SlottedPageMut<'_>,
         cell_index: u8,
-        required_space: usize,
     ) -> Result<(), Error> {
         // paths from the cell index 0 to the cell_index.
         let paths = find_path_to_node(page, 0, cell_index)?;
