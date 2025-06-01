@@ -537,9 +537,8 @@ impl StorageEngine {
         //
         // This approach allocate only 1 new slotted page for the branch node.
         if slotted_page.num_free_bytes() < node.size() + new_parent_branch.size() {
-            // self.split_page(context, slotted_page)?;
             let required_space = node.size() + new_parent_branch.size() + CELL_POINTER_SIZE;
-            self.split_page_1(context, slotted_page, page_index, required_space)?;
+            self.split_page(context, slotted_page, page_index, required_space)?;
             return Err(Error::PageSplit(0));
         }
 
@@ -618,7 +617,7 @@ impl StorageEngine {
         if new_node_size > old_node_size {
             let node_size_incr = new_node_size - old_node_size;
             if slotted_page.num_free_bytes() < node_size_incr {
-                self.split_page(context, slotted_page)?;
+                self.split_page(context, slotted_page, page_index, new_node_size)?;
                 return Err(Error::PageSplit(0));
             }
         }
@@ -773,7 +772,12 @@ impl StorageEngine {
         // 3. and add new cell pointer for the new leaf node (3 bytes)
         // when adding the new child, split the page.
         if slotted_page.num_free_bytes() < node_size_incr + new_node.size() + CELL_POINTER_SIZE {
-            self.split_page(context, slotted_page)?;
+            self.split_page(
+                context,
+                slotted_page,
+                page_index,
+                node_size_incr + new_node.size() + CELL_POINTER_SIZE,
+            )?;
             return Err(Error::PageSplit(0));
         }
 
@@ -967,7 +971,12 @@ impl StorageEngine {
                 if slotted_page.num_free_bytes() <
                     node_size_incr + new_node.size() + CELL_POINTER_SIZE
                 {
-                    self.split_page(context, slotted_page)?;
+                    self.split_page(
+                        context,
+                        slotted_page,
+                        page_index,
+                        node_size_inc + new_node.size() + CELL_POINTER_SIZE,
+                    )?;
                     return Err(Error::PageSplit(0));
                 }
 
@@ -1148,7 +1157,7 @@ impl StorageEngine {
 
         // Ensure the child page has enough space
         if child_slotted_page.num_free_bytes() < 200 {
-            self.split_page(context, &mut child_slotted_page)?;
+            self.split_page(context, &mut child_slotted_page, page_index, 200)?;
             // Not returning Error::PageSplit because we're splitting the child page
         }
 
@@ -1224,7 +1233,7 @@ impl StorageEngine {
     // Split the page into two with following orders
     // 1. if could move a subtrie to new page (condition is cell_index != 0), move it.
     // 2. if cell_index = 0, move subtrie one by one.
-    fn split_page_1<'p>(
+    fn split_page<'p>(
         &mut self,
         context: &mut TransactionContext,
         page: &mut SlottedPageMut<'_>,
