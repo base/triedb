@@ -975,7 +975,7 @@ impl StorageEngine {
                         context,
                         slotted_page,
                         page_index,
-                        node_size_inc + new_node.size() + CELL_POINTER_SIZE,
+                        node_size_incr + new_node.size() + CELL_POINTER_SIZE,
                     )?;
                     return Err(Error::PageSplit(0));
                 }
@@ -2421,7 +2421,7 @@ mod tests {
         // Split the page
         let page = storage_engine.get_mut_page(&context, page_id!(1)).unwrap();
         let mut slotted_page = SlottedPageMut::try_from(page).unwrap();
-        storage_engine.split_page(&mut context, &mut slotted_page).unwrap();
+        storage_engine.split_page(&mut context, &mut slotted_page, 0, 1000).unwrap();
 
         // Verify all accounts still exist after split
         for (nibbles, account) in test_accounts {
@@ -2946,7 +2946,7 @@ mod tests {
             let mut slotted_page = SlottedPageMut::try_from(page_result.unwrap()).unwrap();
 
             // Try to split this page
-            if storage_engine.split_page(&mut context, &mut slotted_page).is_ok() {
+            if storage_engine.split_page(&mut context, &mut slotted_page, 0, 1000).is_ok() {
                 // If split succeeded, add the new pages to be processed
                 pages_to_split.push(page_id.inc().unwrap()); // New page created by split
             }
@@ -3070,7 +3070,7 @@ mod tests {
             if let Ok(page) = storage_engine.get_mut_page(&context, page_id) {
                 if let Ok(mut slotted_page) = SlottedPageMut::try_from(page) {
                     // Force a split
-                    let _ = storage_engine.split_page(&mut context, &mut slotted_page);
+                    let _ = storage_engine.split_page(&mut context, &mut slotted_page, 0, 500);
 
                     // Get the node to find child pages
                     if let Ok(node) = slotted_page.get_value::<Node>(0) {
