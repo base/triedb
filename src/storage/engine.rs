@@ -352,7 +352,7 @@ impl StorageEngine {
                     context.transaction_metrics.inc_pages_split();
                     split_count += 1;
                     // FIXME: this is a temporary limit to prevent infinite loops.
-                    if split_count > 20 {
+                    if split_count > 300 {
                         return Err(Error::PageError(PageError::PageSplitLimitReached));
                     }
                 }
@@ -537,10 +537,9 @@ impl StorageEngine {
         //
         // This approach allocate only 1 new slotted page for the branch node.
         if slotted_page.num_free_bytes() < node.size() + new_parent_branch.size() {
-            self.split_page(context, slotted_page)?;
+            // self.split_page(context, slotted_page)?;
             let required_space = node.size() + new_parent_branch.size() + CELL_POINTER_SIZE;
-
-            self.move_subtrie_to_new_page(context, slotted_page, page_index, required_space)?;
+            self.split_page_1(context, slotted_page, page_index, required_space)?;
             return Err(Error::PageSplit(0));
         }
 
