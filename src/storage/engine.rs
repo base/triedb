@@ -1216,7 +1216,6 @@ impl StorageEngine {
     // Split the page into two with following orders
     // 1. if could move a subtrie to new page (condition is cell_index != 0), move it.
     // 2. if cell_index = 0, move subtrie one by one.
-    // Condition is current page have the cell_index.
     fn split_page_1<'p>(
         &mut self,
         context: &mut TransactionContext,
@@ -1242,7 +1241,7 @@ impl StorageEngine {
         // paths from the cell index 0 to the cell_index.
         let paths = find_path_to_node(page, 0, cell_index)?;
         let paths = paths.unwrap();
-        assert!(paths.len() >= 1, "expected paths to cell {} to be at least 1", cell_index);
+        debug_assert!(paths.len() >= 1, "expected paths to cell {} to be at least 1", cell_index);
 
         // Take max 2 predecesors from the node.
         const MAX_PREDECESSORS: usize = 2;
@@ -1258,7 +1257,7 @@ impl StorageEngine {
             child_pointer.location().cell_index().unwrap(),
             &mut child_slotted_page,
         )?;
-        assert!(location.page_id().is_some(), "expected subtrie to be moved to a new page");
+        debug_assert!(location.page_id().is_some(), "expected subtrie to be moved to a new page");
         // Update the pointer in the root node to point to the new page.
         parent_node.set_child(
             child_index,
