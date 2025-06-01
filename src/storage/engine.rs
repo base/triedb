@@ -1166,12 +1166,13 @@ impl StorageEngine {
 
     // Split the page into two, moving the largest immediate subtrie of the root node to a new child
     // page.
-    fn split_page(
+    fn move_subtries_to_pages(
         &mut self,
         context: &mut TransactionContext,
         page: &mut SlottedPageMut<'_>,
+        required_space: usize,
     ) -> Result<(), Error> {
-        // count subtrie node and sort in desc order
+        // Count subtrie node and sort in desc order
         let root_node: Node = page.get_value(0)?;
         let children = root_node.enumerate_children()?;
         let mut children_with_count = children
@@ -1187,7 +1188,7 @@ impl StorageEngine {
         let mut rest: &[(u8, &Pointer, u8)] = &children_with_count;
         let mut root_node: Node = page.get_value(0)?;
 
-        while page.num_free_bytes() < Page::DATA_SIZE / 4_usize {
+        while page.num_free_bytes() < required_space {
             let child_page = self.allocate_page(context)?;
             let mut child_slotted_page = SlottedPageMut::try_from(child_page)?;
 
@@ -1228,18 +1229,18 @@ impl StorageEngine {
         context: &mut TransactionContext,
         page: &mut SlottedPageMut<'_>,
         cell_index: u8,
-        _required_space: usize,
+        required_space: usize,
     ) -> Result<(), Error> {
         if cell_index == 0 {
-            return self.split_page(context, page);
+            return self.move_subtries_to_pages(context, page, required_space);
         }
 
-        return self.move_subtrie_to_new_page(context, page, cell_index);
+        return self.move_subtrie_with_cell_to_new_page(context, page, cell_index);
     }
 
     // Split the page into two, moving the parent of the node at cell_index to a new child page.
     // Condition is current page have the cell_index.
-    fn move_subtrie_to_new_page<'p>(
+    fn move_subtrie_with_cell_to_new_page<'p>(
         &mut self,
         context: &mut TransactionContext,
         page: &mut SlottedPageMut<'_>,
@@ -1250,7 +1251,7 @@ impl StorageEngine {
         let paths = paths.unwrap();
         debug_assert!(paths.len() >= 1, "expected paths to cell {} to be at least 1", cell_index);
 
-        // Take max 2 predecesors from the node.
+        // Take max 2 predecessors from the node.
         const MAX_PREDECESSORS: usize = 2;
         let idx = min(MAX_PREDECESSORS + 1, paths.len() - 1);
         let (parent_cell_index, child_index) = paths[idx];
