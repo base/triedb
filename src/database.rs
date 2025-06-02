@@ -127,11 +127,17 @@ impl Database {
     }
 
     pub fn consistency_check<W: io::Write>(self, buf: W) -> Result<(), Error> {
+        
         let storage_engine = self.inner.storage_engine.read();
         let context = storage_engine.read_context();
         let active_slot_page_id = storage_engine.metadata().active_slot().root_node_page_id();
         let dirty_slot_page_id = storage_engine.metadata().dirty_slot().root_node_page_id();
-        storage_engine.consistency_check(&context, buf).expect("write failed");
+
+       let active_page_list = storage_engine.consistency_check( active_slot_page_id, &context).expect("write failed");
+       let dirty_page_list = storage_engine.consistency_check(dirty_slot_page_id, &context).expect("write failed");
+
+       let orphaned_page_list = storage_engine.metadata().orphan_pages().iter().collect::<Vec<_>>();
+
         Ok(())
     }
 
