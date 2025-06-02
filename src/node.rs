@@ -53,26 +53,6 @@ pub enum Node {
     },
 }
 
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IntermediateNode {
-    AccountLeaf {
-        prefix: Nibbles,
-        nonce_rlp: ArrayVec<u8, 9>,
-        balance_rlp: ArrayVec<u8, 33>,
-        code_hash: B256,
-        storage_root: Option<Box<IntermediateNode>>,
-    },
-    StorageLeaf {
-        prefix: Nibbles,
-        value_rlp: ArrayVec<u8, 33>,
-    },
-    Branch {
-        prefix: Nibbles,
-        children: [Option<Box<IntermediateNode>>; 16],
-    },
-}
-
 #[derive(Debug)]
 pub enum NodeError {
     ChildrenUnsupported,
