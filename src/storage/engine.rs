@@ -19,7 +19,8 @@ use crate::{
 };
 use alloy_primitives::StorageValue;
 use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
-use std::{cmp::Ordering, fmt::Debug, io};
+use std::{cmp::Ordering, fmt::Debug, io, collections::HashSet};
+
 
 /// The [StorageEngine] is responsible for managing the storage of data in the database.
 /// It handles reading and writing account and storage values, as well as managing the lifecycle of
@@ -1744,20 +1745,18 @@ impl StorageEngine {
         &self,
         root_node_page_id: Option<PageId>,
         context: &TransactionContext,
-    ) -> Result<Vec<PageId>, Error> {
-        use std::collections::HashSet;
+    ) -> Result<HashSet<PageId>, Error> {
         let mut reachable = HashSet::new();
 
         // Start from the provided root node page id (if any)
         if let Some(root_page_id) = root_node_page_id {
+            reachable.insert(root_page_id);
             self.consistency_check_helper(context, root_page_id, 0, &mut reachable)?;
         }
         // If there is a second root (e.g. for a second trie), traverse from there as well
         // (add logic here if needed for a second root)
 
-        let mut ids: Vec<PageId> = reachable.into_iter().collect();
-        ids.sort_by_key(|id| id.as_u32());
-        Ok(ids)
+        Ok(reachable)
     }
 
     fn consistency_check_helper(
@@ -1765,7 +1764,7 @@ impl StorageEngine {
         context: &TransactionContext,
         page_id: PageId,
         cell_index: u8,
-        reachable: &mut std::collections::HashSet<PageId>,
+        reachable: &mut HashSet<PageId>,
     ) -> Result<(), Error> {
         let page = self.get_page(context, page_id)?;
         let slotted_page = SlottedPage::try_from(page)?;

@@ -338,7 +338,7 @@ fn check_consistency(
         Box::new(std::io::stdout())
     };
 
-    match db.consistency_check(output) {
+    match db.consistency_check(output, db_path) {
         Ok(_) => {
             if let Some(output_path) = output_path {
                 println!("Consistency check results written to {}", output_path);
