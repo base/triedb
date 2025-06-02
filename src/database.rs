@@ -108,13 +108,13 @@ impl Database {
         let root_node_page_id = active_slot.root_node_page_id();
         let orphaned_page_list = meta_manager.orphan_pages().iter().collect::<Vec<_>>();
 
-        writeln!(buf, "Root Node Page ID: {:?}\n", root_node_page_id).expect("write failed");
+        writeln!(buf, "Root Node Page ID: {:?}", root_node_page_id).expect("write failed");
 
         //root subtrie pageID
-        writeln!(buf, "Total Page Count: {:?}\n", page_count).expect("write failed");
+        writeln!(buf, "Total Page Count: {:?}", page_count).expect("write failed");
 
         //orphaned pages list (grouped by page)
-        writeln!(buf, "Orphaned Pages: {:?}\n", orphaned_page_list).expect("write failed");
+        writeln!(buf, "Orphaned Pages: {:?}", orphaned_page_list).expect("write failed");
 
         Ok(())
     }
