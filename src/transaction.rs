@@ -105,9 +105,9 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
 
     pub fn debug_account(
         &self,
-        output_file: &std::fs::File,
+        output_file: Box<dyn std::io::Write>,
         address_path: AddressPath,
-        verbosity_level: u32,
+        verbosity_level: u8,
     ) -> Result<(), TransactionError> {
         let context = self.context.clone();
         let storage_engine = self.database.inner.storage_engine.read();
@@ -120,9 +120,9 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
 
     pub fn debug_storage(
         &self,
-        output_file: &std::fs::File,
+        output_file: Box<dyn std::io::Write>,
         storage_path: StoragePath,
-        verbosity_level: u32,
+        verbosity_level: u8,
     ) -> Result<(), TransactionError> {
         let context = self.context.clone();
         let storage_engine = self.database.inner.storage_engine.read();
