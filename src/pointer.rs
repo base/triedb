@@ -68,6 +68,10 @@ impl Value for Pointer {
             let rlp_len = first_rlp_byte - 0x80;
 
             RlpNode::from_raw(&arr[4..5 + rlp_len as usize]).unwrap()
+        } else if first_rlp_byte <= 0xf7 {
+            let rlp_len = first_rlp_byte - 0xc0;
+
+            RlpNode::from_raw(&arr[4..5 + rlp_len as usize]).unwrap()
         } else {
             return Err(value::Error::InvalidEncoding);
         };

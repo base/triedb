@@ -76,6 +76,8 @@ impl<'p> Page<'p> {
     pub const HEADER_SIZE: usize = 8;
     pub const DATA_SIZE: usize = Self::SIZE - Self::HEADER_SIZE;
 
+    pub const MAX_COUNT: u32 = PageId::MAX.as_u32() - PageId::MIN.as_u32() + 1;
+
     /// Constructs a new immutable page for reading.
     ///
     /// # Panics
@@ -159,13 +161,14 @@ impl fmt::Debug for PageMut<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::page::page_id;
 
     #[repr(align(4096))]
     struct DataArray([u8; Page::SIZE]);
 
     #[test]
     fn test_ref_new() {
-        let id = 42;
+        let id = page_id!(42);
         let data = DataArray([0; Page::SIZE]);
 
         let page = Page::new(id, &data.0);
@@ -177,7 +180,7 @@ mod tests {
 
     #[test]
     fn test_mut_new() {
-        let id = 42;
+        let id = page_id!(42);
         let mut data = DataArray([0; Page::SIZE]);
 
         let page_mut = PageMut::new(id, &mut data.0);
@@ -189,7 +192,7 @@ mod tests {
 
     #[test]
     fn test_mut_with_snapshot() {
-        let id = 42;
+        let id = page_id!(42);
         let snapshot = 1337;
         let mut data = DataArray([0; Page::SIZE]);
 

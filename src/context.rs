@@ -1,8 +1,7 @@
-use alloy_primitives::{map::FbBuildHasher, FixedBytes};
+use crate::{meta::MetadataSlot, metrics::TransactionMetrics, page::PageId, snapshot::SnapshotId};
+use alloy_primitives::{map::FbBuildHasher, FixedBytes, B256};
 use alloy_trie::Nibbles;
 use std::collections::HashMap;
-
-use crate::{database::Metadata, metrics::TransactionMetrics, page::PageId};
 
 /// A map of 64 nibbles (64 bytes). 64 bytes is used instead of 32 bytes to avoid new memory
 /// allocations from Nibbles. This is used to store the nibbles of an address in the context.
@@ -50,18 +49,33 @@ where
 
 #[derive(Clone, Debug)]
 pub struct TransactionContext {
-    pub(crate) metadata: Metadata,
+    pub(crate) snapshot_id: SnapshotId,
+    pub(crate) root_node_hash: B256,
+    pub(crate) root_node_page_id: Option<PageId>,
+    pub(crate) page_count: u32,
     pub(crate) transaction_metrics: TransactionMetrics,
     pub(crate) contract_account_loc_cache: B512Map<(PageId, u8)>,
 }
 
 impl TransactionContext {
-    pub fn new(metadata: Metadata) -> Self {
+    pub fn new(meta: impl AsRef<MetadataSlot>) -> Self {
+        let meta = meta.as_ref();
         Self {
-            metadata,
+            snapshot_id: meta.snapshot_id(),
+            root_node_hash: meta.root_node_hash(),
+            root_node_page_id: meta.root_node_page_id(),
+            page_count: meta.page_count(),
             transaction_metrics: Default::default(),
             contract_account_loc_cache: B512Map::with_capacity(10),
         }
+    }
+
+    pub(crate) fn update_metadata(&self, mut meta: impl AsMut<MetadataSlot>) {
+        let meta = meta.as_mut();
+        meta.set_snapshot_id(self.snapshot_id);
+        meta.set_root_node_hash(self.root_node_hash);
+        meta.set_root_node_page_id(self.root_node_page_id);
+        meta.set_page_count(self.page_count);
     }
 }
 

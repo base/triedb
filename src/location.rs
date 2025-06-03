@@ -8,15 +8,12 @@ use proptest_derive::Arbitrary;
 pub struct Location(u32);
 
 impl Location {
-    /// Creates a new [Location] for a page.
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if the provided [PageId] is less than 256.
-    pub fn for_page(page_id: PageId) -> Self {
-        assert!(page_id >= 256);
+    const CELL_MAX: u32 = u8::MAX as u32;
+    const PAGE_ID_OFF: u32 = Self::CELL_MAX;
 
-        Self(page_id)
+    /// Creates a new [Location] for a page.
+    pub fn for_page(page_id: PageId) -> Self {
+        Self(Self::PAGE_ID_OFF + page_id.as_u32())
     }
 
     /// Creates a new [Location] for a cell on the same page.
@@ -26,10 +23,10 @@ impl Location {
 
     /// Returns the [PageId] of the page if the location is for a page, otherwise returns `None`.
     pub fn page_id(&self) -> Option<PageId> {
-        if self.0 < 256 {
+        if self.0 <= Self::CELL_MAX {
             None
         } else {
-            Some(self.0 as PageId)
+            Some(PageId::new(self.0 - Self::PAGE_ID_OFF).unwrap())
         }
     }
 
@@ -56,6 +53,12 @@ impl From<Location> for u32 {
     }
 }
 
+impl From<PageId> for Location {
+    fn from(page_id: PageId) -> Self {
+        Self::for_page(page_id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,22 +66,20 @@ mod tests {
 
     #[test]
     fn test_page_id() {
-        let location = Location::for_page(1000);
-        assert_eq!(location.page_id(), Some(1000));
-        assert_eq!(location.cell_index(), None);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_page_id_panic() {
-        Location::for_page(255);
+        for page_id in [PageId::MIN, PageId::MAX] {
+            let location = Location::for_page(page_id);
+            assert_eq!(location.page_id(), Some(page_id));
+            assert_eq!(location.cell_index(), None);
+        }
     }
 
     #[test]
     fn test_cell_index() {
-        let location = Location::for_cell(100);
-        assert_eq!(location.page_id(), None);
-        assert_eq!(location.cell_index(), Some(100));
+        for cell in 0..=u8::MAX {
+            let location = Location::for_cell(cell);
+            assert_eq!(location.page_id(), None);
+            assert_eq!(location.cell_index(), Some(cell));
+        }
     }
 
     proptest! {
@@ -86,6 +87,13 @@ mod tests {
         fn fuzz_location_from_u32(value in any::<u32>()) {
             let location = Location::from(value);
             assert_eq!(location.0, value);
+        }
+
+        #[test]
+        fn fuzz_location_from_page_id(page_id in any::<PageId>()) {
+            let location = Location::for_page(page_id);
+            assert_eq!(location.page_id(), Some(page_id));
+            assert_eq!(location.cell_index(), None);
         }
     }
 }
