@@ -9,7 +9,7 @@ use crate::{
 use alloy_primitives::B256;
 use parking_lot::RwLock;
 
-use std::{io, path::Path, collections::HashSet};
+use std::{collections::HashSet, io, path::Path};
 
 #[derive(Debug)]
 pub struct Database {
@@ -126,29 +126,37 @@ impl Database {
         Ok(())
     }
 
-    pub fn consistency_check<W: io::Write>(self, mut buf: W, file_path: impl AsRef<Path>) -> Result<(), OpenError> {
+    pub fn consistency_check<W: io::Write>(
+        self,
+        mut buf: W,
+        file_path: impl AsRef<Path>,
+    ) -> Result<(), OpenError> {
         let db_file_path = file_path.as_ref();
 
         let mut meta_file_path = db_file_path.to_path_buf();
         meta_file_path.as_mut_os_string().push(".meta");
         let mut meta_manager =
             MetadataManager::open(meta_file_path).map_err(OpenError::MetadataError)?;
-        
+
         let storage_engine = self.inner.storage_engine.read();
         let context = storage_engine.read_context();
         let active_slot_page_id = storage_engine.metadata().active_slot().root_node_page_id();
         let dirty_slot_page_id = storage_engine.metadata().dirty_slot().root_node_page_id();
 
-       let mut reachable_pages = storage_engine.consistency_check( active_slot_page_id, &context).expect("write failed");
-       let dirty_slot_pages = storage_engine.consistency_check(dirty_slot_page_id, &context).expect("write failed");
-       reachable_pages.extend(&dirty_slot_pages);
-       
-       let orphaned_pages = meta_manager.orphan_pages().iter().collect::<HashSet<_>>();
-       
-       let reachachable_orphaned_pages: HashSet<PageId> = orphaned_pages.intersection(&reachable_pages).cloned().collect();
+        let mut reachable_pages =
+            storage_engine.consistency_check(active_slot_page_id, &context).expect("write failed");
+        let dirty_slot_pages =
+            storage_engine.consistency_check(dirty_slot_page_id, &context).expect("write failed");
+        reachable_pages.extend(&dirty_slot_pages);
 
-       writeln!(buf, "Reachable Orphaned Pages: {:?}", reachachable_orphaned_pages).expect("write failed");
-       let page_count = storage_engine.size();
+        let orphaned_pages = meta_manager.orphan_pages().iter().collect::<HashSet<_>>();
+
+        let reachachable_orphaned_pages: HashSet<PageId> =
+            orphaned_pages.intersection(&reachable_pages).cloned().collect();
+
+        writeln!(buf, "Reachable Orphaned Pages: {:?}", reachachable_orphaned_pages)
+            .expect("write failed");
+        let page_count = storage_engine.size();
 
         let all_pages: HashSet<PageId> = (1..page_count)
             .map(|id| PageId::new(id).unwrap()) // Unwrap Option from new()
@@ -157,15 +165,12 @@ impl Database {
         let mut reachable_or_orphaned: HashSet<PageId> = reachable_pages.into_iter().collect();
         reachable_or_orphaned.extend(&orphaned_pages);
 
-        // Unreachable pages = all_pages - reachable_or_orphaned  
-        let unreachable_pages: HashSet<PageId> = all_pages
-            .difference(&reachable_or_orphaned)
-            .cloned()
-            .collect();
+        // Unreachable pages = all_pages - reachable_or_orphaned
+        let unreachable_pages: HashSet<PageId> =
+            all_pages.difference(&reachable_or_orphaned).cloned().collect();
 
         // 4. Print unreachable pages
         writeln!(buf, "Unreachable Pages: {:?}", unreachable_pages).expect("write failed");
-       
 
         Ok(())
     }

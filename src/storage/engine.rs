@@ -19,8 +19,7 @@ use crate::{
 };
 use alloy_primitives::StorageValue;
 use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
-use std::{cmp::Ordering, fmt::Debug, io, collections::HashSet};
-
+use std::{cmp::Ordering, collections::HashSet, fmt::Debug, io};
 
 /// The [StorageEngine] is responsible for managing the storage of data in the database.
 /// It handles reading and writing account and storage values, as well as managing the lifecycle of
@@ -1740,7 +1739,8 @@ impl StorageEngine {
         }
     }
 
-    /// Traverses the trie from the given root node page id and returns a list of all reachable PageIds.
+    /// Traverses the trie from the given root node page id and returns a list of all reachable
+    /// PageIds.
     pub fn consistency_check(
         &self,
         root_node_page_id: Option<PageId>,
@@ -1777,7 +1777,12 @@ impl StorageEngine {
                     // If child is on a new page,insert the page into the set andrecurse
                     if new_slotted_page.id() != page_id {
                         reachable.insert(new_slotted_page.id());
-                        self.consistency_check_helper(context, new_slotted_page.id(), new_cell_index, reachable)?;
+                        self.consistency_check_helper(
+                            context,
+                            new_slotted_page.id(),
+                            new_cell_index,
+                            reachable,
+                        )?;
                     } else {
                         self.consistency_check_helper(context, page_id, new_cell_index, reachable)?;
                     }
@@ -1786,9 +1791,14 @@ impl StorageEngine {
             Node::Branch { ref children, .. } => {
                 for child in children.iter().flatten() {
                     let (new_slotted_page, new_cell_index) =
-                        self.get_slotted_page_and_index(context, child, slotted_page.clone())?;
+                        self.get_slotted_page_and_index(context, child, slotted_page)?;
                     if new_slotted_page.id() != page_id {
-                        self.consistency_check_helper(context, new_slotted_page.id(), new_cell_index, reachable)?;
+                        self.consistency_check_helper(
+                            context,
+                            new_slotted_page.id(),
+                            new_cell_index,
+                            reachable,
+                        )?;
                     } else {
                         self.consistency_check_helper(context, page_id, new_cell_index, reachable)?;
                     }
