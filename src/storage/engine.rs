@@ -15,7 +15,7 @@ use crate::{
     path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH, STORAGE_PATH_LENGTH},
     pointer::Pointer,
     snapshot::SnapshotId,
-    storage::value::Value,
+    storage::{debug::DebugPage, value::Value},
 };
 use alloy_primitives::StorageValue;
 use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
@@ -1165,44 +1165,51 @@ impl StorageEngine {
         context: &mut TransactionContext,
         page: &mut SlottedPageMut<'_>,
     ) -> Result<(), Error> {
+        // count subtrie node and sort in desc order
+        let root_node: Node = page.get_value(0)?;
+        let children = root_node.enumerate_children()?;
+        let mut children_with_count = children
+            .into_iter()
+            .filter(|(_, ptr)| ptr.location().cell_index().is_some())
+            .map(|(i, ptr)| {
+                let cell_index = ptr.location().cell_index().unwrap();
+                (i, ptr, count_subtrie_nodes(page, cell_index).unwrap_or(0))
+            })
+            .collect::<Vec<_>>();
+        children_with_count.sort_by(|a, b| b.2.cmp(&a.2));
+
+        let mut rest: &[(u8, &Pointer, u8)] = &children_with_count;
+        let mut root_node: Node = page.get_value(0)?;
+
         while page.num_free_bytes() < Page::DATA_SIZE / 4_usize {
             let child_page = self.allocate_page(context)?;
             let mut child_slotted_page = SlottedPageMut::try_from(child_page)?;
 
-            let mut root_node: Node = page.get_value(0)?;
-
             // Find the child with the largest subtrie
-            let (largest_child_index, largest_child_pointer) = root_node
-                .enumerate_children()?
-                .into_iter()
-                .max_by_key(|(_, ptr)| {
-                    // If pointer points to a cell in current page, count nodes in that subtrie
-                    if let Some(cell_index) = ptr.location().cell_index() {
-                        count_subtrie_nodes(page, cell_index).unwrap_or(0)
-                    } else {
-                        // If pointer points to another page, count as 0
-                        0
-                    }
-                })
-                .ok_or(Error::PageError(PageError::PageIsFull))?;
+            let largest_child: &(u8, &Pointer, u8);
+            (largest_child, rest) = rest.split_first().unwrap();
+            let (largest_child_index, largest_child_pointer, _) = *largest_child;
 
-            // Move the subtrie to the new page
-            if let Some(cell_index) = largest_child_pointer.location().cell_index() {
-                // Move all child nodes that are in the current page
-                let location = move_subtrie_nodes(page, cell_index, &mut child_slotted_page)?;
-                assert!(location.page_id().is_some(), "expected subtrie to be moved to a new page");
+            let location = move_subtrie_nodes(
+                page,
+                largest_child_pointer.location().cell_index().unwrap(),
+                &mut child_slotted_page,
+            )?;
+            debug_assert!(
+                location.page_id().is_some(),
+                "expected subtrie to be moved to a new page"
+            );
 
-                // Update the pointer in the root node to point to the new page
-                root_node.set_child(
-                    largest_child_index,
-                    Pointer::new(
-                        Location::for_page(child_slotted_page.id()),
-                        largest_child_pointer.rlp().clone(),
-                    ),
-                )?;
-                page.set_value(0, &root_node)?;
-            }
+            // Update the pointer in the root node to point to the new page
+            root_node.set_child(
+                largest_child_index,
+                Pointer::new(
+                    Location::for_page(child_slotted_page.id()),
+                    largest_child_pointer.rlp().clone(),
+                ),
+            )?;
         }
+        page.set_value(0, &root_node)?;
 
         Ok(())
     }
@@ -1366,13 +1373,7 @@ impl StorageEngine {
         let node: Node = slotted_page.get_value(cell_index)?;
 
         match node {
-            Node::AccountLeaf {
-                prefix: _,
-                nonce_rlp: _,
-                balance_rlp: _,
-                code_hash: _,
-                ref storage_root,
-            } => {
+            Node::AccountLeaf { ref storage_root, .. } => {
                 StorageEngine::write_node_value(&node, slotted_page.id(), buf, &indent)?;
                 let mut new_indent = indent.clone();
                 new_indent.push('\t');
@@ -1443,7 +1444,7 @@ impl StorageEngine {
         context: &TransactionContext,
         path: &Nibbles,
         mut buf: W,
-        verbosity_level: u32,
+        verbosity_level: u8,
     ) -> Result<(), Error> {
         let page_id = match context.root_node_page_id {
             None => return Ok(()),
@@ -1480,7 +1481,7 @@ impl StorageEngine {
         slotted_page: SlottedPage<'_>,
         page_index: u8,
         buf: &mut impl io::Write,
-        verbosity_level: u32,
+        verbosity_level: u8,
     ) -> Result<(), Error> {
         let node: Node = slotted_page.get_value(page_index)?;
 
@@ -1614,6 +1615,132 @@ impl StorageEngine {
                         writeln!(buf, "{}StorageLeaf: no value", indent)?;
                     }
                 };
+                Ok(())
+            }
+        }
+    }
+
+    pub fn debug_statistics<W: io::Write>(
+        &self,
+        context: &TransactionContext,
+        mut buf: W,
+    ) -> Result<(), Error> {
+        let page_id = match context.root_node_page_id {
+            None => return Ok(()),
+            Some(page_id) => page_id,
+        };
+        let page = self.get_page(context, page_id)?;
+        let slotted_page = SlottedPage::try_from(page)?;
+
+        let mut stats = DebugPage::default();
+
+        let occupied_bytes = slotted_page.num_occupied_bytes();
+        let occupied_cells = slotted_page.num_occupied_cells();
+
+        stats.bytes_per_page.update_stats(occupied_bytes);
+        stats.nodes_per_page.update_stats(occupied_cells);
+
+        self.debug_statistics_helper(context, slotted_page, 0, 1, 1, &mut stats)?;
+
+        writeln!(buf, "Page Statistics: {:?}", stats)?;
+        Ok(())
+    }
+
+    fn debug_statistics_helper(
+        &self,
+        context: &TransactionContext,
+        slotted_page: SlottedPage<'_>,
+        cell_index: u8,
+        node_depth: usize,
+        page_depth: usize,
+        stats: &mut DebugPage,
+    ) -> Result<(), Error> {
+        let node: Node = slotted_page.get_value(cell_index)?;
+
+        //update stats: total node size and prefix length
+        stats.node_size_in_bytes.update_stats(node.size());
+        stats.path_prefix_length.update_stats(node.prefix().len());
+
+        match node {
+            Node::AccountLeaf { storage_root, .. } => {
+                //Note: direct child is not counted as part of stats.num_children
+                if let Some(direct_child) = storage_root {
+                    let (new_slotted_page, cell_index) =
+                        self.get_slotted_page_and_index(context, &direct_child, slotted_page)?;
+                    //if we move to a new page, update relevent stats
+                    if new_slotted_page.id() != slotted_page.id() {
+                        let occupied_bytes = new_slotted_page.num_occupied_bytes();
+                        let occupied_cells = new_slotted_page.num_occupied_cells();
+
+                        stats.bytes_per_page.update_stats(occupied_bytes);
+                        stats.nodes_per_page.update_stats(occupied_cells);
+
+                        self.debug_statistics_helper(
+                            context,
+                            new_slotted_page,
+                            cell_index,
+                            node_depth + 1,
+                            page_depth + 1,
+                            stats,
+                        )
+                    } else {
+                        self.debug_statistics_helper(
+                            context,
+                            new_slotted_page,
+                            cell_index,
+                            node_depth + 1,
+                            page_depth,
+                            stats,
+                        )
+                    }
+                } else {
+                    stats.depth_of_trie_in_nodes.update_stats(node_depth);
+                    stats.depth_of_trie_in_pages.update_stats(page_depth);
+                    Ok(())
+                }
+            }
+
+            Node::Branch { children, .. } => {
+                //update num children per branch
+                let child_iter = children.into_iter().flatten();
+                let num_children = child_iter.clone().count();
+                stats.num_children_per_branch.update_stats(num_children);
+
+                for child in child_iter {
+                    //check if child is on same page
+                    let (new_slotted_page, cell_index) =
+                        self.get_slotted_page_and_index(context, &child, slotted_page)?;
+                    //update page depth if we move to a new page
+                    if new_slotted_page.id() != slotted_page.id() {
+                        let occupied_bytes = new_slotted_page.num_occupied_bytes();
+                        let occupied_cells = new_slotted_page.num_occupied_cells();
+
+                        stats.bytes_per_page.update_stats(occupied_bytes);
+                        stats.nodes_per_page.update_stats(occupied_cells);
+                        self.debug_statistics_helper(
+                            context,
+                            new_slotted_page,
+                            cell_index,
+                            node_depth + 1,
+                            page_depth + 1,
+                            stats,
+                        )?
+                    } else {
+                        self.debug_statistics_helper(
+                            context,
+                            new_slotted_page,
+                            cell_index,
+                            node_depth + 1,
+                            page_depth,
+                            stats,
+                        )?
+                    }
+                }
+                Ok(())
+            }
+            Node::StorageLeaf { .. } => {
+                stats.depth_of_trie_in_pages.update_stats(page_depth);
+                stats.depth_of_trie_in_nodes.update_stats(node_depth);
                 Ok(())
             }
         }
