@@ -146,7 +146,7 @@ impl Database {
         let mut transaction_manager = self.inner.transaction_manager.write();
         let storage_engine = self.inner.storage_engine.read();
         let metadata = storage_engine.metadata().active_slot();
-        transaction_manager.begin_ro(metadata.snapshot_id())?;
+        transaction_manager.begin_ro(metadata.snapshot_id());
         let context = storage_engine.read_context();
         Ok(Transaction::new(context, self))
     }
