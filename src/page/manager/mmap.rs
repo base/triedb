@@ -3,7 +3,7 @@ use crate::{
     snapshot::SnapshotId,
 };
 use memmap2::{Advice, MmapMut, MmapOptions};
-use std::{fs::File, path::Path, sync::Arc};
+use std::{fs::File, io, path::Path, sync::Arc};
 
 // Manages pages in a memory mapped file.
 #[derive(Debug)]
