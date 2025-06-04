@@ -3,7 +3,11 @@ use crate::{
     snapshot::SnapshotId,
 };
 use memmap2::{Advice, MmapMut, MmapOptions};
+<<<<<<< HEAD
 use std::{fs::File, path::Path, sync::Arc};
+=======
+use std::{fs::File, io, path::Path};
+>>>>>>> main
 
 // Manages pages in a memory mapped file.
 #[derive(Debug)]
@@ -180,8 +184,19 @@ impl PageManager {
     }
 
     /// Syncs pages to the backing file.
-    pub fn commit(&mut self) -> Result<(), PageError> {
-        Ok(self.mmap.flush()?)
+    pub fn sync(&mut self) -> io::Result<()> {
+        self.mmap.flush()
+    }
+
+    /// Syncs and closes the backing file.
+    pub fn close(mut self) -> io::Result<()> {
+        self.sync()
+    }
+}
+
+impl Drop for PageManager {
+    fn drop(&mut self) {
+        self.sync().expect("sync failed");
     }
 }
 
@@ -225,8 +240,6 @@ mod tests {
 
         page.contents_mut()[0] = 1;
 
-        manager.commit().unwrap();
-
         let old_page = manager.get(42, page_id!(1)).unwrap();
         assert_eq!(old_page.id(), page_id!(1));
         assert_eq!(old_page.contents()[0], 1);
@@ -247,8 +260,6 @@ mod tests {
         page1_mut.contents_mut()[0] = 2;
 
         assert_eq!(page1_mut.contents()[0], 2);
-
-        manager.commit().unwrap();
 
         let page1 = manager.get(42, page1.id()).unwrap();
         assert_eq!(page1.contents()[0], 2);
@@ -328,7 +339,6 @@ mod tests {
         // Allocate a page; verify that the size of the file grew by `1024 * Page::SIZE` (the
         // minimum growth factor) and that the file contents are as expected
         let mut p = m.allocate(snapshot).expect("page allocation failed");
-        m.commit().expect("commit failed");
         assert_eq!(len(&f), 1024 * Page::SIZE);
         assert_eq!(read(&f, 8), snapshot.to_le_bytes());
         assert_eq!(read(&f, Page::DATA_SIZE), [0; Page::DATA_SIZE]);
@@ -337,7 +347,6 @@ mod tests {
 
         // Write some data to the page
         p.contents_mut().iter_mut().for_each(|byte| *byte = 0xab);
-        m.commit().expect("commit failed");
         assert_eq!(len(&f), 1024 * Page::SIZE);
         assert_eq!(read(&f, 8), snapshot.to_le_bytes());
         assert_eq!(read(&f, Page::DATA_SIZE), [0xab; Page::DATA_SIZE]);
@@ -348,7 +357,6 @@ mod tests {
         for new_page_id in 1..=255 {
             let mut p = m.allocate(snapshot).expect("page allocation failed");
             p.contents_mut().iter_mut().for_each(|byte| *byte = 0xab ^ (new_page_id as u8));
-            m.commit().expect("commit failed");
 
             assert_eq!(len(&f), 1024 * Page::SIZE);
 

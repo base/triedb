@@ -87,6 +87,10 @@ impl Database {
         }
     }
 
+    pub fn close(self) -> io::Result<()> {
+        self.inner.storage_engine.into_inner().close()
+    }
+
     pub fn print_page<W: io::Write>(self, buf: W, page_id: Option<PageId>) -> Result<(), Error> {
         let storage_engine = self.inner.storage_engine.read();
         let context = storage_engine.read_context();
@@ -158,16 +162,6 @@ impl Database {
         self.inner.storage_engine.read().metadata().active_slot().root_node_hash()
     }
 
-    pub fn close(mut self) -> Result<(), Error> {
-        self.commit()
-    }
-
-    fn commit(&mut self) -> Result<(), Error> {
-        let mut storage_engine = self.inner.storage_engine.write();
-        let context = storage_engine.write_context();
-        storage_engine.commit(&context).map_err(Error::EngineError)
-    }
-
     pub fn size(&self) -> u32 {
         let storage_engine = self.inner.storage_engine.read();
         storage_engine.size()
@@ -197,12 +191,6 @@ impl Database {
         self.metrics
             .rw_transaction_pages_split
             .record(context.transaction_metrics.take_pages_split() as f64);
-    }
-}
-
-impl Drop for Database {
-    fn drop(&mut self) {
-        self.commit().expect("failed to close database")
     }
 }
 

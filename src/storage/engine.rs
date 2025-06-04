@@ -50,6 +50,13 @@ impl StorageEngine {
         &self.meta_manager
     }
 
+    pub fn close(self) -> io::Result<()> {
+        let Self { page_manager, meta_manager, .. } = self;
+        page_manager.close()?;
+        meta_manager.close()?;
+        Ok(())
+    }
+
     /// Returns a [`TransactionContext`] valid for reads.
     ///
     /// The returned context points to the latest committed snapshot.
@@ -1889,7 +1896,7 @@ impl StorageEngine {
     }
 
     pub fn commit(&mut self, context: &TransactionContext) -> Result<(), Error> {
-        self.page_manager.commit()?;
+        self.page_manager.sync()?;
 
         let dirty_meta = self.meta_manager.dirty_slot_mut();
         context.update_metadata(dirty_meta);
