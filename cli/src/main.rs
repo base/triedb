@@ -201,7 +201,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             print_statistics(&db_path, output_path)?;
         }
         Commands::ConsistencyCheck { db_path, output_path } => {
-            check_consistency(&db_path, output_path)?;
+            consistency_check(&db_path, output_path)?;
         }
     }
 
@@ -323,7 +323,7 @@ fn root_page_info(
     Ok(())
 }
 
-fn check_consistency(
+fn consistency_check(
     db_path: &str,
     output_path: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {

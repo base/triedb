@@ -50,6 +50,13 @@ impl StorageEngine {
         &self.meta_manager
     }
 
+    pub fn close(self) -> io::Result<()> {
+        let Self { page_manager, meta_manager, .. } = self;
+        page_manager.close()?;
+        meta_manager.close()?;
+        Ok(())
+    }
+
     /// Returns a [`TransactionContext`] valid for reads.
     ///
     /// The returned context points to the latest committed snapshot.
@@ -1165,44 +1172,51 @@ impl StorageEngine {
         context: &mut TransactionContext,
         page: &mut SlottedPageMut<'_>,
     ) -> Result<(), Error> {
+        // count subtrie node and sort in desc order
+        let root_node: Node = page.get_value(0)?;
+        let children = root_node.enumerate_children()?;
+        let mut children_with_count = children
+            .into_iter()
+            .filter(|(_, ptr)| ptr.location().cell_index().is_some())
+            .map(|(i, ptr)| {
+                let cell_index = ptr.location().cell_index().unwrap();
+                (i, ptr, count_subtrie_nodes(page, cell_index).unwrap_or(0))
+            })
+            .collect::<Vec<_>>();
+        children_with_count.sort_by(|a, b| b.2.cmp(&a.2));
+
+        let mut rest: &[(u8, &Pointer, u8)] = &children_with_count;
+        let mut root_node: Node = page.get_value(0)?;
+
         while page.num_free_bytes() < Page::DATA_SIZE / 4_usize {
             let child_page = self.allocate_page(context)?;
             let mut child_slotted_page = SlottedPageMut::try_from(child_page)?;
 
-            let mut root_node: Node = page.get_value(0)?;
-
             // Find the child with the largest subtrie
-            let (largest_child_index, largest_child_pointer) = root_node
-                .enumerate_children()?
-                .into_iter()
-                .max_by_key(|(_, ptr)| {
-                    // If pointer points to a cell in current page, count nodes in that subtrie
-                    if let Some(cell_index) = ptr.location().cell_index() {
-                        count_subtrie_nodes(page, cell_index).unwrap_or(0)
-                    } else {
-                        // If pointer points to another page, count as 0
-                        0
-                    }
-                })
-                .ok_or(Error::PageError(PageError::PageIsFull))?;
+            let largest_child: &(u8, &Pointer, u8);
+            (largest_child, rest) = rest.split_first().unwrap();
+            let (largest_child_index, largest_child_pointer, _) = *largest_child;
 
-            // Move the subtrie to the new page
-            if let Some(cell_index) = largest_child_pointer.location().cell_index() {
-                // Move all child nodes that are in the current page
-                let location = move_subtrie_nodes(page, cell_index, &mut child_slotted_page)?;
-                assert!(location.page_id().is_some(), "expected subtrie to be moved to a new page");
+            let location = move_subtrie_nodes(
+                page,
+                largest_child_pointer.location().cell_index().unwrap(),
+                &mut child_slotted_page,
+            )?;
+            debug_assert!(
+                location.page_id().is_some(),
+                "expected subtrie to be moved to a new page"
+            );
 
-                // Update the pointer in the root node to point to the new page
-                root_node.set_child(
-                    largest_child_index,
-                    Pointer::new(
-                        Location::for_page(child_slotted_page.id()),
-                        largest_child_pointer.rlp().clone(),
-                    ),
-                )?;
-                page.set_value(0, &root_node)?;
-            }
+            // Update the pointer in the root node to point to the new page
+            root_node.set_child(
+                largest_child_index,
+                Pointer::new(
+                    Location::for_page(child_slotted_page.id()),
+                    largest_child_pointer.rlp().clone(),
+                ),
+            )?;
         }
+        page.set_value(0, &root_node)?;
 
         Ok(())
     }
@@ -1952,7 +1966,7 @@ impl StorageEngine {
     }
 
     pub fn commit(&mut self, context: &TransactionContext) -> Result<(), Error> {
-        self.page_manager.commit()?;
+        self.page_manager.sync()?;
 
         let dirty_meta = self.meta_manager.dirty_slot_mut();
         context.update_metadata(dirty_meta);
