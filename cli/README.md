@@ -46,9 +46,7 @@ Current stats, all presented with minimum, maximum, and mean:
 ### Consistency Check ###
 Traverses the trie starting at both root pages, determines which pages are reachable, and flags any unreachable pages or orphaned reachable pages.  
 `cargo run consistency-check -d <path to database> [-o <output path>]`
-### Print Root Page Info ###
-Prints the state root, root subtrie page ID, and orphaned pages list.  
-`cargo run root-page -d <path to database> [-o <output path>]`
+
 
 
 

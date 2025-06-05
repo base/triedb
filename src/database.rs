@@ -8,7 +8,7 @@ use crate::{
 };
 use alloy_primitives::B256;
 use parking_lot::{Mutex, RwLock};
-use std::{io, path::Path};
+use std::{collections::HashSet, io, path::Path};
 
 #[derive(Debug)]
 pub struct Database {
@@ -134,7 +134,7 @@ impl Database {
         let mut meta_manager =
             MetadataManager::open(meta_file_path).map_err(OpenError::MetadataError)?;
 
-        let storage_engine = self.inner.storage_engine.read();
+        let storage_engine = self.storage_engine.read();
         let context = storage_engine.read_context();
         let active_slot_page_id = storage_engine.metadata().active_slot().root_node_page_id();
         let dirty_slot_page_id = storage_engine.metadata().dirty_slot().root_node_page_id();
