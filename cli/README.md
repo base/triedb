@@ -51,16 +51,4 @@ Prints the state root, root subtrie page ID, and orphaned pages list.
 `cargo run root-page -d <path to database> [-o <output path>]`
 
 
-### Page Statistics ###
-`cargo run statistics -d <path to database> [-o <output path>]`
-
-Current stats, all presented with minimum, maximum, and mean:  
-  * Nodes per page
-  * Bytes per page
-  * Depth of trie in nodes
-  * Depth of trie in pages
-  * Path prefix lenth
-  * Number of children per branch
-  * Node size in bytes
-
 

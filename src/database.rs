@@ -9,7 +9,6 @@ use crate::{
 use alloy_primitives::B256;
 use parking_lot::RwLock;
 
-
 use std::{collections::HashSet, io, path::Path};
 
 #[derive(Debug)]

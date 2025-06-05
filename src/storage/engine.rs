@@ -1767,8 +1767,6 @@ impl StorageEngine {
             reachable.insert(root_page_id);
             self.consistency_check_helper(context, root_page_id, 0, &mut reachable)?;
         }
-        // If there is a second root (e.g. for a second trie), traverse from there as well
-        // (add logic here if needed for a second root)
 
         Ok(reachable)
     }
