@@ -19,7 +19,7 @@ use crate::{
 };
 use alloy_primitives::StorageValue;
 use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
-use std::{cmp::Ordering, fmt::Debug, io};
+use std::{cmp::Ordering, fmt::Debug, io, sync::Arc};
 
 /// The [StorageEngine] is responsible for managing the storage of data in the database.
 /// It handles reading and writing account and storage values, as well as managing the lifecycle of
@@ -1422,7 +1422,7 @@ impl StorageEngine {
                     if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
                         let child_page_id = child.location().page_id().unwrap();
                         writeln!(buf, "{}Child on new page: {:?}", new_indent, child_page_id)?;
-                        return Ok(())
+                        return Ok(());
                     } else {
                         self.print_page_helper(
                             context,
@@ -1928,9 +1928,9 @@ impl StorageEngine {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Error {
-    IO(io::Error),
+    IO(Arc<io::Error>),
     NodeError(NodeError),
     PageError(PageError),
     InvalidCommonPrefixIndex,
@@ -1953,7 +1953,7 @@ impl From<NodeError> for Error {
 
 impl From<io::Error> for Error {
     fn from(error: io::Error) -> Self {
-        Self::IO(error)
+        Self::IO(error.into())
     }
 }
 

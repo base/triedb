@@ -1,4 +1,4 @@
-use std::{error, fmt, io};
+use std::{error, fmt, io, sync::Arc};
 
 #[derive(Debug)]
 pub struct CorruptedMetadataError;
@@ -11,10 +11,10 @@ impl fmt::Display for CorruptedMetadataError {
 
 impl error::Error for CorruptedMetadataError {}
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum OpenMetadataError {
     Corrupted,
-    IO(io::Error),
+    IO(Arc<io::Error>),
 }
 
 impl fmt::Display for OpenMetadataError {
@@ -36,6 +36,6 @@ impl From<CorruptedMetadataError> for OpenMetadataError {
 
 impl From<io::Error> for OpenMetadataError {
     fn from(e: io::Error) -> Self {
-        Self::IO(e)
+        Self::IO(e.into())
     }
 }

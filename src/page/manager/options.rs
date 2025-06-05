@@ -76,7 +76,7 @@ impl PageManagerOptions {
     /// Opens a temporary file with the options specified by `self`.
     #[cfg(test)]
     pub fn open_temp_file(&self) -> Result<PageManager, PageError> {
-        let file = tempfile::tempfile().map_err(PageError::IO)?;
+        let file = tempfile::tempfile()?;
         self.wrap(file)
     }
 }

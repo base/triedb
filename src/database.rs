@@ -9,7 +9,7 @@ use crate::{
 use alloy_primitives::B256;
 use parking_lot::RwLock;
 
-use std::{io, path::Path};
+use std::{io, path::Path, sync::Arc};
 
 #[derive(Debug)]
 pub struct Database {
@@ -23,17 +23,17 @@ pub(crate) struct Inner {
     pub(crate) transaction_manager: RwLock<TransactionManager>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Error {
     PageError(PageError),
     EngineError(engine::Error),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum OpenError {
     PageError(PageError),
     MetadataError(OpenMetadataError),
-    IO(io::Error),
+    IO(Arc<io::Error>),
 }
 
 impl Database {
@@ -50,7 +50,13 @@ impl Database {
             .open(db_file_path)
             .map_err(OpenError::PageError)?;
 
-        Ok(Self::new(StorageEngine::new(page_manager, meta_manager)))
+        let db = Self::new(StorageEngine::new(page_manager, meta_manager));
+        let db_arc = Arc::new(db);
+
+        let tx = db_arc.begin_rw().unwrap();
+        tx.commit().unwrap();
+
+        Ok(Arc::try_unwrap(db_arc).unwrap())
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, OpenError> {
@@ -130,7 +136,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn begin_rw(&self) -> Result<Transaction<'_, RW>, TransactionError> {
+    pub fn begin_rw(self: &Arc<Self>) -> Result<Transaction<RW>, TransactionError> {
         let mut transaction_manager = self.inner.transaction_manager.write();
         let mut storage_engine = self.inner.storage_engine.write();
         let metadata = storage_engine.metadata().dirty_slot();
@@ -138,17 +144,18 @@ impl Database {
         if min_snapshot_id > 0 {
             storage_engine.unlock(min_snapshot_id - 1);
         }
+
         let context = storage_engine.write_context();
-        Ok(Transaction::new(context, self))
+        Ok(Transaction::new(context, Arc::clone(self)))
     }
 
-    pub fn begin_ro(&self) -> Result<Transaction<'_, RO>, TransactionError> {
+    pub fn begin_ro(self: &Arc<Self>) -> Result<Transaction<RO>, TransactionError> {
         let mut transaction_manager = self.inner.transaction_manager.write();
         let storage_engine = self.inner.storage_engine.read();
         let metadata = storage_engine.metadata().active_slot();
         transaction_manager.begin_ro(metadata.snapshot_id());
         let context = storage_engine.read_context();
-        Ok(Transaction::new(context, self))
+        Ok(Transaction::new(context, Arc::clone(self)))
     }
 
     pub fn state_root(&self) -> B256 {
@@ -199,7 +206,7 @@ mod tests {
     fn test_set_get_account() {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
-        let db = Database::create(file_path).unwrap();
+        let db = Arc::new(Database::create(file_path).unwrap());
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
 
@@ -256,7 +263,7 @@ mod tests {
     fn test_data_persistence() {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
-        let db = Database::create(&file_path).unwrap();
+        let db = Arc::new(Database::create(&file_path).unwrap());
 
         let address1 = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
@@ -265,9 +272,9 @@ mod tests {
         tx.set_account(AddressPath::for_address(address1), Some(account1.clone())).unwrap();
 
         tx.commit().unwrap();
-        db.close().unwrap();
+        Arc::try_unwrap(db).unwrap().close().unwrap();
 
-        let db = Database::open(&file_path).unwrap();
+        let db = Arc::new(Database::open(&file_path).unwrap());
         let mut tx = db.begin_ro().unwrap();
         let account = tx.get_account(AddressPath::for_address(address1)).unwrap().unwrap();
         assert_eq!(account, account1);
@@ -280,9 +287,9 @@ mod tests {
         tx.set_account(AddressPath::for_address(address2), Some(account2.clone())).unwrap();
 
         tx.commit().unwrap();
-        db.close().unwrap();
+        Arc::try_unwrap(db).unwrap().close().unwrap();
 
-        let db = Database::open(&file_path).unwrap();
+        let db = Arc::new(Database::open(&file_path).unwrap());
         let mut tx = db.begin_ro().unwrap();
 
         let account = tx.get_account(AddressPath::for_address(address1)).unwrap().unwrap();

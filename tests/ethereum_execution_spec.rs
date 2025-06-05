@@ -8,6 +8,7 @@ use std::{
     cmp::min,
     collections::{HashMap, HashSet},
     str::FromStr,
+    sync::Arc,
 };
 use tempdir::TempDir;
 use triedb::{
@@ -34,7 +35,7 @@ fn run_ethereum_execution_spec_state_tests() {
                 .as_str()
                 .replace("/", "_")[0..min(test_case_name.len(), 100)];
             let file_path = tmp_dir.path().join(database_file_name).to_str().unwrap().to_owned();
-            let test_database = Database::create(file_path.as_str()).unwrap();
+            let test_database = Arc::new(Database::create(file_path.as_str()).unwrap());
 
             // will track accounts and storage that need to be deleted. this is essentially the
             // "diff" between the pre state and post state.

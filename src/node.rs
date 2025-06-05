@@ -53,7 +53,7 @@ pub enum Node {
     },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum NodeError {
     ChildrenUnsupported,
     MaxPrefixLengthExceeded,

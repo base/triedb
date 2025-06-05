@@ -14,7 +14,7 @@ pub use error::TransactionError;
 pub use manager::TransactionManager;
 use reth_trie_common::MultiProof;
 use sealed::sealed;
-use std::{collections::HashMap, fmt::Debug};
+use std::{collections::HashMap, fmt::Debug, sync::Arc};
 
 #[sealed]
 pub trait TransactionKind: Debug {}
@@ -34,21 +34,21 @@ impl TransactionKind for RO {}
 // Compile-time assertion to ensure that `Transaction` is `Send`
 const _: fn() = || {
     fn consumer<T: Send>() {}
-    consumer::<Transaction<'_, RO>>();
-    consumer::<Transaction<'_, RW>>();
+    consumer::<Transaction<RO>>();
+    consumer::<Transaction<RW>>();
 };
 
 #[derive(Debug)]
-pub struct Transaction<'tx, K: TransactionKind> {
+pub struct Transaction<K: TransactionKind> {
     committed: bool,
     context: TransactionContext,
-    database: &'tx Database,
+    database: Arc<Database>,
     pending_changes: HashMap<Nibbles, Option<TrieValue>>,
     _marker: std::marker::PhantomData<K>,
 }
 
-impl<'tx, K: TransactionKind> Transaction<'tx, K> {
-    pub(crate) fn new(context: TransactionContext, database: &'tx Database) -> Self {
+impl<K: TransactionKind> Transaction<K> {
+    pub(crate) fn new(context: TransactionContext, database: Arc<Database>) -> Self {
         Self {
             committed: false,
             context,
@@ -134,7 +134,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
     }
 }
 
-impl Transaction<'_, RW> {
+impl Transaction<RW> {
     pub fn set_account(
         &mut self,
         address_path: AddressPath,
@@ -185,7 +185,7 @@ impl Transaction<'_, RW> {
     }
 }
 
-impl Transaction<'_, RO> {
+impl Transaction<RO> {
     pub fn commit(mut self) -> Result<(), TransactionError> {
         let mut transaction_manager = self.database.inner.transaction_manager.write();
         transaction_manager.remove_tx(self.context.snapshot_id, false);
@@ -195,7 +195,7 @@ impl Transaction<'_, RO> {
     }
 }
 
-impl<K: TransactionKind> Drop for Transaction<'_, K> {
+impl<K: TransactionKind> Drop for Transaction<K> {
     fn drop(&mut self) {
         // TODO: panic if the transaction is not committed
     }
