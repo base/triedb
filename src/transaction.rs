@@ -62,7 +62,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         &mut self,
         address_path: AddressPath,
     ) -> Result<Option<Account>, TransactionError> {
-        let storage_engine = self.database.inner.storage_engine.read();
+        let storage_engine = self.database.storage_engine.read();
         let account = storage_engine.get_account(&mut self.context, address_path).unwrap();
 
         self.database.update_metrics_ro(&self.context);
@@ -74,7 +74,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         &mut self,
         storage_path: StoragePath,
     ) -> Result<Option<StorageValue>, TransactionError> {
-        let storage_engine = self.database.inner.storage_engine.read();
+        let storage_engine = self.database.storage_engine.read();
         let storage_slot = storage_engine.get_storage(&mut self.context, storage_path).unwrap();
 
         self.database.update_metrics_ro(&self.context);
@@ -89,7 +89,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         &self,
         address_path: AddressPath,
     ) -> Result<Option<(Account, MultiProof)>, TransactionError> {
-        let storage_engine = self.database.inner.storage_engine.read();
+        let storage_engine = self.database.storage_engine.read();
         let result = storage_engine.get_account_with_proof(&self.context, address_path).unwrap();
         Ok(result)
     }
@@ -98,7 +98,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         &self,
         storage_path: StoragePath,
     ) -> Result<Option<(StorageValue, MultiProof)>, TransactionError> {
-        let storage_engine = self.database.inner.storage_engine.read();
+        let storage_engine = self.database.storage_engine.read();
         let result = storage_engine.get_storage_with_proof(&self.context, storage_path).unwrap();
         Ok(result)
     }
@@ -110,7 +110,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         verbosity_level: u8,
     ) -> Result<(), TransactionError> {
         let context = self.context.clone();
-        let storage_engine = self.database.inner.storage_engine.read();
+        let storage_engine = self.database.storage_engine.read();
 
         storage_engine
             .print_path(&context, address_path.to_nibbles(), output_file, verbosity_level)
@@ -125,7 +125,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         verbosity_level: u8,
     ) -> Result<(), TransactionError> {
         let context = self.context.clone();
-        let storage_engine = self.database.inner.storage_engine.read();
+        let storage_engine = self.database.storage_engine.read();
 
         storage_engine
             .print_path(&context, &storage_path.full_path(), output_file, verbosity_level)
@@ -154,7 +154,7 @@ impl Transaction<'_, RW> {
     }
 
     pub fn commit(mut self) -> Result<(), TransactionError> {
-        let mut storage_engine = self.database.inner.storage_engine.write();
+        let mut storage_engine = self.database.storage_engine.write();
         let mut changes =
             self.pending_changes.drain().collect::<Vec<(Nibbles, Option<TrieValue>)>>();
 
@@ -162,7 +162,7 @@ impl Transaction<'_, RW> {
             storage_engine.set_values(&mut self.context, changes.as_mut()).unwrap();
         }
 
-        let mut transaction_manager = self.database.inner.transaction_manager.write();
+        let mut transaction_manager = self.database.transaction_manager.lock();
         storage_engine.commit(&self.context).unwrap();
 
         self.database.update_metrics_rw(&self.context);
@@ -174,10 +174,10 @@ impl Transaction<'_, RW> {
     }
 
     pub fn rollback(mut self) -> Result<(), TransactionError> {
-        let storage_engine = self.database.inner.storage_engine.write();
+        let storage_engine = self.database.storage_engine.write();
         storage_engine.rollback(&self.context).unwrap();
 
-        let mut transaction_manager = self.database.inner.transaction_manager.write();
+        let mut transaction_manager = self.database.transaction_manager.lock();
         transaction_manager.remove_tx(self.context.snapshot_id, true);
 
         self.committed = false;
@@ -187,7 +187,7 @@ impl Transaction<'_, RW> {
 
 impl Transaction<'_, RO> {
     pub fn commit(mut self) -> Result<(), TransactionError> {
-        let mut transaction_manager = self.database.inner.transaction_manager.write();
+        let mut transaction_manager = self.database.transaction_manager.lock();
         transaction_manager.remove_tx(self.context.snapshot_id, false);
 
         self.committed = true;
