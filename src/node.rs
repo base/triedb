@@ -53,6 +53,25 @@ pub enum Node {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InMemoryNode {
+    AccountLeaf {
+        prefix: Nibbles,
+        nonce_rlp: ArrayVec<u8, 9>,
+        balance_rlp: ArrayVec<u8, 33>,
+        code_hash: B256,
+        storage_root: Option<Box<InMemoryNode>>,
+    },
+    StorageLeaf {
+        prefix: Nibbles,
+        value_rlp: ArrayVec<u8, 33>,
+    },
+    Branch {
+        prefix: Nibbles,
+        children: [Option<Box<InMemoryNode>>; 16],
+    },
+}
+
 #[derive(Debug)]
 pub enum NodeError {
     ChildrenUnsupported,

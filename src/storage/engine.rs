@@ -7,6 +7,7 @@ use crate::{
         Node,
         Node::{AccountLeaf, Branch},
         NodeError, TrieValue,
+        InMemoryNode,
     },
     page::{
         Page, PageError, PageId, PageManager, PageMut, SlottedPage, SlottedPageMut,
@@ -18,6 +19,7 @@ use crate::{
     storage::{debug::DebugPage, value::Value},
 };
 use alloy_primitives::StorageValue;
+use alloy_rlp::{encode_fixed_size};
 use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
 use std::{cmp::Ordering, fmt::Debug, io};
 
@@ -1750,6 +1752,104 @@ impl StorageEngine {
                 stats.depth_of_trie_in_nodes.update_stats(node_depth);
                 Ok(())
             }
+        }
+    }
+
+    /// Builds an in-memory trie from a list of (Nibbles, Option<TrieValue>), returning the root node.
+    pub fn build_in_memory_trie(
+        changes: &mut [(Nibbles, Option<TrieValue>)]
+    ) -> Option<InMemoryNode> {
+        if changes.is_empty() {
+            return None;
+        }
+        changes.sort_by(|a, b| a.0.cmp(&b.0));
+        Self::build_in_memory_trie_rec(changes, 0)
+    }
+
+    fn build_in_memory_trie_rec(
+        changes: &[(Nibbles, Option<TrieValue>)],
+        path_offset: usize,
+    ) -> Option<InMemoryNode> {
+        if changes.is_empty() {
+            return None;
+        }
+        // Find the shortest common prefix among all changes
+        let first_path = &changes[0].0[path_offset..];
+        let last_path = &changes[changes.len() - 1].0[path_offset..];
+        let mut common_prefix_len = 0;
+        let min_len = first_path.len().min(last_path.len());
+        while common_prefix_len < min_len && first_path[common_prefix_len] == last_path[common_prefix_len] {
+            common_prefix_len += 1;
+        }
+        // If the common prefix is less than the path length, we need a branch node
+        if common_prefix_len == 0 {
+            // Partition changes by the next nibble
+            let mut children: [Option<Box<InMemoryNode>>; 16] = Default::default();
+            let mut i = 0;
+            while i < changes.len() {
+                let nibble = changes[i].0[path_offset];
+                let start = i;
+                while i < changes.len() && changes[i].0[path_offset] == nibble {
+                    i += 1;
+                }
+                children[nibble as usize] = Self::build_in_memory_trie_rec(&changes[start..i], path_offset + 1).map(Box::new);
+            }
+            return Some(InMemoryNode::Branch {
+                prefix: Nibbles::new(),
+                children,
+            });
+        }
+        // If all changes share a common prefix, slice it off and recurse
+        let prefix = changes[0].0.slice(path_offset..path_offset + common_prefix_len);
+        let rest = &changes;
+        // If the rest of the path is empty for the first change, it's a leaf
+        if rest[0].0.len() == path_offset + common_prefix_len {
+            // If it's an account, check for storage children
+            if let Some(Some(TrieValue::Account(account))) = rest.get(0).map(|(_, v)| v) {
+                // Find all storage children (with longer paths)
+                let mut storage_children = vec![];
+                let mut i = 1;
+                while i < rest.len() && rest[i].0.starts_with(&rest[0].0) {
+                    storage_children.push((rest[i].0.clone(), rest[i].1.clone()));
+                    i += 1;
+                }
+                let storage_root = if !storage_children.is_empty() {
+                    Self::build_in_memory_trie_rec(&storage_children, path_offset + common_prefix_len).map(Box::new)
+                } else {
+                    None
+                };
+                return Some(InMemoryNode::AccountLeaf {
+                    prefix,
+                    nonce_rlp: encode_fixed_size(&account.nonce),
+                    balance_rlp: encode_fixed_size(&account.balance),
+                    code_hash: account.code_hash,
+                    storage_root,
+                });
+            } else if let Some(Some(TrieValue::Storage(value))) = rest.get(0).map(|(_, v)| v) {
+                return Some(InMemoryNode::StorageLeaf {
+                    prefix,
+                    value_rlp: encode_fixed_size(value),
+                });
+            } else {
+                // None value means deletion, skip
+                return None;
+            }
+        } else {
+            // Otherwise, need a branch node
+            let mut children: [Option<Box<InMemoryNode>>; 16] = Default::default();
+            let mut i = 0;
+            while i < rest.len() {
+                let nibble = rest[i].0[path_offset + common_prefix_len];
+                let start = i;
+                while i < rest.len() && rest[i].0[path_offset + common_prefix_len] == nibble {
+                    i += 1;
+                }
+                children[nibble as usize] = Self::build_in_memory_trie_rec(&rest[start..i], path_offset + common_prefix_len + 1).map(Box::new);
+            }
+            return Some(InMemoryNode::Branch {
+                prefix,
+                children,
+            });
         }
     }
 }
