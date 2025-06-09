@@ -4,10 +4,9 @@ use crate::{
     location::Location,
     meta::MetadataManager,
     node::{
-        Node,
+        InMemoryNode, Node,
         Node::{AccountLeaf, Branch},
         NodeError, TrieValue,
-        InMemoryNode,
     },
     page::{
         Page, PageError, PageId, PageManager, PageMut, SlottedPage, SlottedPageMut,
@@ -19,7 +18,7 @@ use crate::{
     storage::{debug::DebugPage, value::Value},
 };
 use alloy_primitives::StorageValue;
-use alloy_rlp::{encode_fixed_size};
+use alloy_rlp::encode_fixed_size;
 use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
 use std::{cmp::Ordering, fmt::Debug, io};
 
@@ -1755,9 +1754,10 @@ impl StorageEngine {
         }
     }
 
-    /// Builds an in-memory trie from a list of (Nibbles, Option<TrieValue>), returning the root node.
+    /// Builds an in-memory trie from a list of (Nibbles, Option<TrieValue>), returning the root
+    /// node.
     pub fn build_in_memory_trie(
-        changes: &mut [(Nibbles, Option<TrieValue>)]
+        changes: &mut [(Nibbles, Option<TrieValue>)],
     ) -> Option<InMemoryNode> {
         if changes.is_empty() {
             return None;
@@ -1773,48 +1773,60 @@ impl StorageEngine {
         if changes.is_empty() {
             return None;
         }
-        // Find the shortest common prefix among all changes
+
+        // Find the shortest common prefix among all changes at this offset
         let first_path = &changes[0].0[path_offset..];
         let last_path = &changes[changes.len() - 1].0[path_offset..];
         let mut common_prefix_len = 0;
         let min_len = first_path.len().min(last_path.len());
-        while common_prefix_len < min_len && first_path[common_prefix_len] == last_path[common_prefix_len] {
+        while common_prefix_len < min_len &&
+            first_path[common_prefix_len] == last_path[common_prefix_len]
+        {
             common_prefix_len += 1;
         }
-        // If the common prefix is less than the path length, we need a branch node
-        if common_prefix_len == 0 {
+
+        // Pick the first change
+        let (first_change_path, first_change_value) = &changes[0];
+        let path = first_change_path.slice(path_offset..);
+        let value = first_change_value.as_ref();
+
+        if common_prefix_len < path.len() {
             // Partition changes by the next nibble
             let mut children: [Option<Box<InMemoryNode>>; 16] = Default::default();
             let mut i = 0;
             while i < changes.len() {
-                let nibble = changes[i].0[path_offset];
+                let nibble = changes[i].0[path_offset + common_prefix_len];
                 let start = i;
-                while i < changes.len() && changes[i].0[path_offset] == nibble {
+                while i < changes.len() && changes[i].0[path_offset + common_prefix_len] == nibble {
                     i += 1;
                 }
-                children[nibble as usize] = Self::build_in_memory_trie_rec(&changes[start..i], path_offset + 1).map(Box::new);
+                children[nibble as usize] = Self::build_in_memory_trie_rec(
+                    &changes[start..i],
+                    path_offset + common_prefix_len + 1,
+                )
+                .map(Box::new);
             }
-            return Some(InMemoryNode::Branch {
-                prefix: Nibbles::new(),
-                children,
-            });
+            let prefix = first_change_path.slice(path_offset..path_offset + common_prefix_len);
+            return Some(InMemoryNode::Branch { prefix, children });
         }
-        // If all changes share a common prefix, slice it off and recurse
-        let prefix = changes[0].0.slice(path_offset..path_offset + common_prefix_len);
-        let rest = &changes;
-        // If the rest of the path is empty for the first change, it's a leaf
-        if rest[0].0.len() == path_offset + common_prefix_len {
-            // If it's an account, check for storage children
-            if let Some(Some(TrieValue::Account(account))) = rest.get(0).map(|(_, v)| v) {
-                // Find all storage children (with longer paths)
+
+        if path.len() == common_prefix_len {
+            let prefix = first_change_path.slice(path_offset..path_offset + common_prefix_len);
+            // Account or Storage
+            if let Some(TrieValue::Account(account)) = value {
+                // Find storage children
                 let mut storage_children = vec![];
                 let mut i = 1;
-                while i < rest.len() && rest[i].0.starts_with(&rest[0].0) {
-                    storage_children.push((rest[i].0.clone(), rest[i].1.clone()));
+                while i < changes.len() && changes[i].0.starts_with(first_change_path) {
+                    storage_children.push((changes[i].0.clone(), changes[i].1.clone()));
                     i += 1;
                 }
                 let storage_root = if !storage_children.is_empty() {
-                    Self::build_in_memory_trie_rec(&storage_children, path_offset + common_prefix_len).map(Box::new)
+                    Self::build_in_memory_trie_rec(
+                        &storage_children,
+                        path_offset + common_prefix_len,
+                    )
+                    .map(Box::new)
                 } else {
                     None
                 };
@@ -1825,7 +1837,7 @@ impl StorageEngine {
                     code_hash: account.code_hash,
                     storage_root,
                 });
-            } else if let Some(Some(TrieValue::Storage(value))) = rest.get(0).map(|(_, v)| v) {
+            } else if let Some(TrieValue::Storage(value)) = value {
                 return Some(InMemoryNode::StorageLeaf {
                     prefix,
                     value_rlp: encode_fixed_size(value),
@@ -1834,23 +1846,9 @@ impl StorageEngine {
                 // None value means deletion, skip
                 return None;
             }
-        } else {
-            // Otherwise, need a branch node
-            let mut children: [Option<Box<InMemoryNode>>; 16] = Default::default();
-            let mut i = 0;
-            while i < rest.len() {
-                let nibble = rest[i].0[path_offset + common_prefix_len];
-                let start = i;
-                while i < rest.len() && rest[i].0[path_offset + common_prefix_len] == nibble {
-                    i += 1;
-                }
-                children[nibble as usize] = Self::build_in_memory_trie_rec(&rest[start..i], path_offset + common_prefix_len + 1).map(Box::new);
-            }
-            return Some(InMemoryNode::Branch {
-                prefix,
-                children,
-            });
         }
+
+        None
     }
 }
 
@@ -4232,6 +4230,125 @@ mod tests {
             let shortest_from_full_iteration = changes.iter().map(|(path, _)| nybbles::common_prefix_length(path, node.prefix())).min().unwrap();
 
             assert_eq!(shortest_common_prefix_length, shortest_from_full_iteration);
+        }
+    }
+}
+
+#[cfg(test)]
+mod in_memory_trie_tests {
+    use super::*;
+    use crate::node::{InMemoryNode, TrieValue};
+    use alloy_primitives::{B256, U256};
+    use alloy_trie::Nibbles;
+
+    #[test]
+    fn test_empty_trie() {
+        let mut changes: Vec<(Nibbles, Option<TrieValue>)> = vec![];
+        let root = StorageEngine::build_in_memory_trie(&mut changes);
+        assert!(root.is_none());
+    }
+
+    #[test]
+    fn test_single_account_leaf() {
+        let nibbles = Nibbles::from_nibbles([0x01, 0x02, 0x03]);
+        let account = crate::account::Account::new(1, U256::from(100), B256::ZERO, B256::ZERO);
+        let mut changes = vec![(nibbles.clone(), Some(TrieValue::Account(account.clone())))];
+        let root = StorageEngine::build_in_memory_trie(&mut changes).unwrap();
+        match root {
+            InMemoryNode::AccountLeaf {
+                prefix,
+                nonce_rlp,
+                balance_rlp,
+                code_hash,
+                storage_root,
+            } => {
+                assert_eq!(prefix, nibbles);
+                assert_eq!(nonce_rlp, encode_fixed_size(&account.nonce));
+                assert_eq!(balance_rlp, encode_fixed_size(&account.balance));
+                assert_eq!(code_hash, account.code_hash);
+                assert!(storage_root.is_none());
+            }
+            _ => panic!("Expected AccountLeaf"),
+        }
+    }
+
+    #[test]
+    fn test_single_storage_leaf() {
+        let nibbles = Nibbles::from_nibbles([0x0a, 0x0b, 0x0c]);
+        let value = U256::from(42);
+        let mut changes = vec![(nibbles.clone(), Some(TrieValue::Storage(value)))];
+        let root = StorageEngine::build_in_memory_trie(&mut changes).unwrap();
+        match root {
+            InMemoryNode::StorageLeaf { prefix, value_rlp } => {
+                assert_eq!(prefix, nibbles);
+                assert_eq!(value_rlp, encode_fixed_size(&value));
+            }
+            _ => panic!("Expected StorageLeaf"),
+        }
+    }
+
+    #[test]
+    fn test_account_with_storage() {
+        let account_nibbles = Nibbles::from_nibbles([0x01, 0x02, 0x03]);
+        let storage_nibbles = Nibbles::from_nibbles([0x01, 0x02, 0x03, 0x04]);
+        let account = crate::account::Account::new(1, U256::from(100), B256::ZERO, B256::ZERO);
+        let storage_value = U256::from(99);
+        let mut changes = vec![
+            (account_nibbles.clone(), Some(TrieValue::Account(account.clone()))),
+            (storage_nibbles.clone(), Some(TrieValue::Storage(storage_value))),
+        ];
+        let root = StorageEngine::build_in_memory_trie(&mut changes).unwrap();
+        match root {
+            InMemoryNode::AccountLeaf { prefix, storage_root: Some(boxed_storage), .. } => {
+                assert_eq!(prefix, account_nibbles);
+                match *boxed_storage {
+                    InMemoryNode::StorageLeaf { prefix: storage_prefix, value_rlp } => {
+                        assert_eq!(storage_prefix, Nibbles::from_nibbles([0x04]));
+                        assert_eq!(value_rlp, encode_fixed_size(&storage_value));
+                    }
+                    _ => panic!("Expected StorageLeaf as storage_root"),
+                }
+            }
+            _ => panic!("Expected AccountLeaf with storage_root"),
+        }
+    }
+
+    #[test]
+    fn test_branch_node() {
+        let n1 = Nibbles::from_nibbles([0x01, 0x02, 0x03]);
+        let n2 = Nibbles::from_nibbles([0x01, 0x02, 0x04]);
+        let account1 = crate::account::Account::new(1, U256::from(100), B256::ZERO, B256::ZERO);
+        let account2 = crate::account::Account::new(2, U256::from(200), B256::ZERO, B256::ZERO);
+        let mut changes = vec![
+            (n1.clone(), Some(TrieValue::Account(account1.clone()))),
+            (n2.clone(), Some(TrieValue::Account(account2.clone()))),
+        ];
+        let root = StorageEngine::build_in_memory_trie(&mut changes).unwrap();
+        match root {
+            InMemoryNode::Branch { prefix, children } => {
+                assert_eq!(prefix, Nibbles::from_nibbles([0x01, 0x02]));
+                // child at index 3
+                match &children[3] {
+                    Some(child) => match **child {
+                        InMemoryNode::AccountLeaf { prefix: ref p, .. } => {
+                            assert_eq!(*p, Nibbles::new())
+                        }
+                        _ => panic!("Expected AccountLeaf at child 3"),
+                    },
+                    None => panic!("Expected child at index 3"),
+                }
+                // child at index 4
+                match &children[4] {
+                    Some(child) => match **child {
+                        InMemoryNode::AccountLeaf { prefix: ref p, .. } => {
+                            assert_eq!(*p, Nibbles::new())
+                        }
+                        _ => panic!("Expected AccountLeaf at child 4"),
+                    },
+                    None => panic!("Expected child at index 4"),
+                }
+            }
+            _ => panic!("Expected Branch node"),
         }
     }
 }
