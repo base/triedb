@@ -14,10 +14,8 @@
 //! The database will be created in a temporary directory and deleted after the benchmarks are
 //! finished.
 
-mod benchmark_common;
-use alloy_primitives::{StorageKey, StorageValue, U256};
+use alloy_primitives::{Address, StorageKey, StorageValue, U256};
 use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
-use benchmark_common::{generate_random_address, BATCH_SIZE};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::prelude::*;
 use std::{
@@ -47,6 +45,12 @@ const DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT: usize = 10;
 const SEED_EOA: u64 = 42; // EOA seeding value
 const SEED_CONTRACT: u64 = 43; // contract account seeding value
 const SEED_NEW_EOA: u64 = 44; // new EOA seeding value
+const BATCH_SIZE: usize = 10_000;
+
+fn generate_random_address(rng: &mut StdRng) -> AddressPath {
+    let addr = Address::random_with(rng);
+    AddressPath::for_address(addr)
+}
 
 fn get_based_database(
     fallback_eoa_size: usize,
@@ -57,7 +61,7 @@ fn get_based_database(
     if let Some(based_dir) = based_dir {
         let file_name =
             std::env::var("FILE_NAME").expect("FILE_NAME must be set when using BASED_DIR");
-        let main_file_name = format!("{}", file_name);
+        let main_file_name = file_name.to_string();
         let meta_file_name = format!("{}.meta", file_name);
         let file_name_path = Path::new(&based_dir).join(&main_file_name);
         let meta_file_name_path = Path::new(&based_dir).join(&meta_file_name);
@@ -115,7 +119,7 @@ fn setup_database(
             tx.set_account(address.clone(), Some(account))?;
 
             // add random storage to each account
-            for key in 0..=storage_per_contract {
+            for key in 1..=storage_per_contract {
                 let storage_key = StorageKey::from(U256::from(key));
                 let storage_path =
                     StoragePath::for_address_path_and_slot(address.clone(), storage_key);
@@ -137,8 +141,8 @@ fn copy_files(from: &BasedDatabase, to: &Path) -> Result<(), io::Error> {
         (&from.main_file_name, &from.file_name_path),
         (&from.meta_file_name, &from.meta_file_name_path),
     ] {
-        let to_path = to.join(&file);
-        fs::copy(&from_path, &to_path)?;
+        let to_path = to.join(file);
+        fs::copy(from_path, &to_path)?;
     }
     Ok(())
 }
