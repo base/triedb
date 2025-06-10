@@ -54,13 +54,19 @@ pub enum Node {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InMemoryChild {
+    pub node: Option<Box<InMemoryNode>>,
+    pub hash: Option<B256>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InMemoryNode {
     AccountLeaf {
         prefix: Nibbles,
         nonce_rlp: ArrayVec<u8, 9>,
         balance_rlp: ArrayVec<u8, 33>,
         code_hash: B256,
-        storage_root: Option<Box<InMemoryNode>>,
+        storage_root: Option<InMemoryChild>,
     },
     StorageLeaf {
         prefix: Nibbles,
@@ -68,7 +74,7 @@ pub enum InMemoryNode {
     },
     Branch {
         prefix: Nibbles,
-        children: [Option<Box<InMemoryNode>>; 16],
+        children: [Option<InMemoryChild>; 16],
     },
 }
 
