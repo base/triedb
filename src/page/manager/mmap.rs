@@ -146,7 +146,7 @@ impl PageManager {
             // The file needs to grow.
             let mut file = self.file.lock();
             // Check again to see if another thread updated the file length before we were able to
-            // acquire the log.
+            // acquire the lock.
             if min_len > self.file_len.load(Ordering::Relaxed) {
                 // Add extra room at the end of the file. We do this in a loop, rather than
                 // specifically need what we need, to (1) ensure a predictable exponential growth,
