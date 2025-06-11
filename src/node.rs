@@ -59,6 +59,7 @@ pub struct InMemoryChild {
     pub hash: Option<B256>,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InMemoryNode {
     AccountLeaf {

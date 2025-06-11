@@ -1768,7 +1768,7 @@ impl StorageEngine {
     /// Builds an in-memory trie from a list of (Nibbles, Option<TrieValue>), returning the root
     /// node.
     pub fn build_in_memory_trie(
-        changes: &mut [(Nibbles, Option<TrieValue>)]
+        changes: &mut [(Nibbles, Option<TrieValue>)],
     ) -> Option<InMemoryNode> {
         if changes.is_empty() {
             return None;
@@ -1791,7 +1791,9 @@ impl StorageEngine {
         let last_path = &changes[changes.len() - 1].0[path_offset..];
         let mut common_prefix_len = 0;
         let min_len = first_path.len().min(last_path.len());
-        while common_prefix_len < min_len && first_path[common_prefix_len] == last_path[common_prefix_len] {
+        while common_prefix_len < min_len &&
+            first_path[common_prefix_len] == last_path[common_prefix_len]
+        {
             common_prefix_len += 1;
         }
 
@@ -1813,7 +1815,8 @@ impl StorageEngine {
                 children[nibble as usize] = Self::build_in_memory_trie_rec(
                     &changes[start..i],
                     path_offset + common_prefix_len + 1,
-                ).map(|node| InMemoryChild { node: Some(Box::new(node)), hash: None });
+                )
+                .map(|node| InMemoryChild { node: Some(Box::new(node)), hash: None });
             }
             let prefix = first_change_path.slice(path_offset..path_offset + common_prefix_len);
             return Some(InMemoryNode::Branch { prefix, children });
@@ -1834,7 +1837,8 @@ impl StorageEngine {
                     Self::build_in_memory_trie_rec(
                         &storage_children,
                         path_offset + common_prefix_len,
-                    ).map(|node| InMemoryChild { node: Some(Box::new(node)), hash: None })
+                    )
+                    .map(|node| InMemoryChild { node: Some(Box::new(node)), hash: None })
                 } else {
                     None
                 };
@@ -1860,10 +1864,7 @@ impl StorageEngine {
     }
 
     /// Merges an in-memory subtrie into the on-disk trie at the given path.
-    ///
-    /// - `path`: The nibbles path where the subtrie should be merged.
-    /// - `subtrie`: The in-memory subtrie to merge.
-    /// - `mode`: Hash verification mode.
+    // KALEY TODO mode: Hash verification mode
     pub fn set_subtrie(
         &mut self,
         context: &mut TransactionContext,
@@ -1871,24 +1872,21 @@ impl StorageEngine {
         subtrie: InMemoryNode,
         mode: HashVerificationMode,
     ) -> Result<(), Error> {
-        // 1. Traverse to the merge point (parent of the insertion point)
+        // Traverse to the merge point (parent of the insertion point)
         let (page_id, page_index, _path_offset) = self.traverse_to_merge_point(context, path)?;
 
-        // 2. Load the on-disk node at the merge point
+        // Load the on-disk node at the merge point
         let on_disk_node: Node = {
             let slotted_page = SlottedPageMut::try_from(self.get_mut_page(context, page_id)?)?;
             slotted_page.get_value(page_index)?
-        }; // slotted_page dropped here
+        };
 
-        // 3. Merge the subtrie
+        // Merge the subtrie
         let merged_node = self.merge_in_memory_with_disk(context, &on_disk_node, &subtrie, mode)?;
 
-        // 4. Write the merged node back to disk
+        // Write the merged node back to disk
         let mut slotted_page = SlottedPageMut::try_from(self.get_mut_page(context, page_id)?)?;
         slotted_page.set_value(page_index, &merged_node)?;
-
-        // 5. (Optional) Update hashes and pointers up to the root if needed
-        // (This may be handled by your existing logic)
 
         Ok(())
     }
@@ -1898,7 +1896,7 @@ impl StorageEngine {
         context: &mut TransactionContext,
         on_disk: &Node,
         in_mem: &InMemoryNode,
-        mode: HashVerificationMode,
+        _mode: HashVerificationMode,
     ) -> Result<Node, Error> {
         use crate::node::InMemoryNode;
         match (on_disk, in_mem) {
@@ -1913,14 +1911,23 @@ impl StorageEngine {
                         (Some(d_ptr), Some(m_child)) => {
                             // Recursively merge
                             let d_node = self.load_node_from_disk(context, d_ptr)?;
-                            let merged = self.merge_in_memory_with_disk(context, &d_node, m_child.node.as_ref().unwrap(), mode)?;
+                            let merged = self.merge_in_memory_with_disk(
+                                context,
+                                &d_node,
+                                m_child.node.as_ref().unwrap(),
+                                _mode,
+                            )?;
                             // Write the merged node to disk and get a pointer
-                            let ptr = self.write_node_to_disk(context, &self.node_to_in_memory_node(&merged)?)?;
+                            let ptr = self.write_node_to_disk(
+                                context,
+                                &self.node_to_in_memory_node(&merged)?,
+                            )?;
                             new_children[i] = Some(ptr);
                         }
                         (None, Some(m_child)) => {
                             // Only in-memory: insert
-                            let ptr = self.write_node_to_disk(context, m_child.node.as_ref().unwrap())?;
+                            let ptr =
+                                self.write_node_to_disk(context, m_child.node.as_ref().unwrap())?;
                             new_children[i] = Some(ptr);
                         }
                         (Some(d_ptr), None) => {
@@ -1940,7 +1947,8 @@ impl StorageEngine {
         }
     }
 
-    /// Converts a Node to an InMemoryNode for writing to disk.
+    /// Converts a Node to an InMemoryNode for writing to disk. Necessary for merging an in-memory
+    /// trie with an on-disk trie
     fn node_to_in_memory_node(&self, node: &Node) -> Result<InMemoryNode, Error> {
         match node {
             Node::AccountLeaf { prefix, nonce_rlp, balance_rlp, code_hash, .. } => {
@@ -1956,10 +1964,9 @@ impl StorageEngine {
                 prefix: prefix.clone(),
                 value_rlp: value_rlp.clone(),
             }),
-            Node::Branch { prefix, .. } => Ok(InMemoryNode::Branch {
-                prefix: prefix.clone(),
-                children: Default::default(),
-            }),
+            Node::Branch { prefix, .. } => {
+                Ok(InMemoryNode::Branch { prefix: prefix.clone(), children: Default::default() })
+            }
         }
     }
 
@@ -2008,17 +2015,26 @@ impl StorageEngine {
         }
     }
 
-    /// Loads a node from disk using a pointer.
-    fn load_node_from_disk(&self, context: &TransactionContext, ptr: &Pointer) -> Result<Node, Error> {
+    /// Loads a node from disk
+    fn load_node_from_disk(
+        &self,
+        context: &TransactionContext,
+        ptr: &Pointer,
+    ) -> Result<Node, Error> {
         let page_id = ptr.location().page_id().unwrap();
         let page = self.get_page(context, page_id)?;
         let slotted_page = SlottedPage::try_from(page)?;
-        let node: Node = slotted_page.get_value(0)?; // or use cell_index if not root
+        let cell_index = ptr.location().cell_index().unwrap_or(0);
+        let node: Node = slotted_page.get_value(cell_index)?;
         Ok(node)
     }
 
-    /// Writes an in-memory node to disk, returning a Pointer.
-    fn write_node_to_disk(&mut self, context: &mut TransactionContext, node: &InMemoryNode) -> Result<Pointer, Error> {
+    /// Writes an in-memory node to disk
+    fn write_node_to_disk(
+        &mut self,
+        context: &mut TransactionContext,
+        node: &InMemoryNode,
+    ) -> Result<Pointer, Error> {
         let page = self.allocate_page(context)?;
         let mut slotted_page = SlottedPageMut::try_from(page)?;
         let disk_node = self.in_memory_to_disk_node(context, node)?;
@@ -2027,11 +2043,21 @@ impl StorageEngine {
         Ok(Pointer::new(Location::for_cell(idx), rlp_node))
     }
 
-    /// Converts an InMemoryNode to an on-disk Node, recursively writing children.
-    fn in_memory_to_disk_node(&mut self, context: &mut TransactionContext, node: &InMemoryNode) -> Result<Node, Error> {
+    /// Converts an InMemoryNode to an on-disk Node, recursively writing children
+    fn in_memory_to_disk_node(
+        &mut self,
+        context: &mut TransactionContext,
+        node: &InMemoryNode,
+    ) -> Result<Node, Error> {
         use crate::node::InMemoryNode;
         match node {
-            InMemoryNode::AccountLeaf { prefix, nonce_rlp, balance_rlp, code_hash, storage_root } => {
+            InMemoryNode::AccountLeaf {
+                prefix,
+                nonce_rlp,
+                balance_rlp,
+                code_hash,
+                storage_root,
+            } => {
                 let storage_root_ptr = if let Some(child) = storage_root {
                     if let Some(child_node) = &child.node {
                         Some(self.write_node_to_disk(context, child_node)?)
@@ -2049,10 +2075,9 @@ impl StorageEngine {
                     storage_root: storage_root_ptr,
                 })
             }
-            InMemoryNode::StorageLeaf { prefix, value_rlp } => Ok(Node::StorageLeaf {
-                prefix: prefix.clone(),
-                value_rlp: value_rlp.clone(),
-            }),
+            InMemoryNode::StorageLeaf { prefix, value_rlp } => {
+                Ok(Node::StorageLeaf { prefix: prefix.clone(), value_rlp: value_rlp.clone() })
+            }
             InMemoryNode::Branch { prefix, children } => {
                 let mut disk_children: [Option<Pointer>; 16] = Default::default();
                 for (i, child) in children.iter().enumerate() {
@@ -2062,10 +2087,7 @@ impl StorageEngine {
                         }
                     }
                 }
-                Ok(Node::Branch {
-                    prefix: prefix.clone(),
-                    children: disk_children,
-                })
+                Ok(Node::Branch { prefix: prefix.clone(), children: disk_children })
             }
         }
     }
