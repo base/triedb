@@ -171,6 +171,7 @@ fn generate_storage_paths(
 fn generate_storage_paths_values(
     addresses: &[AddressPath],
     storage_per_address: usize,
+    based_key: usize,
 ) -> Vec<(StoragePath, StorageValue)> {
     let capacity = addresses.len() * storage_per_address;
     let mut storage_paths_values: Vec<(StoragePath, StorageValue)> = Vec::with_capacity(capacity);
@@ -178,9 +179,10 @@ fn generate_storage_paths_values(
         .iter()
         .flat_map(|address| {
             (1..=storage_per_address).map(|i| {
-                let key = StorageKey::from(U256::from(i));
+                let key = StorageKey::from(U256::from(i + based_key));
                 let path = StoragePath::for_address_path_and_slot(address.clone(), key);
                 let value = StorageValue::from_be_slice(path.get_slot().pack().as_slice());
+
                 (path, value)
             })
         })
@@ -205,7 +207,7 @@ fn bench_account_reads(c: &mut Criterion) {
         (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
-    group.bench_function(BenchmarkId::new("random_reads", BATCH_SIZE), |b| {
+    group.bench_function(BenchmarkId::new("eoa_reads", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {
                 let db_path = dir.path().join(&file_name);
@@ -239,7 +241,7 @@ fn bench_account_inserts(c: &mut Criterion) {
         (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
-    group.bench_function(BenchmarkId::new("batch_inserts", BATCH_SIZE), |b| {
+    group.bench_function(BenchmarkId::new("eoa_inserts", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {
                 let dir = TempDir::new("triedb_bench_insert").unwrap();
@@ -279,7 +281,7 @@ fn bench_account_updates(c: &mut Criterion) {
         (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
-    group.bench_function(BenchmarkId::new("batch_updates", BATCH_SIZE), |b| {
+    group.bench_function(BenchmarkId::new("eoa_updates", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {
                 let db_path = dir.path().join(&file_name);
@@ -317,7 +319,7 @@ fn bench_account_deletes(c: &mut Criterion) {
         (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
-    group.bench_function(BenchmarkId::new("batch_deletes", BATCH_SIZE), |b| {
+    group.bench_function(BenchmarkId::new("eoa_deletes", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {
                 let dir = TempDir::new("triedb_bench_delete").unwrap();
@@ -515,12 +517,15 @@ fn bench_storage_inserts(c: &mut Criterion) {
     );
     let file_name = based_dir.main_file_name.clone();
 
-    let mut rng = StdRng::seed_from_u64(SEED_NEW_CONTRACT);
-    let total_storage_per_address = DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT / 2;
+    let mut rng = StdRng::seed_from_u64(SEED_CONTRACT);
+    let total_storage_per_address = DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT;
     let total_addresses = BATCH_SIZE / total_storage_per_address;
     let addresses: Vec<AddressPath> =
         (0..total_addresses).map(|_| generate_random_address(&mut rng)).collect();
-    let storage_paths_values = generate_storage_paths_values(&addresses, total_storage_per_address);
+    // set based_key to BATCH_SIZE (> DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT) to create new storage
+    // slots in existing accounts
+    let storage_paths_values =
+        generate_storage_paths_values(&addresses, total_storage_per_address, BATCH_SIZE);
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
     group.bench_function(BenchmarkId::new("storage_inserts", BATCH_SIZE), |b| {
