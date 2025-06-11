@@ -34,9 +34,9 @@ use std::{
 /// which could be memory-mapped files, in-memory storage, or other implementations.
 #[derive(Debug)]
 pub struct StorageEngine {
-    page_manager: PageManager,
-    meta_manager: Mutex<MetadataManager>,
-    alive_snapshot: AtomicU64,
+    pub(crate) page_manager: PageManager,
+    pub(crate) meta_manager: Mutex<MetadataManager>,
+    pub(crate) alive_snapshot: AtomicU64,
 }
 
 #[derive(Debug)]
