@@ -286,8 +286,14 @@ mod tests {
         }
 
         fn alive_page_ids(db: &Database) -> Vec<PageId> {
-            let orphan_pages =
-                db.storage_engine.meta_manager.lock().orphan_pages().iter().collect::<Vec<_>>();
+            let orphan_pages = db
+                .storage_engine
+                .meta_manager
+                .lock()
+                .orphan_pages()
+                .iter()
+                .map(|orphan| orphan.page_id())
+                .collect::<Vec<_>>();
             let all_pages = (1..db.storage_engine.page_manager.size())
                 .map(|page_id| PageId::new(page_id).unwrap());
             all_pages.filter(move |page_id| !orphan_pages.contains(page_id)).collect()

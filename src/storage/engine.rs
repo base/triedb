@@ -2,7 +2,7 @@ use crate::{
     account::Account,
     context::TransactionContext,
     location::Location,
-    meta::MetadataManager,
+    meta::{MetadataManager, OrphanPage},
     node::{
         Node,
         Node::{AccountLeaf, Branch},
@@ -86,6 +86,12 @@ impl StorageEngine {
         self.alive_snapshot.store(snapshot_id + 1, Ordering::Relaxed);
     }
 
+    /// Mark a given page as no longer in use (orphan).
+    fn orphan_page(&self, context: &TransactionContext, page_id: PageId) -> Result<(), Error> {
+        let orphan = OrphanPage::new(page_id, context.snapshot_id);
+        self.meta_manager.lock().orphan_pages().push(orphan).map_err(Error::from)
+    }
+
     /// Retrieves a mutable clone of a [Page] from the underlying [PageManager].
     /// The original page is marked as orphaned and a new page is allocated, potentially from an
     /// orphaned page.
@@ -108,7 +114,8 @@ impl StorageEngine {
         let mut new_page = self.allocate_page(context)?;
         new_page.contents_mut().copy_from_slice(original_page.contents());
 
-        self.meta_manager.lock().orphan_pages().push(page_id)?;
+        self.orphan_page(context, page_id)?;
+
         Ok(new_page)
     }
 
@@ -353,7 +360,7 @@ impl StorageEngine {
                 // but this would require adding the page_id to a pending buffer. It would
                 // still be orphaned if unused by the end of the transaction.
                 Ok(PointerChange::Delete) => {
-                    self.meta_manager.lock().orphan_pages().push(page_id)?;
+                    self.orphan_page(context, page_id)?;
                     return Ok(PointerChange::Delete);
                 }
                 Ok(PointerChange::None) => return Ok(PointerChange::None),
@@ -1171,7 +1178,7 @@ impl StorageEngine {
 
         // If we're the root node, orphan our page
         if page_index == 0 {
-            self.meta_manager.lock().orphan_pages().push(branch_page_id)?;
+            self.orphan_page(context, branch_page_id)?;
         }
 
         Ok(PointerChange::Update(Pointer::new(node_location(child_slotted_page.id(), 0), rlp_node)))
@@ -1304,7 +1311,7 @@ impl StorageEngine {
         }
 
         if cell_index == 0 {
-            self.meta_manager.lock().orphan_pages().push(slotted_page.id())?;
+            self.orphan_page(context, slotted_page.id())?;
         }
 
         Ok(())
@@ -1866,13 +1873,13 @@ impl StorageEngine {
     /// If there is an orphaned page available as of the given [SnapshotId],
     /// it is used to allocate a new page instead.
     pub fn allocate_page(&self, context: &mut TransactionContext) -> Result<PageMut<'_>, Error> {
-        let page_manager = &self.page_manager;
         let alive_snapshot = self.alive_snapshot.load(Ordering::Relaxed);
-        let orphaned_page_id = self.meta_manager.lock().orphan_pages().pop_if(|page_id| {
-            let page =
-                page_manager.get(context.snapshot_id, page_id).expect("orphan page does not exist");
-            page.snapshot_id() < alive_snapshot
-        });
+        let orphaned_page_id = self
+            .meta_manager
+            .lock()
+            .orphan_pages()
+            .pop_if(|orphan| orphan.orphaned_at() <= alive_snapshot)
+            .map(|orphan| orphan.page_id());
 
         let page_to_return = if let Some(orphaned_page_id) = orphaned_page_id {
             let mut page = self.get_mut_page(context, orphaned_page_id)?;
