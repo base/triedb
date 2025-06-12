@@ -179,11 +179,16 @@ fn generate_storage_paths_values(
         .iter()
         .flat_map(|address| {
             (1..=storage_per_address).map(|i| {
-                let key = StorageKey::from(U256::from(i + based_key));
-                let path = StoragePath::for_address_path_and_slot(address.clone(), key);
-                let value = StorageValue::from_be_slice(path.get_slot().pack().as_slice());
+                // add based_key to the storage key to have different values in the storage slots
+                let storage_key = StorageKey::from(U256::from(i + based_key));
+                let storage_path =
+                    StoragePath::for_address_path_and_slot(address.clone(), storage_key);
+                let mut val = storage_path.get_slot().pack();
+                // reverse the value to make it different from the initial value
+                val.reverse();
+                let storage_value = StorageValue::from_be_slice(val.as_slice());
 
-                (path, value)
+                (storage_path, storage_value)
             })
         })
         .for_each(|path| storage_paths_values.push(path));
@@ -549,6 +554,47 @@ fn bench_storage_inserts(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_storage_updates(c: &mut Criterion) {
+    let mut group = c.benchmark_group("update_storage_operations");
+    let based_dir = get_based_database(
+        DEFAULT_SETUP_DB_EOA_SIZE,
+        DEFAULT_SETUP_DB_CONTRACT_SIZE,
+        DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT,
+    );
+    let file_name = based_dir.main_file_name.clone();
+
+    let mut rng = StdRng::seed_from_u64(SEED_CONTRACT);
+    let total_storage_per_address = DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT;
+    let total_addresses = BATCH_SIZE / total_storage_per_address;
+    let addresses: Vec<AddressPath> =
+        (0..total_addresses).map(|_| generate_random_address(&mut rng)).collect();
+    // set based_key to BATCH_SIZE (> DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT) to create new storage
+    // slots in existing accounts
+    let storage_paths_values =
+        generate_storage_paths_values(&addresses, total_storage_per_address, BATCH_SIZE);
+
+    group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+    group.bench_function(BenchmarkId::new("storage_inserts", BATCH_SIZE), |b| {
+        b.iter_with_setup(
+            || {
+                let dir = TempDir::new("triedb_bench_storage_insert").unwrap();
+                copy_files(&based_dir, dir.path()).unwrap();
+                let db_path = dir.path().join(&file_name);
+                Database::open(db_path).unwrap()
+            },
+            |db| {
+                let mut tx = db.begin_rw().unwrap();
+                for (storage_path, storage_value) in &storage_paths_values {
+                    tx.set_storage_slot(storage_path.clone(), Some(*storage_value)).unwrap();
+                }
+                tx.commit().unwrap();
+            },
+        );
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_account_reads,
@@ -558,5 +604,6 @@ criterion_group!(
     bench_mixed_operations,
     bench_storage_reads,
     bench_storage_inserts,
+    bench_storage_updates,
 );
 criterion_main!(benches);
