@@ -7,8 +7,8 @@ use crate::{
 
 #[derive(Debug)]
 pub struct Cursor<'c> {
-    storage_engine: StorageEngine,
-    context: TransactionContext,
+    storage_engine: &'c StorageEngine,
+    context: &'c TransactionContext,
     loc_stack: Vec<Location>,
     page_stack: Vec<SlottedPage<'c>>,
     node_stack: Vec<Node>,
@@ -22,7 +22,7 @@ pub enum CursorError {
 }
 
 impl<'c> Cursor<'c> {
-    pub fn new(storage_engine: StorageEngine, context: TransactionContext) -> Self {
+    pub fn new(storage_engine: &'c StorageEngine, context: &'c TransactionContext) -> Self {
         Self {
             storage_engine,
             context,
@@ -35,39 +35,38 @@ impl<'c> Cursor<'c> {
     }
 
     /// Move the cursor to the key and return a value matching or greater than the key.
-    pub fn seek(&mut self, key: Nibbles) -> Result<Option<(Nibbles, Node)>, CursorError> {
+    pub fn seek(&mut self, key: &Nibbles) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
         // If not initialized, start from root
         if !self.initialized {
             self.initialized = true;
-            return self.seek_from_root(&key);
+            return self.seek_from_root(key);
         }
 
         // If we have no current position, start from root
         if self.key_stack.is_empty() {
-            return self.seek_from_root(&key);
+            return self.seek_from_root(key);
         }
 
         let current_key = self.key_stack.last().unwrap();
 
         // If we're already at the target key, return current position
-        if current_key == &key {
-            let current_node = self.node_stack.last().unwrap().clone();
-            return Ok(Some((current_key.clone(), current_node)));
+        if current_key == key {
+            return Ok(self.current_key_and_node());
         }
 
         // Find the longest common prefix between current position and target
-        let common_prefix_len = Nibbles::common_prefix_length(current_key, &key);
+        let common_prefix_len = Nibbles::common_prefix_length(current_key, key);
 
         // If keys are completely different, start from root
-        if common_prefix_len == 0 {
-            return self.seek_from_root(&key);
+        if common_prefix_len == current_key.len() {
+            return self.seek_from_root(key);
         }
 
         // Optimize: backtrack only to the point where paths diverge
         self.backtrack_to_common_ancestor(common_prefix_len)?;
 
         // Continue seeking from the common ancestor
-        self.seek_from_current_position(&key)
+        self.seek_from_current_position(key)
     }
 
     /// Backtrack the cursor to the common ancestor at the given prefix length
@@ -96,13 +95,12 @@ impl<'c> Cursor<'c> {
     fn seek_from_current_position(
         &mut self,
         target_key: &Nibbles,
-    ) -> Result<Option<(Nibbles, Node)>, CursorError> {
-        let current_key = self.key_stack.last().unwrap().clone();
-        let current_node = self.node_stack.last().unwrap().clone();
+    ) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
+        let (current_key, current_node) = self.current_key_and_node().unwrap();
 
         // If we've reached or passed the target, return current position
-        if current_key >= *target_key {
-            return Ok(Some((current_key, current_node)));
+        if current_key >= target_key {
+            return Ok(self.current_key_and_node());
         }
 
         // If this is not a branch node, we need to backtrack to find next higher key
@@ -115,7 +113,7 @@ impl<'c> Cursor<'c> {
 
         if path_offset >= target_key.len() {
             // We've consumed the entire target key - current position is the result
-            return Ok(Some((current_key, current_node)));
+            return Ok(self.current_key_and_node());
         }
 
         let target_nibble = target_key[path_offset];
@@ -123,17 +121,18 @@ impl<'c> Cursor<'c> {
         // Look for a child at or after the target nibble
         for child_index in target_nibble..16 {
             if let Some(child_pointer) = current_node.child(child_index).unwrap() {
-                let child_node = self.load_child_node(child_pointer.location())?;
-                let child_key = self.build_child_key(&current_key, child_index, &child_node);
-
-                self.key_stack.push(child_key.clone());
+                self.load_child_node_into_stack(
+                    child_pointer.location(),
+                    current_key.clone(),
+                    Some(child_index),
+                )?;
 
                 if child_index == target_nibble {
                     // This is the exact path we want, continue recursively
                     return self.seek_from_current_position(target_key);
                 } else {
                     // This child is higher than our target, return it
-                    return Ok(Some((child_key, child_node)));
+                    return Ok(self.current_key_and_node());
                 }
             }
         }
@@ -143,7 +142,7 @@ impl<'c> Cursor<'c> {
     }
 
     /// Fallback: seek starting from the root (used when optimization isn't possible)
-    fn seek_from_root(&mut self, key: &Nibbles) -> Result<Option<(Nibbles, Node)>, CursorError> {
+    fn seek_from_root(&mut self, key: &Nibbles) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
         // Clear existing state to start fresh
         self.loc_stack.clear();
         self.page_stack.clear();
@@ -162,7 +161,7 @@ impl<'c> Cursor<'c> {
 
         self.loc_stack.push(Location::for_page(root_node_page_id));
         self.page_stack.push(root_slotted_page);
-        self.node_stack.push(root_node.clone());
+        self.node_stack.push(root_node);
         self.key_stack.push(Nibbles::default());
 
         // Navigate through the tree to find the target key or next higher key
@@ -174,9 +173,8 @@ impl<'c> Cursor<'c> {
         &mut self,
         target_key: &Nibbles,
         path_offset: usize,
-    ) -> Result<Option<(Nibbles, Node)>, CursorError> {
-        let current_node = self.node_stack.last().unwrap().clone();
-        let current_key = self.key_stack.last().unwrap().clone();
+    ) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
+        let (current_key, current_node) = self.current_key_and_node().unwrap();
 
         // Compare current node's prefix with remaining target path
         let remaining_target = if path_offset < target_key.len() {
@@ -204,7 +202,7 @@ impl<'c> Cursor<'c> {
 
         // If we've consumed the entire target key, this is our result
         if new_path_offset >= target_key.len() {
-            return Ok(Some((current_key, current_node)));
+            return Ok(Some((self.key_stack.last().unwrap(), self.node_stack.last().unwrap())));
         }
 
         // Handle different node types
@@ -217,18 +215,17 @@ impl<'c> Cursor<'c> {
                 for child_index in next_nibble..16 {
                     if let Some(child_pointer) = current_node.child(child_index).unwrap() {
                         // Load the child and continue recursion
-                        let child_node = self.load_child_node(child_pointer.location())?;
-                        let child_key =
-                            self.build_child_key(&current_key, child_index, &child_node);
-
-                        self.key_stack.push(child_key.clone());
-
+                        self.load_child_node_into_stack(
+                            child_pointer.location(),
+                            current_key.clone(),
+                            Some(child_index),
+                        )?;
                         if child_index == next_nibble {
                             // This is the exact path we want, continue recursion
                             return self.seek_recursive(target_key, new_path_offset + 1);
                         } else {
                             // This child is higher than our target, return it
-                            return Ok(Some((child_key, child_node)));
+                            return Ok(self.current_key_and_node());
                         }
                     }
                 }
@@ -237,21 +234,18 @@ impl<'c> Cursor<'c> {
                 self.backtrack_to_find_next_higher_key(target_key)
             }
             Node::AccountLeaf { storage_root, .. } => {
-                // If there's still remaining path and this account has storage, traverse into
-                // storage
-                if new_path_offset < target_key.len() {
-                    if let Some(storage_pointer) = storage_root {
-                        let storage_node = self.load_child_node(storage_pointer.location())?;
-                        // For storage, treat it like a child at index 0 for key building
-                        let storage_key = self.build_child_key(&current_key, 0, &storage_node);
-
-                        self.key_stack.push(storage_key);
-                        return self.seek_recursive(target_key, new_path_offset);
-                    }
+                // If account has storage, traverse into storage subtrie first
+                if let Some(storage_pointer) = storage_root {
+                    self.load_child_node_into_stack(
+                        storage_pointer.location(),
+                        current_key.clone(),
+                        None,
+                    )?;
+                    return Ok(self.current_key_and_node());
+                } else {
+                    // No storage, backtrack to find next account
+                    self.backtrack_from_leaf()
                 }
-
-                // No storage or we've consumed the target, find next higher key
-                self.find_next_higher_key_from_current_level(target_key, path_offset)
             }
             Node::StorageLeaf { .. } => {
                 // Storage leaf with remaining path, find next higher key
@@ -265,13 +259,10 @@ impl<'c> Cursor<'c> {
         &mut self,
         target_key: &Nibbles,
         _path_offset: usize,
-    ) -> Result<Option<(Nibbles, Node)>, CursorError> {
-        let current_node = self.node_stack.last().unwrap().clone();
-        let current_key = self.key_stack.last().unwrap().clone();
-
-        // If current key is already >= target, return it
-        if current_key >= *target_key {
-            return Ok(Some((current_key, current_node)));
+    ) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
+        // Check if current key is already >= target
+        if self.key_stack.last().unwrap() >= target_key {
+            return Ok(self.current_key_and_node());
         }
 
         // Otherwise, backtrack to find next higher key
@@ -282,7 +273,7 @@ impl<'c> Cursor<'c> {
     fn backtrack_to_find_next_higher_key(
         &mut self,
         target_key: &Nibbles,
-    ) -> Result<Option<(Nibbles, Node)>, CursorError> {
+    ) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
         // Pop current node since it doesn't satisfy our condition
         if !self.key_stack.is_empty() {
             let current_loc = self.loc_stack.pop().unwrap();
@@ -298,8 +289,7 @@ impl<'c> Cursor<'c> {
             return Ok(None);
         }
 
-        let parent_node = self.node_stack.last().unwrap().clone();
-        let parent_key = self.key_stack.last().unwrap().clone();
+        let (parent_key, parent_node) = self.current_key_and_node().unwrap();
 
         // If this is not a branch, continue backtracking
         if !parent_node.is_branch() {
@@ -316,11 +306,12 @@ impl<'c> Cursor<'c> {
         // Look for the next available child after current_child_index
         for child_index in (current_child_index + 1)..16 {
             if let Some(child_pointer) = parent_node.child(child_index).unwrap() {
-                let child_node = self.load_child_node(child_pointer.location())?;
-                let child_key = self.build_child_key(&parent_key, child_index, &child_node);
-
-                self.key_stack.push(child_key.clone());
-                return Ok(Some((child_key, child_node)));
+                self.load_child_node_into_stack(
+                    child_pointer.location(),
+                    parent_key.clone(),
+                    Some(child_index),
+                )?;
+                return Ok(self.current_key_and_node());
             }
         }
 
@@ -329,10 +320,15 @@ impl<'c> Cursor<'c> {
     }
 
     /// Load a child node from either the same page or a different page
-    fn load_child_node(&mut self, child_location: Location) -> Result<Node, CursorError> {
+    fn load_child_node_into_stack(
+        &mut self,
+        child_location: Location,
+        parent_key: Nibbles,
+        child_index: Option<u8>,
+    ) -> Result<(), CursorError> {
         self.loc_stack.push(child_location);
 
-        let child_node = if child_location.page_id().is_some() {
+        if child_location.page_id().is_some() {
             let child_page = self
                 .storage_engine
                 .get_page(&self.context, child_location.page_id().unwrap())
@@ -342,9 +338,10 @@ impl<'c> Cursor<'c> {
             let child_node: Node =
                 child_slotted_page.get_value(0).map_err(|_| CursorError::InvalidKey)?;
 
+            let child_key = Self::build_child_key(parent_key, child_index, &child_node);
+            self.key_stack.push(child_key);
             self.page_stack.push(child_slotted_page);
-            self.node_stack.push(child_node.clone());
-            child_node
+            self.node_stack.push(child_node);
         } else {
             let child_node: Node = self
                 .page_stack
@@ -353,32 +350,34 @@ impl<'c> Cursor<'c> {
                 .get_value(child_location.cell_index().unwrap())
                 .map_err(|_| CursorError::InvalidKey)?;
 
-            self.node_stack.push(child_node.clone());
-            child_node
+            let child_key = Self::build_child_key(parent_key, child_index, &child_node);
+            self.key_stack.push(child_key);
+            self.node_stack.push(child_node);
         };
 
-        Ok(child_node)
+        Ok(())
     }
 
     /// Build the full key for a child node
-    fn build_child_key(&self, base_key: &Nibbles, child_index: u8, child_node: &Node) -> Nibbles {
-        let mut child_key = base_key.clone();
-        child_key.push(child_index);
+    fn build_child_key(parent_key: Nibbles, child_index: Option<u8>, child_node: &Node) -> Nibbles {
+        let mut child_key = parent_key;
+        if let Some(child_index) = child_index {
+            child_key.push(child_index);
+        }
         child_key.extend_from_slice(child_node.prefix());
         child_key
     }
 
-    /// Get the current entry.
-    fn current(&mut self) -> Result<Option<Nibbles>, CursorError> {
-        let key = self.key_stack.last().cloned();
-        match key {
-            Some(key) => Ok(Some(key)),
-            None => Ok(None),
+    /// Get the current key and node from the stack
+    fn current_key_and_node(&self) -> Option<(&Nibbles, &Node)> {
+        match (self.key_stack.last(), self.node_stack.last()) {
+            (Some(key), Some(node)) => Some((key, node)),
+            _ => None,
         }
     }
 
     /// Move the cursor to the next key.
-    fn next(&mut self) -> Result<Option<(Nibbles, Node)>, CursorError> {
+    pub fn next(&mut self) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
         if !self.initialized {
             self.initialized = true;
             return self.start_from_root();
@@ -388,21 +387,19 @@ impl<'c> Cursor<'c> {
             return Ok(None);
         }
 
-        let current_node = self.node_stack.last().unwrap();
+        let (current_key, current_node) = self.current_key_and_node().unwrap();
+
         match current_node {
             Node::Branch { .. } => self.traverse_branch_children(),
             Node::AccountLeaf { storage_root, .. } => {
                 // If account has storage, traverse into storage subtrie first
                 if let Some(storage_pointer) = storage_root {
-                    let storage_node = self.load_child_node(storage_pointer.location())?;
-                    let current_key = self.key_stack.last().unwrap().clone();
-
-                    // For storage traversal, we need to handle it like a child traversal
-                    let mut storage_key = current_key.clone();
-                    storage_key.extend_from_slice(storage_node.prefix());
-
-                    self.key_stack.push(storage_key.clone());
-                    return Ok(Some((storage_key, storage_node)));
+                    self.load_child_node_into_stack(
+                        storage_pointer.location(),
+                        current_key.clone(),
+                        None,
+                    )?;
+                    return Ok(self.current_key_and_node());
                 } else {
                     // No storage, backtrack to find next account
                     self.backtrack_from_leaf()
@@ -413,39 +410,40 @@ impl<'c> Cursor<'c> {
     }
 
     /// Initialize cursor from root node
-    fn start_from_root(&mut self) -> Result<Option<(Nibbles, Node)>, CursorError> {
+    fn start_from_root(&mut self) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
         let root_node_page_id = self.context.root_node_page_id.unwrap();
         let root_page = self.storage_engine.get_page(&self.context, root_node_page_id).unwrap();
         let root_slotted_page = SlottedPage::try_from(root_page).unwrap();
         let root_node: Node = root_slotted_page.get_value(0).unwrap();
-        let root_key = root_node.prefix();
+        let root_key = root_node.prefix().clone();
 
         self.loc_stack.push(Location::for_page(root_node_page_id));
         self.page_stack.push(root_slotted_page);
-        self.node_stack.push(root_node.clone());
-        self.key_stack.push(root_key.clone());
+        self.node_stack.push(root_node);
+        self.key_stack.push(root_key);
 
-        Ok(Some((root_key.clone(), root_node)))
+        let key_ref = self.key_stack.last().unwrap();
+        let node_ref = self.node_stack.last().unwrap();
+        Ok(Some((key_ref, node_ref)))
     }
 
     /// Traverse children of a branch node
-    fn traverse_branch_children(&mut self) -> Result<Option<(Nibbles, Node)>, CursorError> {
-        let current_node = self.node_stack.last().unwrap();
-        let current_key = self.key_stack.last().unwrap();
-        let base_child_key = current_key.clone();
+    fn traverse_branch_children(&mut self) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
+        let (parent_key, parent_node) = self.current_key_and_node().unwrap();
 
         for child_index in 0..16 {
-            let child = current_node.child(child_index).unwrap();
+            let child = parent_node.child(child_index).unwrap();
             if child.is_none() {
                 continue;
             }
 
             let child_pointer = child.as_ref().unwrap();
-            let child_node = self.load_child_node(child_pointer.location())?;
-            let child_key = self.build_child_key(&base_child_key, child_index as u8, &child_node);
-
-            self.key_stack.push(child_key.clone());
-            return Ok(Some((child_key, child_node)));
+            self.load_child_node_into_stack(
+                child_pointer.location(),
+                parent_key.clone(),
+                Some(child_index as u8),
+            )?;
+            return Ok(self.current_key_and_node());
         }
 
         // No children found, backtrack
@@ -453,7 +451,7 @@ impl<'c> Cursor<'c> {
     }
 
     /// Backtrack to find the next sibling at any level
-    fn backtrack_to_next_sibling(&mut self) -> Result<Option<(Nibbles, Node)>, CursorError> {
+    fn backtrack_to_next_sibling(&mut self) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
         while !self.node_stack.is_empty() {
             // Pop current node
             let current_loc = self.loc_stack.pop().unwrap();
@@ -467,7 +465,7 @@ impl<'c> Cursor<'c> {
             if self.node_stack.is_empty() {
                 return Ok(None);
             }
-            let parent_node = self.node_stack.last().unwrap().clone();
+            let parent_node = self.node_stack.last().unwrap();
             if matches!(parent_node, Node::AccountLeaf { .. }) {
                 // If we've reached an account leaf, we need to backtrack to its parent
                 continue;
@@ -478,12 +476,8 @@ impl<'c> Cursor<'c> {
             // Get current child index and try to find next sibling
             let current_child_index = current_key.get(parent_key.len()).unwrap();
 
-            if let Some(result) = self.find_next_sibling_from_index(
-                current_child_index + 1,
-                &parent_node,
-                &parent_key,
-            )? {
-                return Ok(Some(result));
+            if self.find_next_sibling_from_index(current_child_index + 1)? {
+                return Ok(self.current_key_and_node());
             }
 
             // No sibling found, continue backtracking
@@ -493,15 +487,11 @@ impl<'c> Cursor<'c> {
     }
 
     /// Find the next sibling starting from the given index
-    fn find_next_sibling_from_index(
-        &mut self,
-        start_index: u8,
-        parent_node: &Node,
-        parent_key: &Nibbles,
-    ) -> Result<Option<(Nibbles, Node)>, CursorError> {
+    fn find_next_sibling_from_index(&mut self, start_index: u8) -> Result<bool, CursorError> {
+        let (parent_key, parent_node) = self.current_key_and_node().unwrap();
         let children = match parent_node {
             Node::Branch { children, .. } => children,
-            _ => return Ok(None),
+            _ => return Ok(false),
         };
 
         for child_index in start_index..16 {
@@ -510,18 +500,19 @@ impl<'c> Cursor<'c> {
             }
 
             let child_pointer = children[child_index as usize].as_ref().unwrap();
-            let child_node = self.load_child_node(child_pointer.location())?;
-            let child_key = self.build_child_key(&parent_key, child_index, &child_node);
-
-            self.key_stack.push(child_key.clone());
-            return Ok(Some((child_key, child_node)));
+            self.load_child_node_into_stack(
+                child_pointer.location(),
+                parent_key.clone(),
+                Some(child_index as u8),
+            )?;
+            return Ok(true);
         }
 
-        Ok(None)
+        Ok(false)
     }
 
     /// Backtrack from a leaf node
-    fn backtrack_from_leaf(&mut self) -> Result<Option<(Nibbles, Node)>, CursorError> {
+    fn backtrack_from_leaf(&mut self) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
         // Pop current leaf node from stacks
         let current_loc = self.loc_stack.pop().unwrap();
         if current_loc.page_id().is_some() {
@@ -532,22 +523,18 @@ impl<'c> Cursor<'c> {
 
         // Now continue backtracking until we find a parent with a next sibling
         while !self.node_stack.is_empty() {
-            let parent_node = self.node_stack.last().unwrap().clone();
+            let parent_node = self.node_stack.last().unwrap();
 
             // If we've reached an account leaf, we need to backtrack to its parent
             if !matches!(parent_node, Node::AccountLeaf { .. }) {
-                let parent_key = self.key_stack.last().unwrap().clone();
+                let parent_key = self.key_stack.last().unwrap();
 
                 // Get the current child index from the child_key
                 let current_child_index = child_key.get(parent_key.len()).unwrap();
 
                 // Try to find the next sibling
-                if let Some(result) = self.find_next_sibling_from_index(
-                    current_child_index + 1,
-                    &parent_node,
-                    &parent_key,
-                )? {
-                    return Ok(Some(result));
+                if self.find_next_sibling_from_index(current_child_index + 1)? {
+                    return Ok(self.current_key_and_node());
                 }
             }
 
@@ -576,7 +563,7 @@ mod tests {
 
     #[test]
     fn test_cursor() {
-        let (mut storage_engine, mut context) = create_test_engine(100);
+        let (storage_engine, mut context) = create_test_engine(100);
 
         // top branch has 2 children, one is a leaf and the other is a branch with 2 children
 
@@ -603,30 +590,30 @@ mod tests {
             )
             .unwrap();
 
-        let mut cursor = Cursor::new(storage_engine, context);
+        let mut cursor = Cursor::new(&storage_engine, &context);
         let result = cursor.next();
         let (key, branch_node) = result.unwrap().unwrap();
-        assert_eq!(key, Nibbles::default());
+        assert_eq!(key, &Nibbles::default());
         assert_eq!(branch_node.prefix(), &Nibbles::default());
         assert!(branch_node.child(1).unwrap().is_some());
         assert!(branch_node.child(2).unwrap().is_some());
 
         let result = cursor.next();
         let (key, leaf_node) = result.unwrap().unwrap();
-        assert_eq!(key, Nibbles::from_vec(vec![1; 64]));
+        assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
         assert_eq!(leaf_node.prefix(), &Nibbles::from_vec(vec![1; 63]));
         assert!(matches!(leaf_node, Node::AccountLeaf { .. }));
 
         let result = cursor.next();
         let (key, branch_node) = result.unwrap().unwrap();
-        assert_eq!(key, Nibbles::from_vec(vec![2, 2]));
+        assert_eq!(key, &Nibbles::from_vec(vec![2, 2]));
         assert_eq!(branch_node.prefix(), &Nibbles::from_vec(vec![2]));
         assert!(branch_node.child(2).unwrap().is_some());
         assert!(branch_node.child(3).unwrap().is_some());
 
         let result = cursor.next();
         let (key, leaf_node) = result.unwrap().unwrap();
-        assert_eq!(key, Nibbles::from_vec(vec![2; 64]));
+        assert_eq!(key, &Nibbles::from_vec(vec![2; 64]));
         assert_eq!(leaf_node.prefix(), &Nibbles::from_vec(vec![2; 61]));
         assert!(matches!(leaf_node, Node::AccountLeaf { .. }));
 
@@ -634,7 +621,7 @@ mod tests {
         let (key, leaf_node) = result.unwrap().unwrap();
         assert_eq!(
             key,
-            Nibbles::from_vec(vec![2, 2].into_iter().chain(vec![3; 62]).collect::<Vec<_>>())
+            &Nibbles::from_vec(vec![2, 2].into_iter().chain(vec![3; 62]).collect::<Vec<_>>())
         );
         assert_eq!(leaf_node.prefix(), &Nibbles::from_vec(vec![3; 61]));
         assert!(matches!(leaf_node, Node::AccountLeaf { .. }));
@@ -649,7 +636,7 @@ mod tests {
         use crate::{node::TrieValue, path::StoragePath};
         use alloy_primitives::{Address, B256, U256};
 
-        let (mut storage_engine, mut context) = create_test_engine(300);
+        let (storage_engine, mut context) = create_test_engine(300);
 
         // Create an account
         let address = Address::from([0x42; 20]);
@@ -678,7 +665,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut cursor = Cursor::new(storage_engine, context);
+        let mut cursor = Cursor::new(&storage_engine, &context);
 
         // Iterate through all nodes and count what we find
         let mut found_account = false;
@@ -705,7 +692,7 @@ mod tests {
 
     #[test]
     fn test_cursor_seek() {
-        let (mut storage_engine, mut context) = create_test_engine(100);
+        let (storage_engine, mut context) = create_test_engine(100);
 
         // Create accounts with different patterns to test nearby seeking
         let accounts = vec![
@@ -729,28 +716,28 @@ mod tests {
                 .unwrap();
         }
 
-        let mut cursor = Cursor::new(storage_engine, context);
+        let mut cursor = Cursor::new(&storage_engine, &context);
 
         // First, position the cursor at [1, 0, 0, 0, ...]
         let mut target1 = vec![1, 0];
         target1.extend(vec![0; 62]);
-        let result = cursor.seek(Nibbles::from_vec(target1.clone()));
+        let result = cursor.seek(&Nibbles::from_vec(target1.clone()));
         let (key, _) = result.unwrap().unwrap();
-        assert_eq!(key, Nibbles::from_vec(target1));
+        assert_eq!(key, &Nibbles::from_vec(target1));
 
         // Now seek to a nearby key [1, 3] - should efficiently find [1, 5, ...]
         // This should reuse the common prefix [1] and not go back to root
         let target2 = vec![1, 3];
         let mut expected2 = vec![1, 5];
         expected2.extend(vec![0; 62]);
-        let result = cursor.seek(Nibbles::from_vec(target2));
+        let result = cursor.seek(&Nibbles::from_vec(target2));
         let (key, _) = result.unwrap().unwrap();
-        assert_eq!(key, Nibbles::from_vec(expected2));
+        assert_eq!(key, &Nibbles::from_vec(expected2));
 
         // Now move to the next key, which should be the branch at [2]
         let result = cursor.next();
         let (key, branch_node) = result.unwrap().unwrap();
-        assert_eq!(key, Nibbles::from_vec(vec![2]));
+        assert_eq!(key, &Nibbles::from_vec(vec![2]));
         assert_eq!(branch_node.prefix(), &Nibbles::default()); // Branch prefix should be empty
         assert!(branch_node.child(0).unwrap().is_some());
         assert!(branch_node.child(5).unwrap().is_some());
@@ -760,37 +747,37 @@ mod tests {
         target3.extend(vec![0; 62]);
         let mut expected3 = vec![2, 5];
         expected3.extend(vec![0; 62]);
-        let result = cursor.seek(Nibbles::from_vec(target3));
+        let result = cursor.seek(&Nibbles::from_vec(target3));
         let (key, _) = result.unwrap().unwrap();
-        assert_eq!(key, Nibbles::from_vec(expected3.clone()));
+        assert_eq!(key, &Nibbles::from_vec(expected3.clone()));
 
         // Seek backwards to a key we've already passed
         let mut target4 = vec![2, 0];
         target4.extend(vec![0; 62]);
         let mut expected4 = vec![2, 0];
         expected4.extend(vec![0; 62]);
-        let result = cursor.seek(Nibbles::from_vec(target4));
+        let result = cursor.seek(&Nibbles::from_vec(target4));
         let (key, _) = result.unwrap().unwrap();
-        assert_eq!(key, Nibbles::from_vec(expected4.clone()));
+        assert_eq!(key, &Nibbles::from_vec(expected4.clone()));
 
         // Seek to exact current position - should return immediately
-        let result = cursor.seek(Nibbles::from_vec(expected4.clone()));
+        let result = cursor.seek(&Nibbles::from_vec(expected4.clone()));
         let (key, _) = result.unwrap().unwrap();
-        assert_eq!(key, Nibbles::from_vec(expected4));
+        assert_eq!(key, &Nibbles::from_vec(expected4));
 
         // Next should be [2, 5, ...]
         let mut expected3 = vec![2, 5];
         expected3.extend(vec![0; 62]);
         let result = cursor.next();
         let (key, _) = result.unwrap().unwrap();
-        assert_eq!(key, Nibbles::from_vec(expected3));
+        assert_eq!(key, &Nibbles::from_vec(expected3));
 
         // Next should be [3, 0, ...]
         let mut expected = vec![3];
         expected.extend(vec![0; 63]);
         let result = cursor.next();
         let (key, _) = result.unwrap().unwrap();
-        assert_eq!(key, Nibbles::from_vec(expected));
+        assert_eq!(key, &Nibbles::from_vec(expected));
 
         // Next should be empty
         let result = cursor.next();
@@ -802,7 +789,7 @@ mod tests {
         use crate::{node::TrieValue, path::StoragePath};
         use alloy_primitives::{Address, B256, U256};
 
-        let (mut storage_engine, mut context) = create_test_engine(300);
+        let (storage_engine, mut context) = create_test_engine(300);
 
         // Create an account with storage
         let address = Address::from([0x42; 20]);
@@ -831,10 +818,10 @@ mod tests {
             )
             .unwrap();
 
-        let mut cursor = Cursor::new(storage_engine, context);
+        let mut cursor = Cursor::new(&storage_engine, &context);
 
         // Seek to the first storage slot
-        let result = cursor.seek(storage_path1.full_path());
+        let result = cursor.seek(&storage_path1.full_path());
         assert!(result.is_ok());
         let result = result.unwrap();
         assert!(result.is_some());
@@ -842,7 +829,7 @@ mod tests {
         // Seek to a storage slot that doesn't exist (should find next higher)
         let missing_storage_key = B256::from([0x03; 32]);
         let missing_storage_path = StoragePath::for_address_and_slot(address, missing_storage_key);
-        let result = cursor.seek(missing_storage_path.full_path());
+        let result = cursor.seek(&missing_storage_path.full_path());
         assert!(result.is_ok());
         // Should find the next storage slot (storage_key2) or the next account
     }

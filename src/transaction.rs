@@ -6,7 +6,7 @@ use crate::{
     context::TransactionContext,
     database::Database,
     node::TrieValue,
-    path::{AddressPath, StoragePath},
+    path::{AddressPath, StoragePath}, storage::cursor::Cursor,
 };
 use alloy_primitives::{StorageValue, B256};
 use alloy_trie::Nibbles;
@@ -130,6 +130,10 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
             .print_path(&self.context, &storage_path.full_path(), output_file, verbosity_level)
             .unwrap();
         Ok(())
+    }
+
+    pub fn new_cursor(&self) -> Cursor<'_> {
+        Cursor::new(&self.database.storage_engine, &self.context)
     }
 }
 
