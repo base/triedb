@@ -2,16 +2,22 @@ use crate::{
     page::{Page, PageError, PageId, PageManagerOptions, PageMut},
     snapshot::SnapshotId,
 };
-use memmap2::{Advice, MmapMut, MmapOptions};
-use std::{fs::File, io, path::Path};
+use memmap2::{Advice, MmapOptions, MmapRaw};
+use parking_lot::Mutex;
+use std::{
+    fs::File,
+    io,
+    path::Path,
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
+};
 
 // Manages pages in a memory mapped file.
 #[derive(Debug)]
 pub struct PageManager {
-    mmap: MmapMut,
-    file: File,
-    file_len: u64,
-    page_count: u32,
+    mmap: MmapRaw,
+    file: Mutex<File>,
+    file_len: AtomicU64,
+    page_count: AtomicU32,
 }
 
 impl PageManager {
@@ -73,9 +79,13 @@ impl PageManager {
 
         // SAFETY: we assume that we have full ownership of the file, even though in practice
         // there's no way to guarantee it
-        let mmap =
-            unsafe { MmapOptions::new().len(mmap_len).map_mut(&file).map_err(PageError::IO)? };
-        mmap.advise(Advice::Random).map_err(PageError::IO)?;
+        let mmap = if cfg!(not(miri)) {
+            let mmap = MmapOptions::new().len(mmap_len).map_raw(&file).map_err(PageError::IO)?;
+            mmap.advise(Advice::Random).map_err(PageError::IO)?;
+            mmap
+        } else {
+            MmapOptions::new().len(mmap_len).map_anon().map_err(PageError::IO)?.into()
+        };
 
         let file_len = file.metadata().map_err(PageError::IO)?.len();
         let min_file_len = (opts.page_count as u64) * (Page::SIZE as u64);
@@ -86,12 +96,17 @@ impl PageManager {
             file_len / (Page::SIZE as u64)
         );
 
-        Ok(Self { mmap, file, file_len, page_count: opts.page_count })
+        Ok(Self {
+            mmap,
+            file: Mutex::new(file),
+            file_len: AtomicU64::new(file_len),
+            page_count: AtomicU32::new(opts.page_count),
+        })
     }
 
     /// Returns the number of pages currently stored in the file.
     pub fn size(&self) -> u32 {
-        self.page_count
+        self.page_count.load(Ordering::Relaxed)
     }
 
     /// Returns the maximum number of pages that can be allocated to the file.
@@ -99,89 +114,146 @@ impl PageManager {
         (self.mmap.len() / Page::SIZE).min(u32::MAX as usize) as u32
     }
 
-    // Returns a mutable reference to the data of the page with the given id.
-    fn page_data<'p>(&self, page_id: PageId) -> Result<&'p mut [u8; Page::SIZE], PageError> {
-        if page_id > self.page_count {
-            return Err(PageError::PageNotFound(page_id));
-        }
-        let start = page_id.as_offset();
-        let page_data = unsafe { &mut *(self.mmap.as_ptr().add(start) as *mut [u8; Page::SIZE]) };
-        Ok(page_data)
-    }
-
-    // Allocates a new page in the memory mapped file.
-    fn allocate_page_data<'p>(&mut self) -> Result<(PageId, &'p mut [u8; Page::SIZE]), PageError> {
-        let new_count = self.page_count.checked_add(1).ok_or(PageError::PageLimitReached)?;
-        let page_id = PageId::try_from(new_count).map_err(|_| PageError::PageLimitReached)?;
-        let new_len = new_count as usize * Page::SIZE;
-
-        if new_len > self.mmap.len() {
+    /// Grows the size of the underlying file to make room for additional pages.
+    ///
+    /// This will increase the file size by a constant factor of 1024 pages, or a relative factor
+    /// of 12.5%, whichever is greater, without exceeding the maximum capacity of the file.
+    ///
+    /// On success, returns the new length (in bytes) of the file.
+    fn grow(&self, file: &mut File) -> Result<u64, PageError> {
+        let cur_len = self.file_len.load(Ordering::Relaxed);
+        let increment = (cur_len / 8).max(1024 * Page::SIZE as u64);
+        let new_len = cur_len.checked_add(increment).ok_or(PageError::PageLimitReached)?;
+        let new_len = new_len.min(self.mmap.len() as u64);
+        if new_len <= cur_len {
             return Err(PageError::PageLimitReached);
         }
-        if new_len as u64 > self.file_len {
-            self.grow()?;
-        }
 
-        self.page_count += 1;
-        let page_data = self.page_data(page_id)?;
-        page_data.fill(0);
-        Ok((page_id, page_data))
+        file.set_len(new_len).map_err(PageError::IO)?;
+        self.file_len.store(new_len, Ordering::Relaxed);
+        Ok(new_len)
     }
 
-    /// Grows the size of the underlaying file (if any) to make room for additional pages.
-    ///
-    /// This will increase the file size by a constant factor of 1024, or a relative factor of
-    /// 12.5%, whichever is greater, without exceeding the maximum capacity of the file.
-    ///
-    /// If this `PageManager` is not backed by any file, then this method returns an error.
-    fn grow(&mut self) -> Result<(), PageError> {
-        let cur_len = self.file_len;
-        let increment = (cur_len / 8).max(1024 * Page::SIZE as u64);
-        let new_len = cur_len + increment;
-        let new_len = new_len.min(self.mmap.len() as u64);
-
-        assert!(new_len > cur_len, "reached max capacity");
-
-        self.file.set_len(new_len).map_err(PageError::IO)?;
-        self.file_len = new_len;
+    /// Ensures that the underlying file has at least `min_len` bytes, growing it if needed.
+    #[inline]
+    fn grow_if_needed(&self, min_len: u64) -> Result<(), PageError> {
+        // `file_len` is an atomic and it's not protected by a mutex together with `file` so that,
+        // in the best case when the file is large enough, we perform only a single atomic
+        // operation, and zero mutex acquisitions. In the worst case, when the file needs to grow,
+        // we perform additional atomic operations, but because grow adds a large number of pages
+        // per call, this is rare.
+        if min_len > self.file_len.load(Ordering::Relaxed) {
+            // The file needs to grow.
+            let mut file = self.file.lock();
+            // Check again to see if another thread updated the file length before we were able to
+            // acquire the lock.
+            if min_len > self.file_len.load(Ordering::Relaxed) {
+                // Add extra room at the end of the file. We do this in a loop, rather than
+                // specifically need what we need, to (1) ensure a predictable exponential growth,
+                // and (2) keep the code simple. In practice, `grow_if_needed()` will be called
+                // only by `allocate()` to make room for 1 page, and `grow()` always adds at least
+                // 1024 pages, so there's no need for more sophisticated code: the loop will run at
+                // most once, except in extreme (and unlikely) scenarios.
+                loop {
+                    let new_len = self.grow(&mut file)?;
+                    if new_len >= min_len {
+                        break;
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
+    /// Increments the page count and returns the ID for a new page at the end of the file, along
+    /// with the new page count.
+    fn next_page_id(&self) -> Option<(PageId, u32)> {
+        let mut old_count = self.page_count.load(Ordering::Relaxed);
+        loop {
+            let new_count = old_count.checked_add(1)?;
+            let page_id = PageId::try_from(new_count).ok()?;
+            match self.page_count.compare_exchange_weak(
+                old_count,
+                new_count,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Some((page_id, new_count)),
+                Err(value) => old_count = value,
+            }
+        }
+    }
+
     /// Retrieves a page from the memory mapped file.
-    pub fn get<'p>(
-        &self,
-        _snapshot_id: SnapshotId,
-        page_id: PageId,
-    ) -> Result<Page<'p>, PageError> {
-        let page_data = self.page_data(page_id)?;
-        Ok(Page::new(page_id, page_data))
+    pub fn get(&self, _snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'_>, PageError> {
+        if page_id > self.page_count.load(Ordering::Relaxed) {
+            return Err(PageError::PageNotFound(page_id));
+        }
+
+        let offset = page_id.as_offset();
+        // SAFETY: We have checked that the page fits inside the memory map.
+        let data = unsafe { self.mmap.as_mut_ptr().byte_add(offset).cast() };
+
+        // SAFETY: All memory from the memory map is accessed through `Page` or `PageMut`, thus
+        // respecting the page state access memory model.
+        unsafe { Page::from_ptr(page_id, data) }
     }
 
     /// Retrieves a mutable page from the memory mapped file.
-    pub fn get_mut<'p>(
-        &mut self,
-        _snapshot_id: SnapshotId,
+    pub fn get_mut(
+        &self,
+        snapshot_id: SnapshotId,
         page_id: PageId,
-    ) -> Result<PageMut<'p>, PageError> {
-        let page_data = self.page_data(page_id)?;
-        Ok(PageMut::new(page_id, page_data))
+    ) -> Result<PageMut<'_>, PageError> {
+        if page_id > self.page_count.load(Ordering::Relaxed) {
+            return Err(PageError::PageNotFound(page_id));
+        }
+
+        let offset = page_id.as_offset();
+        // SAFETY: We have checked that the page fits inside the memory map.
+        let data = unsafe { self.mmap.as_mut_ptr().byte_add(offset).cast() };
+
+        // TODO: This is actually unsafe, as it's possible to call `get()` arbitrary times before
+        // calling this function (this will be fixed in a future commit).
+        unsafe { PageMut::from_ptr(page_id, snapshot_id, data) }
     }
 
     /// Adds a new page.
     ///
     /// Returns an error if the memory map is not large enough.
-    pub fn allocate<'p>(&mut self, snapshot_id: SnapshotId) -> Result<PageMut<'p>, PageError> {
-        let (page_id, page_data) = self.allocate_page_data()?;
-        Ok(PageMut::with_snapshot(page_id, snapshot_id, page_data))
+    pub fn allocate(&self, snapshot_id: SnapshotId) -> Result<PageMut<'_>, PageError> {
+        let (page_id, new_count) = self.next_page_id().ok_or(PageError::PageLimitReached)?;
+        let new_len = new_count as usize * Page::SIZE;
+
+        if new_len > self.mmap.len() {
+            return Err(PageError::PageLimitReached);
+        }
+        self.grow_if_needed(new_len as u64)?;
+
+        let offset = page_id.as_offset();
+        // SAFETY: We have checked that the page fits inside the memory map.
+        let data = unsafe { self.mmap.as_mut_ptr().byte_add(offset).cast() };
+
+        // SAFETY:
+        // - This is a newly created page at the end of the file, so we're guaranteed to have
+        //   exclusive access to it. Even if another thread was calling `allocate()` at the same
+        //   time, they would get a different `page_id`.
+        // - All memory from the memory map is accessed through `Page` or `PageMut`, thus respecting
+        //   the page state access memory model.
+        unsafe { PageMut::acquire_unchecked(page_id, snapshot_id, data) }
     }
 
     /// Syncs pages to the backing file.
-    pub fn sync(&mut self) -> io::Result<()> {
-        self.mmap.flush()
+    pub fn sync(&self) -> io::Result<()> {
+        if cfg!(not(miri)) {
+            self.mmap.flush()
+        } else {
+            Ok(())
+        }
     }
 
     /// Syncs and closes the backing file.
-    pub fn close(mut self) -> io::Result<()> {
+    pub fn close(self) -> io::Result<()> {
         self.sync()
     }
 }
@@ -199,7 +271,7 @@ mod tests {
 
     #[test]
     fn test_allocate_get() {
-        let mut manager = PageManager::options().max_pages(10).open_temp_file().unwrap();
+        let manager = PageManager::options().max_pages(10).open_temp_file().unwrap();
 
         for i in 1..=10 {
             let i = PageId::new(i).unwrap();
@@ -210,6 +282,7 @@ mod tests {
             assert_eq!(page.id(), i);
             assert_eq!(page.contents(), &mut [0; Page::DATA_SIZE]);
             assert_eq!(page.snapshot_id(), 42);
+            drop(page);
 
             let page = manager.get(42, i).unwrap();
             assert_eq!(page.id(), i);
@@ -223,7 +296,7 @@ mod tests {
 
     #[test]
     fn test_allocate_get_mut() {
-        let mut manager = PageManager::open_temp_file().unwrap();
+        let manager = PageManager::open_temp_file().unwrap();
 
         let mut page = manager.allocate(42).unwrap();
         assert_eq!(page.id(), page_id!(1));
@@ -231,38 +304,44 @@ mod tests {
         assert_eq!(page.snapshot_id(), 42);
 
         page.contents_mut()[0] = 1;
+        drop(page);
 
         let old_page = manager.get(42, page_id!(1)).unwrap();
         assert_eq!(old_page.id(), page_id!(1));
         assert_eq!(old_page.contents()[0], 1);
         assert_eq!(old_page.snapshot_id(), 42);
 
-        let page1 = manager.allocate(42).unwrap();
         let page2 = manager.allocate(42).unwrap();
         let page3 = manager.allocate(42).unwrap();
+        let page4 = manager.allocate(42).unwrap();
 
-        assert_ne!(page1.id(), page2.id());
-        assert_ne!(page1.id(), page3.id());
-        assert_ne!(page2.id(), page3.id());
+        assert_eq!(page2.id(), 2);
+        assert_eq!(page3.id(), 3);
+        assert_eq!(page4.id(), 4);
 
-        let mut page1_mut = manager.get_mut(42, page1.id()).unwrap();
-        assert_eq!(page1_mut.id(), page1.id());
-        assert_eq!(page1_mut.contents()[0], 0);
+        drop(page2);
+        drop(page3);
+        drop(page4);
 
-        page1_mut.contents_mut()[0] = 2;
+        let mut page2_mut = manager.get_mut(42, page_id!(2)).unwrap();
+        assert_eq!(page2_mut.id(), 2);
+        assert_eq!(page2_mut.contents()[0], 0);
 
-        assert_eq!(page1_mut.contents()[0], 2);
+        page2_mut.contents_mut()[0] = 2;
+        assert_eq!(page2_mut.contents()[0], 2);
+        drop(page2_mut);
 
-        let page1 = manager.get(42, page1.id()).unwrap();
-        assert_eq!(page1.contents()[0], 2);
+        let page2 = manager.get(42, page_id!(2)).unwrap();
+        assert_eq!(page2.contents()[0], 2);
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn auto_growth() {
         let snapshot = 123;
 
         let f = tempfile::tempfile().expect("temporary file creation failed");
-        let mut m = PageManager::from_file(f.try_clone().unwrap()).expect("mmap creation failed");
+        let m = PageManager::from_file(f.try_clone().unwrap()).expect("mmap creation failed");
 
         fn len(f: &File) -> usize {
             f.metadata().expect("fetching file metadata failed").len().try_into().unwrap()
@@ -303,11 +382,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn persistence() {
         let snapshot = 123;
 
         let f = tempfile::tempfile().expect("temporary file creation failed");
-        let mut m = PageManager::from_file(f.try_clone().unwrap()).expect("mmap creation failed");
+        let m = PageManager::from_file(f.try_clone().unwrap()).expect("mmap creation failed");
 
         fn len(f: &File) -> usize {
             f.metadata().expect("fetching file metadata failed").len().try_into().unwrap()
@@ -332,13 +412,15 @@ mod tests {
         // minimum growth factor) and that the file contents are as expected
         let mut p = m.allocate(snapshot).expect("page allocation failed");
         assert_eq!(len(&f), 1024 * Page::SIZE);
-        assert_eq!(read(&f, 8), snapshot.to_le_bytes());
+        assert_eq!(read(&f, 8), (snapshot | 1 << 63).to_le_bytes());
         assert_eq!(read(&f, Page::DATA_SIZE), [0; Page::DATA_SIZE]);
         assert_eq!(read(&f, 1023 * Page::DATA_SIZE), [0; 1023 * Page::DATA_SIZE]);
         rewind(&f);
 
         // Write some data to the page
         p.contents_mut().iter_mut().for_each(|byte| *byte = 0xab);
+        drop(p);
+
         assert_eq!(len(&f), 1024 * Page::SIZE);
         assert_eq!(read(&f, 8), snapshot.to_le_bytes());
         assert_eq!(read(&f, Page::DATA_SIZE), [0xab; Page::DATA_SIZE]);
@@ -349,6 +431,7 @@ mod tests {
         for new_page_id in 1..=255 {
             let mut p = m.allocate(snapshot).expect("page allocation failed");
             p.contents_mut().iter_mut().for_each(|byte| *byte = 0xab ^ (new_page_id as u8));
+            drop(p);
 
             assert_eq!(len(&f), 1024 * Page::SIZE);
 

@@ -7,6 +7,8 @@ pub(super) mod options;
 #[derive(Debug)]
 pub enum PageError {
     PageNotFound(PageId),
+    PageOccupied(PageId),
+    PageDirty(PageId),
     PageLimitReached,
     InvalidRootPage(PageId),
     InvalidCellPointer,
