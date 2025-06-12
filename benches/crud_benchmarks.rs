@@ -1,7 +1,7 @@
 //! Option 1: Run with a provided database folder and file name:
 //!
 //! ```bash
-//! BASED_DIR=/path/to/db/folder FILE_NAME=db_file cargo bench --bench crud_benchmarks
+//! BASE_DIR=/path/to/db/folder FILE_NAME=db_file cargo bench --bench crud_benchmarks
 //! ```
 //!
 //! Option 2: Seed a new database for each benchmark with default size of 1M externally owned
@@ -32,7 +32,7 @@ use triedb::{
 
 #[derive(Debug)]
 struct BaseDatabase {
-    _based_dir: Option<TempDir>,
+    _base_dir: Option<TempDir>,
     main_file_name: String,
     file_name_path: PathBuf,
     meta_file_name: String,
@@ -57,24 +57,24 @@ fn get_base_database(
     fallback_contract_size: usize,
     fallback_storage_per_contract: usize,
 ) -> BaseDatabase {
-    let based_dir = std::env::var("BASED_DIR").ok();
-    if let Some(based_dir) = based_dir {
+    let base_dir = std::env::var("BASE_DIR").ok();
+    if let Some(base_dir) = base_dir {
         let file_name =
-            std::env::var("FILE_NAME").expect("FILE_NAME must be set when using BASED_DIR");
+            std::env::var("FILE_NAME").expect("FILE_NAME must be set when using BASE_DIR");
         let main_file_name = file_name.to_string();
         let meta_file_name = format!("{}.meta", file_name);
-        let file_name_path = Path::new(&based_dir).join(&main_file_name);
-        let meta_file_name_path = Path::new(&based_dir).join(&meta_file_name);
+        let file_name_path = Path::new(&base_dir).join(&main_file_name);
+        let meta_file_name_path = Path::new(&base_dir).join(&meta_file_name);
 
         return BaseDatabase {
-            _based_dir: None,
+            _base_dir: None,
             main_file_name,
             meta_file_name,
             file_name_path,
             meta_file_name_path,
         };
     }
-    let dir = TempDir::new("triedb_bench_based").unwrap();
+    let dir = TempDir::new("triedb_bench_base").unwrap();
 
     let main_file_name_path = dir.path().join("triedb");
     let meta_file_name_path = dir.path().join("triedb.meta");
@@ -84,7 +84,7 @@ fn get_base_database(
         .unwrap();
 
     BaseDatabase {
-        _based_dir: Some(dir),
+        _base_dir: Some(dir),
         main_file_name: "triedb".to_string(),
         file_name_path: main_file_name_path,
         meta_file_name: "triedb.meta".to_string(),
@@ -149,22 +149,22 @@ fn copy_files(from: &BaseDatabase, to: &Path) -> Result<(), io::Error> {
 
 fn bench_account_reads(c: &mut Criterion) {
     let mut group = c.benchmark_group("read_operations");
-    let based_dir = get_base_database(
+    let base_dir = get_base_database(
         DEFAULT_SETUP_DB_EOA_SIZE,
         DEFAULT_SETUP_DB_CONTRACT_SIZE,
         DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT,
     );
 
     let dir = TempDir::new("triedb_bench_read").unwrap();
-    let file_name = based_dir.main_file_name.clone();
-    copy_files(&based_dir, dir.path()).unwrap();
+    let file_name = base_dir.main_file_name.clone();
+    copy_files(&base_dir, dir.path()).unwrap();
 
     let mut rng = StdRng::seed_from_u64(SEED_EOA);
     let addresses: Vec<AddressPath> =
         (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
-    group.bench_function(BenchmarkId::new("random_reads", BATCH_SIZE), |b| {
+    group.bench_function(BenchmarkId::new("eoa_reads", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {
                 let db_path = dir.path().join(&file_name);
@@ -186,23 +186,23 @@ fn bench_account_reads(c: &mut Criterion) {
 
 fn bench_account_inserts(c: &mut Criterion) {
     let mut group = c.benchmark_group("insert_operations");
-    let based_dir = get_base_database(
+    let base_dir = get_base_database(
         DEFAULT_SETUP_DB_EOA_SIZE,
         DEFAULT_SETUP_DB_CONTRACT_SIZE,
         DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT,
     );
-    let file_name = based_dir.main_file_name.clone();
+    let file_name = base_dir.main_file_name.clone();
 
     let mut rng = StdRng::seed_from_u64(SEED_NEW_EOA);
     let addresses: Vec<AddressPath> =
         (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
-    group.bench_function(BenchmarkId::new("batch_inserts", BATCH_SIZE), |b| {
+    group.bench_function(BenchmarkId::new("eoa_inserts", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {
                 let dir = TempDir::new("triedb_bench_insert").unwrap();
-                copy_files(&based_dir, dir.path()).unwrap();
+                copy_files(&base_dir, dir.path()).unwrap();
                 let db_path = dir.path().join(&file_name);
                 Database::open(db_path).unwrap()
             },
@@ -223,22 +223,22 @@ fn bench_account_inserts(c: &mut Criterion) {
 
 fn bench_account_updates(c: &mut Criterion) {
     let mut group = c.benchmark_group("update_operations");
-    let based_dir = get_base_database(
+    let base_dir = get_base_database(
         DEFAULT_SETUP_DB_EOA_SIZE,
         DEFAULT_SETUP_DB_CONTRACT_SIZE,
         DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT,
     );
 
     let dir = TempDir::new("triedb_bench_update").unwrap();
-    let file_name = based_dir.main_file_name.clone();
-    copy_files(&based_dir, dir.path()).unwrap();
+    let file_name = base_dir.main_file_name.clone();
+    copy_files(&base_dir, dir.path()).unwrap();
 
     let mut rng = StdRng::seed_from_u64(SEED_EOA);
     let addresses: Vec<AddressPath> =
         (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
-    group.bench_function(BenchmarkId::new("batch_updates", BATCH_SIZE), |b| {
+    group.bench_function(BenchmarkId::new("eoa_updates", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {
                 let db_path = dir.path().join(&file_name);
@@ -261,24 +261,24 @@ fn bench_account_updates(c: &mut Criterion) {
 
 fn bench_account_deletes(c: &mut Criterion) {
     let mut group = c.benchmark_group("delete_operations");
-    let based_dir = get_base_database(
+    let base_dir = get_base_database(
         DEFAULT_SETUP_DB_EOA_SIZE,
         DEFAULT_SETUP_DB_CONTRACT_SIZE,
         DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT,
     );
 
-    let file_name = based_dir.main_file_name.clone();
+    let file_name = base_dir.main_file_name.clone();
 
     let mut rng = StdRng::seed_from_u64(SEED_EOA);
     let addresses: Vec<AddressPath> =
         (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
-    group.bench_function(BenchmarkId::new("batch_deletes", BATCH_SIZE), |b| {
+    group.bench_function(BenchmarkId::new("eoa_deletes", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {
                 let dir = TempDir::new("triedb_bench_delete").unwrap();
-                copy_files(&based_dir, dir.path()).unwrap();
+                copy_files(&base_dir, dir.path()).unwrap();
                 let db_path = dir.path().join(&file_name);
                 Database::open(db_path).unwrap()
             },
@@ -297,12 +297,12 @@ fn bench_account_deletes(c: &mut Criterion) {
 
 fn bench_mixed_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("mixed_operations");
-    let based_dir = get_base_database(
+    let base_dir = get_base_database(
         DEFAULT_SETUP_DB_EOA_SIZE,
         DEFAULT_SETUP_DB_CONTRACT_SIZE,
         DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT,
     );
-    let file_name = based_dir.main_file_name.clone();
+    let file_name = base_dir.main_file_name.clone();
 
     let mut eoa_rng = StdRng::seed_from_u64(SEED_EOA);
     let mut new_eoa_rng = StdRng::seed_from_u64(SEED_NEW_EOA);
@@ -347,7 +347,7 @@ fn bench_mixed_operations(c: &mut Criterion) {
         b.iter_with_setup(
             || {
                 let dir = TempDir::new("triedb_bench_mixed").unwrap();
-                copy_files(&based_dir, dir.path()).unwrap();
+                copy_files(&base_dir, dir.path()).unwrap();
                 let db_path = dir.path().join(&file_name);
                 Database::open(db_path).unwrap()
             },
