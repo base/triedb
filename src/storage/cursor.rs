@@ -34,6 +34,44 @@ impl<'c> Cursor<'c> {
         }
     }
 
+    /// Return the current key and node.
+    pub fn current(&self) -> Option<(&Nibbles, &Node)> {
+        self.current_key_and_node()
+    }
+
+    /// Move the cursor to the next key.
+    pub fn next(&mut self) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
+        if !self.initialized {
+            self.initialized = true;
+            return self.start_from_root();
+        }
+
+        if self.key_stack.is_empty() {
+            return Ok(None);
+        }
+
+        let (current_key, current_node) = self.current_key_and_node().unwrap();
+
+        match current_node {
+            Node::Branch { .. } => self.traverse_branch_children(),
+            Node::AccountLeaf { storage_root, .. } => {
+                // If account has storage, traverse into storage subtrie first
+                if let Some(storage_pointer) = storage_root {
+                    self.load_child_node_into_stack(
+                        storage_pointer.location(),
+                        current_key.clone(),
+                        None,
+                    )?;
+                    return Ok(self.current_key_and_node());
+                } else {
+                    // No storage, backtrack to find next account
+                    self.backtrack_from_leaf()
+                }
+            }
+            Node::StorageLeaf { .. } => self.backtrack_from_leaf(),
+        }
+    }
+
     /// Move the cursor to the key and return a value matching or greater than the key.
     pub fn seek(&mut self, key: &Nibbles) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
         // If not initialized, start from root
@@ -376,39 +414,6 @@ impl<'c> Cursor<'c> {
         }
     }
 
-    /// Move the cursor to the next key.
-    pub fn next(&mut self) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
-        if !self.initialized {
-            self.initialized = true;
-            return self.start_from_root();
-        }
-
-        if self.key_stack.is_empty() {
-            return Ok(None);
-        }
-
-        let (current_key, current_node) = self.current_key_and_node().unwrap();
-
-        match current_node {
-            Node::Branch { .. } => self.traverse_branch_children(),
-            Node::AccountLeaf { storage_root, .. } => {
-                // If account has storage, traverse into storage subtrie first
-                if let Some(storage_pointer) = storage_root {
-                    self.load_child_node_into_stack(
-                        storage_pointer.location(),
-                        current_key.clone(),
-                        None,
-                    )?;
-                    return Ok(self.current_key_and_node());
-                } else {
-                    // No storage, backtrack to find next account
-                    self.backtrack_from_leaf()
-                }
-            }
-            Node::StorageLeaf { .. } => self.backtrack_from_leaf(),
-        }
-    }
-
     /// Initialize cursor from root node
     fn start_from_root(&mut self) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
         let root_node_page_id = self.context.root_node_page_id.unwrap();
@@ -600,6 +605,13 @@ mod tests {
 
         let result = cursor.next();
         let (key, leaf_node) = result.unwrap().unwrap();
+        assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
+        assert_eq!(leaf_node.prefix(), &Nibbles::from_vec(vec![1; 63]));
+        assert!(matches!(leaf_node, Node::AccountLeaf { .. }));
+
+        let result = cursor.current();
+        assert!(result.is_some());
+        let (key, leaf_node) = result.unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
         assert_eq!(leaf_node.prefix(), &Nibbles::from_vec(vec![1; 63]));
         assert!(matches!(leaf_node, Node::AccountLeaf { .. }));
