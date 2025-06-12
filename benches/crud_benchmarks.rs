@@ -31,7 +31,7 @@ use triedb::{
 };
 
 #[derive(Debug)]
-struct BasedDatabase {
+struct BaseDatabase {
     _based_dir: Option<TempDir>,
     main_file_name: String,
     file_name_path: PathBuf,
@@ -52,11 +52,11 @@ fn generate_random_address(rng: &mut StdRng) -> AddressPath {
     AddressPath::for_address(addr)
 }
 
-fn get_based_database(
+fn get_base_database(
     fallback_eoa_size: usize,
     fallback_contract_size: usize,
     fallback_storage_per_contract: usize,
-) -> BasedDatabase {
+) -> BaseDatabase {
     let based_dir = std::env::var("BASED_DIR").ok();
     if let Some(based_dir) = based_dir {
         let file_name =
@@ -66,7 +66,7 @@ fn get_based_database(
         let file_name_path = Path::new(&based_dir).join(&main_file_name);
         let meta_file_name_path = Path::new(&based_dir).join(&meta_file_name);
 
-        return BasedDatabase {
+        return BaseDatabase {
             _based_dir: None,
             main_file_name,
             meta_file_name,
@@ -83,7 +83,7 @@ fn get_based_database(
     setup_database(&db, fallback_eoa_size, fallback_contract_size, fallback_storage_per_contract)
         .unwrap();
 
-    BasedDatabase {
+    BaseDatabase {
         _based_dir: Some(dir),
         main_file_name: "triedb".to_string(),
         file_name_path: main_file_name_path,
@@ -94,8 +94,8 @@ fn get_based_database(
 
 fn setup_database(
     db: &Database,
-    eoa_size: usize,
-    contract_size: usize,
+    eoa_count: usize,
+    contract_count: usize,
     storage_per_contract: usize,
 ) -> Result<(), TransactionError> {
     // Populate database with initial accounts
@@ -103,7 +103,7 @@ fn setup_database(
     let mut contract_rng = StdRng::seed_from_u64(SEED_CONTRACT);
     {
         let mut tx = db.begin_rw()?;
-        for i in 1..=eoa_size {
+        for i in 1..=eoa_count {
             let address = generate_random_address(&mut eoa_rng);
             let account =
                 Account::new(i as u64, U256::from(i as u64), EMPTY_ROOT_HASH, KECCAK_EMPTY);
@@ -111,7 +111,7 @@ fn setup_database(
             tx.set_account(address, Some(account))?;
         }
 
-        for i in 1..=contract_size {
+        for i in 1..=contract_count {
             let address = generate_random_address(&mut contract_rng);
             let account =
                 Account::new(i as u64, U256::from(i as u64), EMPTY_ROOT_HASH, KECCAK_EMPTY);
@@ -136,7 +136,7 @@ fn setup_database(
     Ok(())
 }
 
-fn copy_files(from: &BasedDatabase, to: &Path) -> Result<(), io::Error> {
+fn copy_files(from: &BaseDatabase, to: &Path) -> Result<(), io::Error> {
     for (file, from_path) in [
         (&from.main_file_name, &from.file_name_path),
         (&from.meta_file_name, &from.meta_file_name_path),
@@ -149,7 +149,7 @@ fn copy_files(from: &BasedDatabase, to: &Path) -> Result<(), io::Error> {
 
 fn bench_account_reads(c: &mut Criterion) {
     let mut group = c.benchmark_group("read_operations");
-    let based_dir = get_based_database(
+    let based_dir = get_base_database(
         DEFAULT_SETUP_DB_EOA_SIZE,
         DEFAULT_SETUP_DB_CONTRACT_SIZE,
         DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT,
@@ -186,7 +186,7 @@ fn bench_account_reads(c: &mut Criterion) {
 
 fn bench_account_inserts(c: &mut Criterion) {
     let mut group = c.benchmark_group("insert_operations");
-    let based_dir = get_based_database(
+    let based_dir = get_base_database(
         DEFAULT_SETUP_DB_EOA_SIZE,
         DEFAULT_SETUP_DB_CONTRACT_SIZE,
         DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT,
@@ -223,7 +223,7 @@ fn bench_account_inserts(c: &mut Criterion) {
 
 fn bench_account_updates(c: &mut Criterion) {
     let mut group = c.benchmark_group("update_operations");
-    let based_dir = get_based_database(
+    let based_dir = get_base_database(
         DEFAULT_SETUP_DB_EOA_SIZE,
         DEFAULT_SETUP_DB_CONTRACT_SIZE,
         DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT,
@@ -261,15 +261,13 @@ fn bench_account_updates(c: &mut Criterion) {
 
 fn bench_account_deletes(c: &mut Criterion) {
     let mut group = c.benchmark_group("delete_operations");
-    let based_dir = get_based_database(
+    let based_dir = get_base_database(
         DEFAULT_SETUP_DB_EOA_SIZE,
         DEFAULT_SETUP_DB_CONTRACT_SIZE,
         DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT,
     );
 
-    let dir = TempDir::new("triedb_bench_delete").unwrap();
     let file_name = based_dir.main_file_name.clone();
-    copy_files(&based_dir, dir.path()).unwrap();
 
     let mut rng = StdRng::seed_from_u64(SEED_EOA);
     let addresses: Vec<AddressPath> =
@@ -299,7 +297,7 @@ fn bench_account_deletes(c: &mut Criterion) {
 
 fn bench_mixed_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("mixed_operations");
-    let based_dir = get_based_database(
+    let based_dir = get_base_database(
         DEFAULT_SETUP_DB_EOA_SIZE,
         DEFAULT_SETUP_DB_CONTRACT_SIZE,
         DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT,
