@@ -21,6 +21,7 @@ use alloy_primitives::StorageValue;
 use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
 use parking_lot::Mutex;
 use std::{
+    cmp::min,
     fmt::Debug,
     io,
     sync::atomic::{AtomicU64, Ordering},
@@ -367,7 +368,7 @@ impl StorageEngine {
                     context.transaction_metrics.inc_pages_split();
                     split_count += 1;
                     // FIXME: this is a temporary limit to prevent infinite loops.
-                    if split_count > 20 {
+                    if split_count > 300 {
                         return Err(Error::PageError(PageError::PageSplitLimitReached));
                     }
                 }
@@ -552,7 +553,8 @@ impl StorageEngine {
         //
         // This approach allocate only 1 new slotted page for the branch node.
         if slotted_page.num_free_bytes() < node.size() + new_parent_branch.size() {
-            self.split_page(context, slotted_page)?;
+            let required_space = node.size() + new_parent_branch.size() + CELL_POINTER_SIZE;
+            self.split_page(context, slotted_page, page_index, required_space)?;
             return Err(Error::PageSplit(0));
         }
 
@@ -631,7 +633,7 @@ impl StorageEngine {
         if new_node_size > old_node_size {
             let node_size_incr = new_node_size - old_node_size;
             if slotted_page.num_free_bytes() < node_size_incr {
-                self.split_page(context, slotted_page)?;
+                self.split_page(context, slotted_page, page_index, new_node_size)?;
                 return Err(Error::PageSplit(0));
             }
         }
@@ -786,7 +788,12 @@ impl StorageEngine {
         // 3. and add new cell pointer for the new leaf node (3 bytes)
         // when adding the new child, split the page.
         if slotted_page.num_free_bytes() < node_size_incr + new_node.size() + CELL_POINTER_SIZE {
-            self.split_page(context, slotted_page)?;
+            self.split_page(
+                context,
+                slotted_page,
+                page_index,
+                node_size_incr + new_node.size() + CELL_POINTER_SIZE,
+            )?;
             return Err(Error::PageSplit(0));
         }
 
@@ -980,7 +987,12 @@ impl StorageEngine {
                 if slotted_page.num_free_bytes() <
                     node_size_incr + new_node.size() + CELL_POINTER_SIZE
                 {
-                    self.split_page(context, slotted_page)?;
+                    self.split_page(
+                        context,
+                        slotted_page,
+                        page_index,
+                        node_size_incr + new_node.size() + CELL_POINTER_SIZE,
+                    )?;
                     return Err(Error::PageSplit(0));
                 }
 
@@ -1161,7 +1173,7 @@ impl StorageEngine {
 
         // Ensure the child page has enough space
         if child_slotted_page.num_free_bytes() < 200 {
-            self.split_page(context, &mut child_slotted_page)?;
+            self.split_page(context, &mut child_slotted_page, page_index, 200)?;
             // Not returning Error::PageSplit because we're splitting the child page
         }
 
@@ -1179,12 +1191,13 @@ impl StorageEngine {
 
     // Split the page into two, moving the largest immediate subtrie of the root node to a new child
     // page.
-    fn split_page(
+    fn move_subtries_to_pages(
         &self,
         context: &mut TransactionContext,
         page: &mut SlottedPageMut<'_>,
+        required_space: usize,
     ) -> Result<(), Error> {
-        // count subtrie node and sort in desc order
+        // Count subtrie node and sort in desc order
         let root_node: Node = page.get_value(0)?;
         let children = root_node.enumerate_children()?;
         let mut children_with_count = children
@@ -1200,7 +1213,7 @@ impl StorageEngine {
         let mut rest: &[(u8, &Pointer, u8)] = &children_with_count;
         let mut root_node: Node = page.get_value(0)?;
 
-        while page.num_free_bytes() < Page::DATA_SIZE / 4_usize {
+        while page.num_free_bytes() < required_space {
             let child_page = self.allocate_page(context)?;
             let mut child_slotted_page = SlottedPageMut::try_from(child_page)?;
 
@@ -1229,6 +1242,61 @@ impl StorageEngine {
             )?;
         }
         page.set_value(0, &root_node)?;
+
+        Ok(())
+    }
+
+    // Split the page into two with following orders
+    // 1. if could move a subtrie to new page (condition is cell_index != 0), move it.
+    // 2. if cell_index = 0, move subtrie one by one.
+    fn split_page<'p>(
+        &self,
+        context: &mut TransactionContext,
+        page: &mut SlottedPageMut<'_>,
+        cell_index: u8,
+        required_space: usize,
+    ) -> Result<(), Error> {
+        if cell_index == 0 {
+            return self.move_subtries_to_pages(context, page, required_space);
+        }
+
+        return self.move_subtrie_with_cell_to_new_page(context, page, cell_index);
+    }
+
+    // Split the page into two, moving the parent of the node at cell_index to a new child page.
+    // Condition is current page have the cell_index.
+    fn move_subtrie_with_cell_to_new_page<'p>(
+        &self,
+        context: &mut TransactionContext,
+        page: &mut SlottedPageMut<'_>,
+        cell_index: u8,
+    ) -> Result<(), Error> {
+        // paths from the cell index 0 to the cell_index.
+        let paths = find_path_to_node(page, 0, cell_index)?;
+        let paths = paths.unwrap();
+        debug_assert!(paths.len() >= 1, "expected paths to cell {} to be at least 1", cell_index);
+
+        // Take max 2 predecessors from the node.
+        const MAX_PREDECESSORS: usize = 2;
+        let idx = min(MAX_PREDECESSORS + 1, paths.len() - 1);
+        let (parent_cell_index, child_index) = paths[idx];
+        let mut parent_node: Node = page.get_value(parent_cell_index)?;
+        let child_pointer = parent_node.child(child_index)?.unwrap();
+
+        let mut child_slotted_page = self.allocate_slotted_page(context)?;
+        // Move all child nodes that are in the current page.
+        let location = move_subtrie_nodes(
+            page,
+            child_pointer.location().cell_index().unwrap(),
+            &mut child_slotted_page,
+        )?;
+        debug_assert!(location.page_id().is_some(), "expected subtrie to be moved to a new page");
+        // Update the pointer in the root node to point to the new page.
+        parent_node.set_child(
+            child_index,
+            Pointer::new(Location::for_page(child_slotted_page.id()), child_pointer.rlp().clone()),
+        )?;
+        page.set_value(parent_cell_index, &parent_node)?;
 
         Ok(())
     }
@@ -1751,6 +1819,14 @@ impl StorageEngine {
             }
         }
     }
+
+    fn allocate_slotted_page(
+        &self,
+        context: &mut TransactionContext,
+    ) -> Result<SlottedPageMut<'_>, Error> {
+        let page = self.allocate_page(context)?;
+        Ok(SlottedPageMut::try_from(page)?)
+    }
 }
 
 fn node_location(page_id: PageId, page_index: u8) -> Location {
@@ -1859,6 +1935,37 @@ fn move_subtrie_nodes(
     target_page.set_value(new_index, &updated_node)?;
 
     Ok(node_location(target_page.id(), new_index))
+}
+
+// Returns the path to the node at look_for_cell_index from the node at cell_index.
+// The path is a list of (parent cell index, child index) tuples.
+// The parent cell index is in [0, 255] range.  The child index is in [0, 15] range.
+fn find_path_to_node(
+    page: &SlottedPageMut<'_>,
+    cell_index: u8,
+    look_for_cell_index: u8,
+) -> Result<Option<Vec<(u8, u8)>>, Error> {
+    let node: Node = page.get_value(cell_index)?;
+    if !node.has_children() {
+        return Ok(None);
+    }
+
+    let children = node.enumerate_children()?;
+    for (child_index, child_pointer) in children {
+        if let Some(child_cell_index) = child_pointer.location().cell_index() {
+            if child_cell_index == look_for_cell_index {
+                return Ok(Some(vec![(cell_index, child_index)]));
+            }
+            match find_path_to_node(page, child_cell_index, look_for_cell_index)? {
+                Some(mut result) => {
+                    result.push((cell_index, child_index));
+                    return Ok(Some(result));
+                }
+                None => {}
+            }
+        }
+    }
+    Ok(None)
 }
 
 impl StorageEngine {
@@ -2441,8 +2548,7 @@ mod tests {
         // Split the page
         let page = storage_engine.get_mut_page(&context, page_id!(1)).unwrap();
         let mut slotted_page = SlottedPageMut::try_from(page).unwrap();
-        storage_engine.split_page(&mut context, &mut slotted_page).unwrap();
-        drop(slotted_page);
+        storage_engine.split_page(&mut context, &mut slotted_page, 0, 1000).unwrap();
 
         // Verify all accounts still exist after split
         for (nibbles, account) in test_accounts {
@@ -2967,7 +3073,7 @@ mod tests {
             let mut slotted_page = SlottedPageMut::try_from(page_result.unwrap()).unwrap();
 
             // Try to split this page
-            if storage_engine.split_page(&mut context, &mut slotted_page).is_ok() {
+            if storage_engine.split_page(&mut context, &mut slotted_page, 0, 1000).is_ok() {
                 // If split succeeded, add the new pages to be processed
                 pages_to_split.push(page_id.inc().unwrap()); // New page created by split
             }
@@ -3091,7 +3197,7 @@ mod tests {
             if let Ok(page) = storage_engine.get_mut_page(&context, page_id) {
                 if let Ok(mut slotted_page) = SlottedPageMut::try_from(page) {
                     // Force a split
-                    let _ = storage_engine.split_page(&mut context, &mut slotted_page);
+                    let _ = storage_engine.split_page(&mut context, &mut slotted_page, 0, 500);
 
                     // Get the node to find child pages
                     if let Ok(node) = slotted_page.get_value::<Node>(0) {
