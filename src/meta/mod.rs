@@ -306,7 +306,7 @@ impl HashedMetadataSlot {
         // Special case: the metadata is uninitialized. In this case, the hash won't match, so quit
         // early.
         if self.is_empty() {
-            return Ok(())
+            return Ok(());
         }
         // Check that the number of reclaimed pages doesn't exceed the total number of orphan
         // pages.
@@ -315,11 +315,11 @@ impl HashedMetadataSlot {
             .checked_add(self.reclaimed_orphans_end)
             .ok_or(CorruptedMetadataError)?;
         if self.orphan_pages_len < reclaimed_orphans_end {
-            return Err(CorruptedMetadataError)
+            return Err(CorruptedMetadataError);
         }
         // Check the hash.
         if self.hash != self.meta.hash() {
-            return Err(CorruptedMetadataError)
+            return Err(CorruptedMetadataError);
         }
         Ok(())
     }
@@ -402,11 +402,11 @@ pub struct MetadataManager {
 }
 
 impl MetadataManager {
-    /// Minimum size for the backing file (1 KiB).
+    /// Minimum size for the backing file (4 KiB).
     ///
     /// This is an arbitrary number. The only requirement is for it to be large enough to contain
     /// two `HashedMetadataSlot` structs.
-    const SIZE_MIN: u64 = 1024;
+    const SIZE_MIN: u64 = 4096;
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, OpenMetadataError> {
         let f = File::options().read(true).write(true).create(true).truncate(false).open(path)?;
@@ -419,7 +419,11 @@ impl MetadataManager {
             file.set_len(Self::SIZE_MIN)?;
         }
 
-        let mut mmap = unsafe { MmapMut::map_mut(&file)? };
+        let mut mmap = if cfg!(not(miri)) {
+            unsafe { MmapMut::map_mut(&file)? }
+        } else {
+            MmapMut::map_anon(Self::SIZE_MIN as usize)?
+        };
 
         if initial_file_len < Self::SIZE_MIN {
             mmap.as_mut()[initial_file_len as usize..].fill(0);
@@ -542,7 +546,11 @@ impl MetadataManager {
 
     /// Saves the metadata to the storage device.
     pub fn sync(&self) -> io::Result<()> {
-        self.mmap.flush()
+        if cfg!(not(miri)) {
+            self.mmap.flush()
+        } else {
+            Ok(())
+        }
     }
 
     /// Saves the metadata to the storage device and closes the metadata file.
@@ -804,8 +812,9 @@ mod tests {
             manager: &mut MetadataManager,
             expected: &mut HashSet<PageId>,
             next_page_id: &mut PageId,
-            iterations: usize,
         ) {
+            let iterations = if cfg!(not(miri)) { 100_000 } else { 100 };
+
             for _ in 0..iterations {
                 let push_or_pop = rand::random::<bool>();
                 match push_or_pop {
@@ -857,7 +866,7 @@ mod tests {
             let mut next_page_id = page_id!(1);
 
             for snapshot_id in 1..=50 {
-                random_push_pop_cycle(&mut manager, &mut expected, &mut next_page_id, 100_000);
+                random_push_pop_cycle(&mut manager, &mut expected, &mut next_page_id);
 
                 manager.commit().expect("commit failed");
                 assert_eq!(manager.active_slot().snapshot_id(), snapshot_id);
@@ -882,7 +891,7 @@ mod tests {
             for snapshot_id in 1..=50 {
                 let expected_at_previous_snapshot = expected.clone();
 
-                random_push_pop_cycle(&mut manager, &mut expected, &mut next_page_id, 100_000);
+                random_push_pop_cycle(&mut manager, &mut expected, &mut next_page_id);
                 manager.sync().expect("sync failed");
 
                 let dup = duplicate_file(&f);

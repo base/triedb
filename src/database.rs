@@ -7,12 +7,12 @@ use crate::{
     transaction::{Transaction, TransactionError, TransactionManager, RO, RW},
 };
 use alloy_primitives::B256;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use std::{io, path::Path};
 
 #[derive(Debug)]
 pub struct Database {
-    pub(crate) storage_engine: RwLock<StorageEngine>,
+    pub(crate) storage_engine: StorageEngine,
     pub(crate) transaction_manager: Mutex<TransactionManager>,
     metrics: DatabaseMetrics,
 }
@@ -67,23 +67,22 @@ impl Database {
 
     pub fn new(storage_engine: StorageEngine) -> Self {
         Self {
-            storage_engine: RwLock::new(storage_engine),
+            storage_engine,
             transaction_manager: Mutex::new(TransactionManager::new()),
             metrics: DatabaseMetrics::default(),
         }
     }
 
     pub fn close(self) -> io::Result<()> {
-        self.storage_engine.into_inner().close()
+        self.storage_engine.close()
     }
 
     pub fn print_page<W: io::Write>(self, buf: W, page_id: Option<PageId>) -> Result<(), Error> {
-        let storage_engine = self.storage_engine.read();
-        let context = storage_engine.read_context();
+        let context = self.storage_engine.read_context();
         // TODO: Must use `expect()` because `storage::engine::Error` and `database::Error` are not
         // compatible. There's probably no reason to use two different error enums here, so maybe
         // we should unify them. Or maybe we could just rely on `std::io::Error`.
-        storage_engine.print_page(&context, buf, page_id).expect("write failed");
+        self.storage_engine.print_page(&context, buf, page_id).expect("write failed");
         Ok(())
     }
 
@@ -116,40 +115,32 @@ impl Database {
     }
 
     pub fn print_statistics<W: io::Write>(self, buf: W) -> Result<(), Error> {
-        let storage_engine = self.storage_engine.read();
-        let context = storage_engine.read_context();
-        storage_engine.debug_statistics(&context, buf).expect("write failed");
+        let context = self.storage_engine.read_context();
+        self.storage_engine.debug_statistics(&context, buf).expect("write failed");
         Ok(())
     }
 
     pub fn begin_rw(&self) -> Result<Transaction<'_, RW>, TransactionError> {
-        let mut transaction_manager = self.transaction_manager.lock();
-        let mut storage_engine = self.storage_engine.write();
-        let metadata = storage_engine.metadata().dirty_slot();
-        let min_snapshot_id = transaction_manager.begin_rw(metadata.snapshot_id())?;
+        let context = self.storage_engine.write_context();
+        let min_snapshot_id = self.transaction_manager.lock().begin_rw(context.snapshot_id)?;
         if min_snapshot_id > 0 {
-            storage_engine.unlock(min_snapshot_id - 1);
+            self.storage_engine.unlock(min_snapshot_id - 1);
         }
-        let context = storage_engine.write_context();
         Ok(Transaction::new(context, self))
     }
 
     pub fn begin_ro(&self) -> Result<Transaction<'_, RO>, TransactionError> {
-        let mut transaction_manager = self.transaction_manager.lock();
-        let storage_engine = self.storage_engine.read();
-        let metadata = storage_engine.metadata().active_slot();
-        transaction_manager.begin_ro(metadata.snapshot_id());
-        let context = storage_engine.read_context();
+        let context = self.storage_engine.read_context();
+        self.transaction_manager.lock().begin_ro(context.snapshot_id);
         Ok(Transaction::new(context, self))
     }
 
     pub fn state_root(&self) -> B256 {
-        self.storage_engine.read().metadata().active_slot().root_node_hash()
+        self.storage_engine.read_context().root_node_hash
     }
 
     pub fn size(&self) -> u32 {
-        let storage_engine = self.storage_engine.read();
-        storage_engine.size()
+        self.storage_engine.size()
     }
 
     pub fn update_metrics_ro(&self, context: &TransactionContext) {
