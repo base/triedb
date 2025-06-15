@@ -2523,7 +2523,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_page() {
+    fn test_split_page_by_moving_subtries() {
         let (storage_engine, mut context) = create_test_engine(300);
 
         let test_accounts = vec![
@@ -2548,8 +2548,81 @@ mod tests {
         // Split the page
         let page = storage_engine.get_mut_page(&context, page_id!(1)).unwrap();
         let mut slotted_page = SlottedPageMut::try_from(page).unwrap();
-        storage_engine.split_page(&mut context, &mut slotted_page, 0, 1024).unwrap();
+        let origin_num_free_bytes = slotted_page.num_free_bytes();
+        // Current free bytes is 3658
+        storage_engine.split_page(&mut context, &mut slotted_page, 0, 3800).unwrap();
         drop(slotted_page);
+
+        // Make sure the page is split
+        assert!(
+            origin_num_free_bytes <
+                SlottedPage::try_from(storage_engine.get_page(&context, page_id!(1)).unwrap())
+                    .unwrap()
+                    .num_free_bytes()
+        );
+        // Verify all accounts still exist after split
+        for (nibbles, account) in test_accounts {
+            let path = AddressPath::new(Nibbles::from_nibbles(nibbles));
+            let read_account = storage_engine.get_account(&mut context, path).unwrap();
+            assert_eq!(read_account, Some(account));
+        }
+    }
+
+    #[test]
+    fn test_split_page_by_moving_subtrie_with_cell_index() {
+        let (storage_engine, mut context) = create_test_engine(300);
+
+        let test_accounts = vec![
+            (hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001"), create_test_account(100, 1)),
+            (hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002"), create_test_account(123, 456)),
+            (hex!("00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003"), create_test_account(999, 999)),
+            (hex!("00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000004"), create_test_account(1000, 1000)),
+            (hex!("00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000030000000000000000000000000000000005"), create_test_account(1001, 1001)),
+        ];
+
+        // Insert accounts
+        for (nibbles, account) in test_accounts.iter() {
+            let path = AddressPath::new(Nibbles::from_nibbles(*nibbles));
+            storage_engine
+                .set_values(
+                    &mut context,
+                    vec![(path.into(), Some(account.clone().into()))].as_mut(),
+                )
+                .unwrap();
+        }
+
+        // {
+        //     println!("--- before split ---");
+        //     let page =
+        //         SlottedPage::try_from(storage_engine.get_page(&context, page_id!(1)).unwrap())
+        //             .unwrap();
+
+        //     println!(
+        //         "page 1: {:#?}",
+        //         SlottedPage::try_from(storage_engine.get_page(&context, page_id!(1)).unwrap())
+        //             .unwrap()
+        //     );
+        //     println!("node_0: {:#?}", page.get_value::<Node>(0).unwrap());
+
+        //     println!("node_3: {:#?}", page.get_value::<Node>(3).unwrap());
+        // }
+
+        // Split the page
+        let page = storage_engine.get_mut_page(&context, page_id!(1)).unwrap();
+        let mut slotted_page = SlottedPageMut::try_from(page).unwrap();
+        let origin_num_free_bytes = slotted_page.num_free_bytes();
+
+        // Cell 3 is a branch node have pointer to the first 2 nodes
+        storage_engine.split_page(&mut context, &mut slotted_page, 3, 1024).unwrap();
+        drop(slotted_page);
+
+        // Make sure the page is splitted
+        assert!(
+            origin_num_free_bytes <
+                SlottedPage::try_from(storage_engine.get_page(&context, page_id!(1)).unwrap())
+                    .unwrap()
+                    .num_free_bytes()
+        );
 
         // Verify all accounts still exist after split
         for (nibbles, account) in test_accounts {
