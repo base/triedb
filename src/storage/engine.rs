@@ -2591,22 +2591,6 @@ mod tests {
                 .unwrap();
         }
 
-        // {
-        //     println!("--- before split ---");
-        //     let page =
-        //         SlottedPage::try_from(storage_engine.get_page(&context, page_id!(1)).unwrap())
-        //             .unwrap();
-
-        //     println!(
-        //         "page 1: {:#?}",
-        //         SlottedPage::try_from(storage_engine.get_page(&context, page_id!(1)).unwrap())
-        //             .unwrap()
-        //     );
-        //     println!("node_0: {:#?}", page.get_value::<Node>(0).unwrap());
-
-        //     println!("node_3: {:#?}", page.get_value::<Node>(3).unwrap());
-        // }
-
         // Split the page
         let page = storage_engine.get_mut_page(&context, page_id!(1)).unwrap();
         let mut slotted_page = SlottedPageMut::try_from(page).unwrap();
