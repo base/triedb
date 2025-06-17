@@ -100,7 +100,7 @@ impl Page<'_> {
         }
     }
 
-    /// Returns the snapshot id of the page.
+    /// Returns the ID of the snapshot at which this page was created.
     #[inline]
     pub fn snapshot_id(&self) -> SnapshotId {
         self.raw_state().load().snapshot_id().unwrap()

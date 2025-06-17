@@ -45,6 +45,11 @@ where
     pub fn remove(&mut self, key: &Nibbles) {
         self.0.remove(&FixedBytes::from_slice(key.as_slice()));
     }
+
+    /// Removes all elements from the map.
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -76,6 +81,10 @@ impl TransactionContext {
         meta.set_root_node_hash(self.root_node_hash);
         meta.set_root_node_page_id(self.root_node_page_id);
         meta.set_page_count(self.page_count);
+    }
+
+    pub fn clear_cache(&mut self) {
+        self.contract_account_loc_cache.clear();
     }
 }
 

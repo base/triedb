@@ -106,6 +106,10 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         Ok(result)
     }
 
+    pub fn clear_cache(&mut self) {
+        self.context.clear_cache();
+    }
+
     pub fn debug_account(
         &self,
         output_file: impl std::io::Write,

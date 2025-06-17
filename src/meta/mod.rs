@@ -394,6 +394,39 @@ impl MetadataSlots {
     }
 }
 
+/// Details about an orphan page.
+#[repr(C)]
+#[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct OrphanPage {
+    page_id: RawPageId,
+    padding: u32,
+    orphaned_at: SnapshotId,
+}
+
+impl OrphanPage {
+    #[inline]
+    #[must_use]
+    pub fn new(page_id: PageId, orphaned_at: SnapshotId) -> Self {
+        Self { page_id: page_id.into(), padding: 0, orphaned_at }
+    }
+
+    /// ID of the orphan page.
+    #[inline]
+    #[must_use]
+    pub fn page_id(&self) -> PageId {
+        PageId::new(self.page_id).expect("invalid page id in orphan list")
+    }
+
+    /// The snapshot at which it was made orphan. Note that this snapshot won't be the same as the
+    /// snapshot at which the page was created. This snapshot can be used to understand if there's
+    /// any transaction in the system which may still be reading this page.
+    #[inline]
+    #[must_use]
+    pub fn orphaned_at(&self) -> SnapshotId {
+        self.orphaned_at
+    }
+}
+
 #[derive(Debug)]
 pub struct MetadataManager {
     file: File,
@@ -471,11 +504,11 @@ impl MetadataManager {
 
     /// Returns a slice containing the orphaned and reclaimed page IDs.
     #[inline]
-    fn raw_orphan_pages(&self) -> &[RawPageId] {
+    fn raw_orphan_pages(&self) -> &[OrphanPage] {
         let (_, remaining_bytes) = MetadataSlots::ref_from_prefix(self.mmap.as_ref())
             .expect("memory map should have the right size and alignment");
-        let len = remaining_bytes.len() / mem::size_of::<RawPageId>();
-        <[RawPageId]>::ref_from_bytes_with_elems(remaining_bytes, len)
+        let len = remaining_bytes.len() / mem::size_of::<OrphanPage>();
+        <[OrphanPage]>::ref_from_bytes_with_elems(remaining_bytes, len)
             .expect("memory map should have the right size and alignment")
     }
 
@@ -485,12 +518,12 @@ impl MetadataManager {
     /// This convenience method is necessary because Rust borrow rules don't allow obtaining two
     /// mutable references to the same object.
     #[inline]
-    fn parts_mut(&mut self) -> (&HashedMetadataSlot, &mut HashedMetadataSlot, &mut [RawPageId]) {
+    fn parts_mut(&mut self) -> (&HashedMetadataSlot, &mut HashedMetadataSlot, &mut [OrphanPage]) {
         let (meta, list) = MetadataSlots::mut_from_prefix(self.mmap.as_mut())
             .expect("memory map should have the right size and alignment");
 
-        let list_len = list.len() / mem::size_of::<PageId>();
-        let list = <[RawPageId]>::mut_from_bytes_with_elems(list, list_len)
+        let list_len = list.len() / mem::size_of::<OrphanPage>();
+        let list = <[OrphanPage]>::mut_from_bytes_with_elems(list, list_len)
             .expect("memory map should have the right size and alignment");
 
         let [active, dirty] = meta
@@ -597,28 +630,24 @@ impl<'a> OrphanPages<'a> {
     }
 
     /// Returns an iterator that yields the IDs of orphan pages.
-    pub fn iter(&self) -> impl FusedIterator<Item = PageId> + use<'_> {
+    pub fn iter(&self) -> impl FusedIterator<Item = OrphanPage> + use<'_> {
         let list = self.manager.raw_orphan_pages();
         let (left, right) = self.manager.dirty_slot().actual_orphans_ranges();
-        list[right]
-            .iter()
-            .copied()
-            .chain(list[left].iter().copied())
-            .map(|id| PageId::new(id).expect("invalid page id in orphan list"))
+        list[right].iter().copied().chain(list[left].iter().copied())
     }
 
     /// Adds a page to the orphan page list, increasing the capacity of the list if necessary.
-    pub fn push(&mut self, page_id: PageId) -> io::Result<()> {
-        if self.push_within_capacity(page_id).is_err() {
+    pub fn push(&mut self, orphan: OrphanPage) -> io::Result<()> {
+        if self.push_within_capacity(orphan).is_err() {
             self.manager.grow()?;
-            self.push_within_capacity(page_id)
+            self.push_within_capacity(orphan)
                 .expect("`push_within_capacity` failed even though capacity was increased");
         }
         Ok(())
     }
 
     /// Adds a page to the orphan page list if there is enough capacity.
-    pub fn push_within_capacity(&mut self, page_id: PageId) -> Result<(), PageId> {
+    pub fn push_within_capacity(&mut self, orphan: OrphanPage) -> Result<(), OrphanPage> {
         // To make sure the previous snapshot is always valid, we cannot modify orphan pages that
         // are referenced by the previous snapshot. We can only modify the reclaimed orphans
         // slice, or the the additional orphans elements added at the end of the list (if any).
@@ -638,12 +667,12 @@ impl<'a> OrphanPages<'a> {
 
         if !intersection.is_empty() {
             if intersection.start == dirty_reclaimed_range.start {
-                list[dirty_reclaimed_range.start] = page_id.into();
+                list[dirty_reclaimed_range.start] = orphan;
                 dirty.reclaimed_orphans_start += 1;
                 dirty.reclaimed_orphans_end -= 1;
                 return Ok(());
             } else if intersection.end == dirty_reclaimed_range.end {
-                list[dirty_reclaimed_range.end - 1] = page_id.into();
+                list[dirty_reclaimed_range.end - 1] = orphan;
                 dirty.reclaimed_orphans_end -= 1;
                 return Ok(());
             }
@@ -655,34 +684,34 @@ impl<'a> OrphanPages<'a> {
         let (_, dirty_orphans_range) = dirty.actual_orphans_ranges();
         let index = active_orphans_range.end.max(dirty_orphans_range.end);
         if index < list.len() {
-            list[index] = page_id.into();
+            list[index] = orphan;
             dirty.orphan_pages_len += 1;
             return Ok(());
         }
 
         // Not enough room to add this orphan.
-        Err(page_id)
+        Err(orphan)
     }
 
     /// Reclaims an page from the orphan page list.
-    pub fn pop(&mut self) -> Option<PageId> {
+    pub fn pop(&mut self) -> Option<OrphanPage> {
         let (_, dirty, list) = self.manager.parts_mut();
         let (left, right) = dirty.actual_orphans_ranges();
 
         if !right.is_empty() {
             dirty.reclaimed_orphans_end += 1;
-            Some(list[right.start].try_into().expect("invalid page id in orphan list"))
+            Some(list[right.start])
         } else if !left.is_empty() {
             dirty.reclaimed_orphans_start -= 1;
             dirty.reclaimed_orphans_end += 1;
-            Some(list[left.end - 1].try_into().expect("invalid page id in orphan list"))
+            Some(list[left.end - 1])
         } else {
             None
         }
     }
 
     /// Reclaims a page from the orphan page list that satisfies the given predicate.
-    pub fn pop_if(&mut self, mut predicate: impl FnMut(PageId) -> bool) -> Option<PageId> {
+    pub fn pop_if(&mut self, mut predicate: impl FnMut(OrphanPage) -> bool) -> Option<OrphanPage> {
         let (_, dirty, list) = self.manager.parts_mut();
         let (left, right) = dirty.actual_orphans_ranges();
 
@@ -690,7 +719,7 @@ impl<'a> OrphanPages<'a> {
             let right_bound = right.start;
 
             for index in right {
-                let page_id = list[index].try_into().expect("invalid page id in orphan list");
+                let page_id = list[index];
                 if predicate(page_id) {
                     list.swap(index, right_bound);
                     dirty.reclaimed_orphans_end += 1;
@@ -703,7 +732,7 @@ impl<'a> OrphanPages<'a> {
             let left_bound = left.end - 1;
 
             for index in left {
-                let page_id = list[index].try_into().expect("invalid page id in orphan list");
+                let page_id = list[index];
                 if predicate(page_id) {
                     list.swap(index, left_bound);
                     dirty.reclaimed_orphans_start -= 1;
@@ -736,10 +765,10 @@ mod tests {
         ]));
         dirty.set_root_node_page_id(Some(page_id!(123)));
         dirty.set_page_count(456);
-        manager.orphan_pages().push(page_id!(0xaa)).expect("push failed");
-        manager.orphan_pages().push(page_id!(0xbb)).expect("push failed");
-        manager.orphan_pages().push(page_id!(0xcc)).expect("push failed");
-        manager.orphan_pages().push(page_id!(0xdd)).expect("push failed");
+        manager.orphan_pages().push(OrphanPage::new(page_id!(0xaa), 1)).expect("push failed");
+        manager.orphan_pages().push(OrphanPage::new(page_id!(0xbb), 2)).expect("push failed");
+        manager.orphan_pages().push(OrphanPage::new(page_id!(0xcc), 3)).expect("push failed");
+        manager.orphan_pages().push(OrphanPage::new(page_id!(0xdd), 4)).expect("push failed");
 
         manager.commit().expect("commit failed");
         manager.close().expect("close failed");
@@ -758,7 +787,15 @@ mod tests {
         );
         assert_eq!(active.root_node_page_id(), Some(page_id!(123)));
         assert_eq!(active.page_count(), 456);
-        assert_eq!(manager.orphan_pages().iter().collect::<Vec<_>>(), [0xaa, 0xbb, 0xcc, 0xdd]);
+        assert_eq!(
+            manager.orphan_pages().iter().collect::<Vec<_>>(),
+            [
+                OrphanPage::new(page_id!(0xaa), 1),
+                OrphanPage::new(page_id!(0xbb), 2),
+                OrphanPage::new(page_id!(0xcc), 3),
+                OrphanPage::new(page_id!(0xdd), 4),
+            ]
+        );
     }
 
     #[test]
@@ -784,33 +821,33 @@ mod tests {
 
         fn push(
             manager: &mut MetadataManager,
-            expected: &mut HashSet<PageId>,
+            expected: &mut HashSet<OrphanPage>,
             next_page_id: &mut PageId,
         ) {
-            let page_id = *next_page_id;
-            expected.insert(page_id);
-            manager.orphan_pages().push(page_id).expect("push failed");
+            let orphan = OrphanPage::new(*next_page_id, 1);
+            expected.insert(orphan);
+            manager.orphan_pages().push(orphan).expect("push failed");
             *next_page_id = next_page_id.inc().expect("page id overflow");
         }
 
-        fn pop(manager: &mut MetadataManager, expected: &mut HashSet<PageId>) {
+        fn pop(manager: &mut MetadataManager, expected: &mut HashSet<OrphanPage>) {
             match manager.orphan_pages().pop() {
                 None => assert!(
                     expected.is_empty(),
                     "metadata manager did not return an orphan page even though {} are available",
                     expected.len()
                 ),
-                Some(page_id) => assert!(
-                    expected.remove(&page_id),
-                    "metadata manager returned an orphan page ({}) that is not available",
-                    page_id
+                Some(orphan) => assert!(
+                    expected.remove(&orphan),
+                    "metadata manager returned an orphan page ({:?}) that is not available",
+                    orphan
                 ),
             }
         }
 
         fn random_push_pop_cycle(
             manager: &mut MetadataManager,
-            expected: &mut HashSet<PageId>,
+            expected: &mut HashSet<OrphanPage>,
             next_page_id: &mut PageId,
         ) {
             let iterations = if cfg!(not(miri)) { 100_000 } else { 100 };
@@ -829,12 +866,12 @@ mod tests {
             }
         }
 
-        fn check_orphans(manager: &mut MetadataManager, expected: &HashSet<PageId>) {
+        fn check_orphans(manager: &mut MetadataManager, expected: &HashSet<OrphanPage>) {
             // Use a `Vec`, not a `HashSet`, to check if `orphan_pages()` contains any duplicates
             let mut actual = manager.orphan_pages().iter().collect::<Vec<_>>();
             let mut expected = expected.iter().copied().collect::<Vec<_>>();
-            actual.sort();
-            expected.sort();
+            actual.sort_by_key(OrphanPage::page_id);
+            expected.sort_by_key(OrphanPage::page_id);
             assert_eq!(expected, actual);
         }
 
@@ -849,7 +886,7 @@ mod tests {
             dup
         }
 
-        fn check_orphans_from_file(f: &File, expected: &HashSet<PageId>) {
+        fn check_orphans_from_file(f: &File, expected: &HashSet<OrphanPage>) {
             let mut manager =
                 MetadataManager::from_file(f.try_clone().expect("failed to duplicate file"))
                     .expect("failed to initialize metadata manager");
