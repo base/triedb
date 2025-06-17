@@ -1,5 +1,8 @@
 use crate::{snapshot::SnapshotId, transaction::TransactionError};
-use std::{fmt::Debug, sync::atomic::{AtomicBool, Ordering}};
+use std::{
+    fmt::Debug,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 #[derive(Debug)]
 pub struct TransactionManager {
@@ -25,7 +28,12 @@ impl TransactionManager {
     pub fn begin_rw(&mut self, snapshot_id: SnapshotId) -> Result<SnapshotId, TransactionError> {
         // only allow one writable transaction at a time
         loop {
-            match self.has_writer.compare_exchange_weak(false, true, Ordering::Relaxed, Ordering::Relaxed) {
+            match self.has_writer.compare_exchange_weak(
+                false,
+                true,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
                 Ok(_) => break,
                 _ => (),
             }
