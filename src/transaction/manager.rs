@@ -1,9 +1,9 @@
 use crate::{snapshot::SnapshotId, transaction::TransactionError};
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::atomic::{AtomicBool, Ordering}};
 
 #[derive(Debug)]
 pub struct TransactionManager {
-    has_writer: bool,
+    has_writer: AtomicBool,
     open_txs: Vec<SnapshotId>,
 }
 
@@ -15,7 +15,7 @@ impl Default for TransactionManager {
 
 impl TransactionManager {
     pub fn new() -> Self {
-        Self { has_writer: false, open_txs: Vec::new() }
+        Self { has_writer: false.into(), open_txs: Vec::new() }
     }
 
     pub fn min_snapshot_id(&self) -> Option<SnapshotId> {
@@ -24,10 +24,13 @@ impl TransactionManager {
 
     pub fn begin_rw(&mut self, snapshot_id: SnapshotId) -> Result<SnapshotId, TransactionError> {
         // only allow one writable transaction at a time
-        if self.has_writer {
-            return Err(TransactionError);
+        loop {
+            match self.has_writer.compare_exchange_weak(false, true, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => break,
+                _ => (),
+            }
         }
-        self.has_writer = true;
+
         self.open_txs.push(snapshot_id - 1);
         Ok(self.min_snapshot_id().unwrap())
     }
@@ -39,8 +42,7 @@ impl TransactionManager {
     // Removes a transaction from the list of open transactions
     pub(crate) fn remove_tx(&mut self, snapshot_id: SnapshotId, is_writer: bool) {
         if is_writer {
-            debug_assert!(self.has_writer);
-            self.has_writer = false;
+            self.has_writer.store(false, Ordering::Relaxed);
         }
 
         let snapshot_id = if is_writer { snapshot_id - 1 } else { snapshot_id };
@@ -67,14 +69,6 @@ mod tests {
 
         manager.begin_ro(2);
         assert_eq!(manager.min_snapshot_id(), Some(0));
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_begin_rw_when_has_writer() {
-        let mut manager = TransactionManager::new();
-        manager.begin_rw(1).unwrap();
-        manager.begin_rw(2).unwrap();
     }
 
     #[test]
