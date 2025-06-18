@@ -235,12 +235,56 @@ fn bench_account_inserts(c: &mut Criterion) {
             },
             |db| {
                 let mut tx = db.begin_rw().unwrap();
-                for addr in &addresses {
+                addresses.iter().enumerate().for_each(|(i, addr)| {
                     let account =
-                        Account::new(1, U256::from(1000u64), EMPTY_ROOT_HASH, KECCAK_EMPTY);
+                        Account::new(i as u64, U256::from(i as u64), EMPTY_ROOT_HASH, KECCAK_EMPTY);
                     tx.set_account(addr.clone(), Some(account)).unwrap();
-                }
+                });
                 tx.commit().unwrap();
+            },
+        );
+    });
+
+    group.finish();
+}
+
+fn bench_account_inserts_loop(c: &mut Criterion) {
+    let mut group = c.benchmark_group("insert_loop_operations");
+    let base_dir = get_base_database(
+        DEFAULT_SETUP_DB_EOA_SIZE,
+        DEFAULT_SETUP_DB_CONTRACT_SIZE,
+        DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT,
+    );
+    let file_name = base_dir.main_file_name.clone();
+
+    let mut rng = StdRng::seed_from_u64(SEED_NEW_EOA);
+    let addresses: Vec<AddressPath> =
+        (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
+
+    group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+    group.bench_function(BenchmarkId::new("eoa_inserts_loop", BATCH_SIZE), |b| {
+        b.iter_with_setup(
+            || {
+                let dir = TempDir::new("triedb_bench_insert_loop").unwrap();
+                copy_files(&base_dir, dir.path()).unwrap();
+                let db_path = dir.path().join(&file_name);
+                Database::open(db_path).unwrap()
+            },
+            |db| {
+                for i in 0..10 {
+                    let mut tx = db.begin_rw().unwrap();
+                    for j in 0..BATCH_SIZE / 10 {
+                        let account = Account::new(
+                            j as u64,
+                            U256::from(j as u64),
+                            EMPTY_ROOT_HASH,
+                            KECCAK_EMPTY,
+                        );
+                        tx.set_account(addresses[j + i * BATCH_SIZE / 10].clone(), Some(account))
+                            .unwrap();
+                    }
+                    tx.commit().unwrap();
+                }
             },
         );
     });
@@ -614,6 +658,7 @@ criterion_group!(
     benches,
     bench_account_reads,
     bench_account_inserts,
+    bench_account_inserts_loop,
     bench_account_updates,
     bench_account_deletes,
     bench_mixed_operations,
