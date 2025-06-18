@@ -342,10 +342,11 @@ fn bench_mixed_operations(c: &mut Criterion) {
     let existing_accounts_with_storage: Vec<AddressPath> =
         (0..BATCH_SIZE).map(|_| generate_random_address(&mut contract_rng)).collect();
 
-    let mut existing_storage_slots: Vec<(StoragePath, StorageValue)> =
-        Vec::with_capacity(existing_accounts_with_storage.len() * 10);
+    let mut existing_storage_slots: Vec<(StoragePath, StorageValue)> = Vec::with_capacity(
+        existing_accounts_with_storage.len() * DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT,
+    );
     for address in &existing_accounts_with_storage {
-        for i in 0..=10 {
+        for i in 1..=DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT {
             let storage_key = StorageKey::from(U256::from(i));
             let storage_path = StoragePath::for_address_path_and_slot(address.clone(), storage_key);
             let mut new_value = storage_path.get_slot().pack();
@@ -358,7 +359,7 @@ fn bench_mixed_operations(c: &mut Criterion) {
     let mut new_storage_slots_in_existing_accounts_with_storage: Vec<(StoragePath, StorageValue)> =
         Vec::with_capacity(existing_accounts_with_storage.len() * 10);
     for address in &existing_accounts_with_storage {
-        for i in 0..=10 {
+        for i in 1..=DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT {
             let storage_key =
                 StorageKey::from(U256::from(i + DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT + 1));
             let storage_path = StoragePath::for_address_path_and_slot(address.clone(), storage_key);
@@ -370,7 +371,7 @@ fn bench_mixed_operations(c: &mut Criterion) {
     }
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
-    group.bench_function(BenchmarkId::new("mixed_workload", BATCH_SIZE), |b| {
+    group.bench_function(BenchmarkId::new("mixed_operations", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {
                 let dir = TempDir::new("triedb_bench_mixed").unwrap();
