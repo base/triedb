@@ -45,6 +45,7 @@ const DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT: usize = 10;
 const SEED_EOA: u64 = 42; // EOA seeding value
 const SEED_CONTRACT: u64 = 43; // contract account seeding value
 const SEED_NEW_EOA: u64 = 44; // new EOA seeding value
+const SEED_NEW_CONTRACT: u64 = 45; // new contract account seeding value
 const BATCH_SIZE: usize = 10_000;
 
 fn generate_random_address(rng: &mut StdRng) -> AddressPath {
@@ -145,6 +146,52 @@ fn copy_files(from: &BaseDatabase, to: &Path) -> Result<(), io::Error> {
         fs::copy(from_path, &to_path)?;
     }
     Ok(())
+}
+
+fn generate_storage_paths(
+    addresses: &[AddressPath],
+    storage_per_address: usize,
+) -> Vec<StoragePath> {
+    let capacity = addresses.len() * storage_per_address;
+    let mut storage_paths: Vec<StoragePath> = Vec::with_capacity(capacity);
+    addresses
+        .iter()
+        .flat_map(|address| {
+            (1..=storage_per_address).map(|i| {
+                StoragePath::for_address_path_and_slot(
+                    address.clone(),
+                    StorageKey::from(U256::from(i)),
+                )
+            })
+        })
+        .for_each(|path| storage_paths.push(path));
+    storage_paths
+}
+
+fn generate_storage_paths_values(
+    addresses: &[AddressPath],
+    storage_per_address: usize,
+) -> Vec<(StoragePath, StorageValue)> {
+    let capacity = addresses.len() * storage_per_address;
+    let mut storage_paths_values: Vec<(StoragePath, StorageValue)> = Vec::with_capacity(capacity);
+    addresses
+        .iter()
+        .flat_map(|address| {
+            (1..=storage_per_address).map(|i| {
+                let storage_key = StorageKey::from(U256::from(i));
+                let storage_path =
+                    StoragePath::for_address_path_and_slot(address.clone(), storage_key);
+                let mut val = storage_path.get_slot().pack();
+                // reverse the value to make it different from the initial value in the seeding
+                // function
+                val.reverse();
+                let storage_value = StorageValue::from_be_slice(val.as_slice());
+
+                (storage_path, storage_value)
+            })
+        })
+        .for_each(|path| storage_paths_values.push(path));
+    storage_paths_values
 }
 
 fn bench_account_reads(c: &mut Criterion) {
@@ -423,12 +470,98 @@ fn bench_mixed_operations(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_storage_reads(c: &mut Criterion) {
+    let mut group = c.benchmark_group("read_storage_operations");
+    let base_dir = get_base_database(
+        DEFAULT_SETUP_DB_EOA_SIZE,
+        DEFAULT_SETUP_DB_CONTRACT_SIZE,
+        DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT,
+    );
+
+    let dir = TempDir::new("triedb_bench_storage_read").unwrap();
+    let file_name = base_dir.main_file_name.clone();
+    copy_files(&base_dir, dir.path()).unwrap();
+
+    let mut rng = StdRng::seed_from_u64(SEED_CONTRACT);
+    let total_storage_per_address = DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT / 2;
+    let total_addresses = BATCH_SIZE / total_storage_per_address;
+    let addresses: Vec<AddressPath> =
+        (0..total_addresses).map(|_| generate_random_address(&mut rng)).collect();
+    // let storage_paths = generate_storage_paths(&addresses, total_storage_per_address);
+    let storage_paths_values = generate_storage_paths_values(&addresses, total_storage_per_address);
+
+    group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+    group.bench_function(BenchmarkId::new("storage_reads", BATCH_SIZE), |b| {
+        b.iter_with_setup(
+            || {
+                let db_path = dir.path().join(&file_name);
+                Database::open(db_path).unwrap()
+            },
+            |db| {
+                let mut tx = db.begin_ro().unwrap();
+                storage_paths_values.iter().for_each(|(storage_path, _)| {
+                    let a = tx.get_storage_slot(storage_path.clone()).unwrap();
+                    assert!(a.is_some());
+                });
+                tx.commit().unwrap();
+            },
+        );
+    });
+
+    group.finish();
+}
+
+fn bench_storage_inserts(c: &mut Criterion) {
+    let mut group = c.benchmark_group("insert_storage_operations");
+    let base_dir = get_base_database(
+        DEFAULT_SETUP_DB_EOA_SIZE,
+        DEFAULT_SETUP_DB_CONTRACT_SIZE,
+        DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT,
+    );
+    let file_name = base_dir.main_file_name.clone();
+
+    let mut rng = StdRng::seed_from_u64(SEED_NEW_CONTRACT);
+    let total_storage_per_address = DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT;
+    let total_addresses = BATCH_SIZE / total_storage_per_address;
+    let addresses: Vec<AddressPath> =
+        (0..total_addresses).map(|_| generate_random_address(&mut rng)).collect();
+    let storage_paths_values = generate_storage_paths_values(&addresses, total_storage_per_address);
+
+    group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+    group.bench_function(BenchmarkId::new("storage_inserts", BATCH_SIZE), |b| {
+        b.iter_with_setup(
+            || {
+                let dir = TempDir::new("triedb_bench_storage_insert").unwrap();
+                copy_files(&base_dir, dir.path()).unwrap();
+                let db_path = dir.path().join(&file_name);
+                Database::open(db_path).unwrap()
+            },
+            |db| {
+                let mut tx = db.begin_rw().unwrap();
+                addresses.iter().enumerate().for_each(|(i, address)| {
+                    let account =
+                        Account::new(i as u64, U256::from(i as u64), EMPTY_ROOT_HASH, KECCAK_EMPTY);
+                    tx.set_account(address.clone(), Some(account)).unwrap();
+                });
+                storage_paths_values.iter().for_each(|(storage_path, storage_value)| {
+                    tx.set_storage_slot(storage_path.clone(), Some(*storage_value)).unwrap();
+                });
+                tx.commit().unwrap();
+            },
+        );
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_account_reads,
     bench_account_inserts,
     bench_account_updates,
     bench_account_deletes,
-    bench_mixed_operations
+    bench_mixed_operations,
+    bench_storage_reads,
+    bench_storage_inserts,
 );
 criterion_main!(benches);
