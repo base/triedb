@@ -571,6 +571,44 @@ fn bench_storage_updates(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_storage_deletes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("delete_storage_operations");
+    let base_dir = get_base_database(
+        DEFAULT_SETUP_DB_EOA_SIZE,
+        DEFAULT_SETUP_DB_CONTRACT_SIZE,
+        DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT,
+    );
+    let file_name = base_dir.main_file_name.clone();
+
+    let mut rng = StdRng::seed_from_u64(SEED_CONTRACT);
+    let total_storage_per_address = DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT;
+    let total_addresses = BATCH_SIZE / total_storage_per_address;
+    let addresses: Vec<AddressPath> =
+        (0..total_addresses).map(|_| generate_random_address(&mut rng)).collect();
+    let storage_paths_values = generate_storage_paths_values(&addresses, total_storage_per_address);
+
+    group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+    group.bench_function(BenchmarkId::new("storage_deletes", BATCH_SIZE), |b| {
+        b.iter_with_setup(
+            || {
+                let dir = TempDir::new("triedb_bench_storage_delete").unwrap();
+                copy_files(&base_dir, dir.path()).unwrap();
+                let db_path = dir.path().join(&file_name);
+                Database::open(db_path).unwrap()
+            },
+            |db| {
+                let mut tx = db.begin_rw().unwrap();
+                storage_paths_values.iter().for_each(|(storage_path, _)| {
+                    tx.set_storage_slot(storage_path.clone(), None).unwrap();
+                });
+                tx.commit().unwrap();
+            },
+        );
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_account_reads,
@@ -581,5 +619,6 @@ criterion_group!(
     bench_storage_reads,
     bench_storage_inserts,
     bench_storage_updates,
+    bench_storage_deletes,
 );
 criterion_main!(benches);
