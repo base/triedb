@@ -28,12 +28,13 @@ impl TransactionManager {
     pub fn begin_rw(&mut self, snapshot_id: SnapshotId) -> Result<SnapshotId, TransactionError> {
         // only allow one writable transaction at a time
         loop {
-            if self.has_writer.compare_exchange_weak(
-                false,
-                true,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ).is_ok() { break }
+            if self
+                .has_writer
+                .compare_exchange_weak(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                break
+            }
         }
 
         self.open_txs.push(snapshot_id - 1);
