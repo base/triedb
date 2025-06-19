@@ -14,8 +14,11 @@
 //! The database will be created in a temporary directory and deleted after the benchmarks are
 //! finished.
 
-use alloy_primitives::{Address, StorageKey, StorageValue, U256};
+mod benchmark_common;
+
+use alloy_primitives::{StorageKey, StorageValue, U256};
 use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
+use benchmark_common::{generate_random_address, BATCH_SIZE};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::prelude::*;
 use std::{
@@ -46,12 +49,6 @@ const SEED_EOA: u64 = 42; // EOA seeding value
 const SEED_CONTRACT: u64 = 43; // contract account seeding value
 const SEED_NEW_EOA: u64 = 44; // new EOA seeding value
 const SEED_NEW_CONTRACT: u64 = 45; // new contract account seeding value
-const BATCH_SIZE: usize = 10_000;
-
-fn generate_random_address(rng: &mut StdRng) -> AddressPath {
-    let addr = Address::random_with(rng);
-    AddressPath::for_address(addr)
-}
 
 fn get_base_database(
     fallback_eoa_size: usize,

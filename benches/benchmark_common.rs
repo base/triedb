@@ -15,6 +15,7 @@ pub fn generate_random_address(rng: &mut StdRng) -> AddressPath {
     AddressPath::for_address(addr)
 }
 
+#[allow(dead_code)]
 pub fn setup_database(size: usize) -> (TempDir, Database) {
     let dir = TempDir::new("triedb_bench").unwrap();
     let db_path = dir.path().join("db");
@@ -38,6 +39,7 @@ pub fn setup_database(size: usize) -> (TempDir, Database) {
     (dir, db)
 }
 
+#[allow(dead_code)]
 pub fn setup_database_with_storage(size: usize) -> (TempDir, Database) {
     let dir = TempDir::new("triedb_bench_storage").unwrap();
     let db_path = dir.path().join("db");
@@ -72,6 +74,7 @@ pub fn setup_database_with_storage(size: usize) -> (TempDir, Database) {
     (dir, db)
 }
 
+#[allow(dead_code)]
 pub fn generate_storage_paths(
     addresses: &[AddressPath],
     storage_per_address: usize,
