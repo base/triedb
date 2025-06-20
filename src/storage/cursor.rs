@@ -1,19 +1,26 @@
+use std::sync::Arc;
+
+use alloy_primitives::B256;
 use alloy_trie::Nibbles;
 
 use crate::{
-    context::TransactionContext, location::Location, node::Node, page::SlottedPage,
+    context::TransactionContext,
+    location::Location,
+    node::Node,
+    page::{PageId, SlottedPage},
     storage::engine::StorageEngine,
 };
 
 #[derive(Debug)]
-pub struct Cursor<'c> {
-    storage_engine: &'c StorageEngine,
-    context: &'c TransactionContext,
+pub struct Cursor {
+    storage_engine: Arc<StorageEngine>,
+    context: TransactionContext,
     loc_stack: Vec<Location>,
-    page_stack: Vec<SlottedPage<'c>>,
+    page_id_stack: Vec<PageId>,
     node_stack: Vec<Node>,
     key_stack: Vec<Nibbles>,
     initialized: bool,
+    account_key: Option<B256>,
 }
 
 #[derive(Debug)]
@@ -21,16 +28,36 @@ pub enum CursorError {
     InvalidKey,
 }
 
-impl<'c> Cursor<'c> {
-    pub fn new(storage_engine: &'c StorageEngine, context: &'c TransactionContext) -> Self {
+impl Cursor {
+    pub fn new_account_cursor(
+        storage_engine: Arc<StorageEngine>,
+        context: TransactionContext,
+    ) -> Self {
+        Self::new_with_account_key(storage_engine, context, None)
+    }
+
+    pub fn new_storage_cursor(
+        storage_engine: Arc<StorageEngine>,
+        context: TransactionContext,
+        account_key: B256,
+    ) -> Self {
+        Self::new_with_account_key(storage_engine, context, Some(account_key))
+    }
+
+    fn new_with_account_key(
+        storage_engine: Arc<StorageEngine>,
+        context: TransactionContext,
+        account_key: Option<B256>,
+    ) -> Self {
         Self {
             storage_engine,
             context,
             loc_stack: Vec::new(),
-            page_stack: Vec::new(),
+            page_id_stack: Vec::new(),
             node_stack: Vec::new(),
             key_stack: Vec::new(),
             initialized: false,
+            account_key,
         }
     }
 
@@ -50,39 +77,27 @@ impl<'c> Cursor<'c> {
             return Ok(None);
         }
 
-        let (current_key, current_node) = self.current_key_and_node().unwrap();
+        let (_, current_node) = self.current_key_and_node().unwrap();
 
         match current_node {
             Node::Branch { .. } => self.traverse_branch_children(),
-            Node::AccountLeaf { storage_root, .. } => {
-                // If account has storage, traverse into storage subtrie first
-                if let Some(storage_pointer) = storage_root {
-                    self.load_child_node_into_stack(
-                        storage_pointer.location(),
-                        current_key.clone(),
-                        None,
-                    )?;
-                    return Ok(self.current_key_and_node());
-                } else {
-                    // No storage, backtrack to find next account
-                    self.backtrack_from_leaf()
-                }
-            }
+            Node::AccountLeaf { .. } => self.backtrack_from_leaf(),
             Node::StorageLeaf { .. } => self.backtrack_from_leaf(),
         }
     }
 
     /// Move the cursor to the key and return a value matching or greater than the key.
     pub fn seek(&mut self, key: &Nibbles) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
+        println!("seek from {:?} to {:?}", self.current_key_and_node(), key);
         // If not initialized, start from root
         if !self.initialized {
             self.initialized = true;
-            return self.seek_from_root(key);
+            self.start_from_root()?;
         }
 
         // If we have no current position, start from root
         if self.key_stack.is_empty() {
-            return self.seek_from_root(key);
+            self.start_from_root()?;
         }
 
         let current_key = self.key_stack.last().unwrap();
@@ -95,16 +110,17 @@ impl<'c> Cursor<'c> {
         // Find the longest common prefix between current position and target
         let common_prefix_len = Nibbles::common_prefix_length(current_key, key);
 
-        // If keys are completely different, start from root
-        if common_prefix_len == current_key.len() {
-            return self.seek_from_root(key);
-        }
-
         // Optimize: backtrack only to the point where paths diverge
         self.backtrack_to_common_ancestor(common_prefix_len)?;
 
-        // Continue seeking from the common ancestor
-        self.seek_from_current_position(key)
+        match self.current_key_and_node() {
+            Some((_, node)) => {
+                // Continue seeking from the common ancestor
+                self.seek_recursive(key, common_prefix_len - node.prefix().len())
+            }
+            // If we've backtracked to empty, no higher key exists
+            None => Ok(None),
+        }
     }
 
     /// Backtrack the cursor to the common ancestor at the given prefix length
@@ -121,89 +137,13 @@ impl<'c> Cursor<'c> {
             // Pop one level
             let current_loc = self.loc_stack.pop().unwrap();
             if current_loc.page_id().is_some() {
-                self.page_stack.pop();
+                self.page_id_stack.pop();
             }
             self.node_stack.pop();
             self.key_stack.pop();
         }
+
         Ok(())
-    }
-
-    /// Seek from the current cursor position (optimized for nearby targets)
-    fn seek_from_current_position(
-        &mut self,
-        target_key: &Nibbles,
-    ) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
-        let (current_key, current_node) = self.current_key_and_node().unwrap();
-
-        // If we've reached or passed the target, return current position
-        if current_key >= target_key {
-            return Ok(self.current_key_and_node());
-        }
-
-        // If this is not a branch node, we need to backtrack to find next higher key
-        if !current_node.is_branch() {
-            return self.backtrack_to_find_next_higher_key(target_key);
-        }
-
-        // This is a branch node - find the appropriate child for the target
-        let path_offset = current_key.len();
-
-        if path_offset >= target_key.len() {
-            // We've consumed the entire target key - current position is the result
-            return Ok(self.current_key_and_node());
-        }
-
-        let target_nibble = target_key[path_offset];
-
-        // Look for a child at or after the target nibble
-        for child_index in target_nibble..16 {
-            if let Some(child_pointer) = current_node.child(child_index).unwrap() {
-                self.load_child_node_into_stack(
-                    child_pointer.location(),
-                    current_key.clone(),
-                    Some(child_index),
-                )?;
-
-                if child_index == target_nibble {
-                    // This is the exact path we want, continue recursively
-                    return self.seek_from_current_position(target_key);
-                } else {
-                    // This child is higher than our target, return it
-                    return Ok(self.current_key_and_node());
-                }
-            }
-        }
-
-        // No suitable child found, backtrack to find next higher key
-        self.backtrack_to_find_next_higher_key(target_key)
-    }
-
-    /// Fallback: seek starting from the root (used when optimization isn't possible)
-    fn seek_from_root(&mut self, key: &Nibbles) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
-        // Clear existing state to start fresh
-        self.loc_stack.clear();
-        self.page_stack.clear();
-        self.node_stack.clear();
-        self.key_stack.clear();
-
-        // Start from root
-        let root_node_page_id = match self.context.root_node_page_id {
-            Some(id) => id,
-            None => return Ok(None),
-        };
-
-        let root_page = self.storage_engine.get_page(&self.context, root_node_page_id).unwrap();
-        let root_slotted_page = SlottedPage::try_from(root_page).unwrap();
-        let root_node: Node = root_slotted_page.get_value(0).unwrap();
-
-        self.loc_stack.push(Location::for_page(root_node_page_id));
-        self.page_stack.push(root_slotted_page);
-        self.node_stack.push(root_node);
-        self.key_stack.push(Nibbles::default());
-
-        // Navigate through the tree to find the target key or next higher key
-        self.seek_recursive(key, 0)
     }
 
     /// Recursively navigate through the tree to find the target key or next higher key
@@ -240,7 +180,11 @@ impl<'c> Cursor<'c> {
 
         // If we've consumed the entire target key, this is our result
         if new_path_offset >= target_key.len() {
-            return Ok(Some((self.key_stack.last().unwrap(), self.node_stack.last().unwrap())));
+            println!(
+                "seek_recursive {:?}: {:?}, {:?}",
+                target_key, self.key_stack, self.node_stack
+            );
+            return Ok(self.current_key_and_node());
         }
 
         // Handle different node types
@@ -271,24 +215,8 @@ impl<'c> Cursor<'c> {
                 // No suitable child found at this level, backtrack to find next higher key
                 self.backtrack_to_find_next_higher_key(target_key)
             }
-            Node::AccountLeaf { storage_root, .. } => {
-                // If account has storage, traverse into storage subtrie first
-                if let Some(storage_pointer) = storage_root {
-                    self.load_child_node_into_stack(
-                        storage_pointer.location(),
-                        current_key.clone(),
-                        None,
-                    )?;
-                    return Ok(self.current_key_and_node());
-                } else {
-                    // No storage, backtrack to find next account
-                    self.backtrack_from_leaf()
-                }
-            }
-            Node::StorageLeaf { .. } => {
-                // Storage leaf with remaining path, find next higher key
-                self.find_next_higher_key_from_current_level(target_key, path_offset)
-            }
+            Node::AccountLeaf { .. } => self.backtrack_from_leaf(),
+            Node::StorageLeaf { .. } => self.backtrack_from_leaf(),
         }
     }
 
@@ -316,7 +244,7 @@ impl<'c> Cursor<'c> {
         if !self.key_stack.is_empty() {
             let current_loc = self.loc_stack.pop().unwrap();
             if current_loc.page_id().is_some() {
-                self.page_stack.pop();
+                self.page_id_stack.pop();
             }
             self.node_stack.pop();
             self.key_stack.pop();
@@ -367,31 +295,29 @@ impl<'c> Cursor<'c> {
         self.loc_stack.push(child_location);
 
         if child_location.page_id().is_some() {
-            let child_page = self
-                .storage_engine
-                .get_page(&self.context, child_location.page_id().unwrap())
-                .map_err(|_| CursorError::InvalidKey)?;
-            let child_slotted_page =
-                SlottedPage::try_from(child_page).map_err(|_| CursorError::InvalidKey)?;
-            let child_node: Node =
-                child_slotted_page.get_value(0).map_err(|_| CursorError::InvalidKey)?;
+            self.page_id_stack.push(child_location.page_id().unwrap());
+        }
 
-            let child_key = Self::build_child_key(parent_key, child_index, &child_node);
-            self.key_stack.push(child_key);
-            self.page_stack.push(child_slotted_page);
-            self.node_stack.push(child_node);
-        } else {
-            let child_node: Node = self
-                .page_stack
-                .last()
-                .unwrap()
+        let child_page_id = self.page_id_stack.last().unwrap().clone();
+
+        let child_page = self
+            .storage_engine
+            .get_page(&self.context, child_page_id)
+            .map_err(|_| CursorError::InvalidKey)?;
+        let child_slotted_page =
+            SlottedPage::try_from(child_page).map_err(|_| CursorError::InvalidKey)?;
+
+        let child_node: Node = if child_location.cell_index().is_some() {
+            child_slotted_page
                 .get_value(child_location.cell_index().unwrap())
-                .map_err(|_| CursorError::InvalidKey)?;
-
-            let child_key = Self::build_child_key(parent_key, child_index, &child_node);
-            self.key_stack.push(child_key);
-            self.node_stack.push(child_node);
+                .map_err(|_| CursorError::InvalidKey)?
+        } else {
+            child_slotted_page.get_value(0).unwrap()
         };
+
+        let child_key = Self::build_child_key(parent_key, child_index, &child_node);
+        self.key_stack.push(child_key);
+        self.node_stack.push(child_node);
 
         Ok(())
     }
@@ -423,13 +349,70 @@ impl<'c> Cursor<'c> {
         let root_key = root_node.prefix().clone();
 
         self.loc_stack.push(Location::for_page(root_node_page_id));
-        self.page_stack.push(root_slotted_page);
+        self.page_id_stack.push(root_node_page_id);
         self.node_stack.push(root_node);
         self.key_stack.push(root_key);
+
+        if let Some(account_key) = self.account_key {
+            let result = self.seek(&Nibbles::unpack(account_key))?;
+            match result {
+                Some((key, _)) => {
+                    if key == &Nibbles::unpack(account_key) {
+                        self.initialize_storage_stacks()?;
+                        println!("initialize_storage_stacks {:?}", self);
+                        return Ok(self.current_key_and_node());
+                    } else {
+                        self.initialize_storage_stacks()?;
+                        return Ok(None);
+                    }
+                }
+                None => {
+                    return Ok(None);
+                }
+            }
+        }
 
         let key_ref = self.key_stack.last().unwrap();
         let node_ref = self.node_stack.last().unwrap();
         Ok(Some((key_ref, node_ref)))
+    }
+
+    fn initialize_storage_stacks(&mut self) -> Result<(), CursorError> {
+        let (current_key, current_node) = self.current_key_and_node().unwrap();
+        let storage_root = current_node.direct_child().unwrap();
+        if storage_root.is_none() {
+            self.loc_stack.clear();
+            self.page_id_stack.clear();
+            self.node_stack.clear();
+            self.key_stack.clear();
+            return Ok(());
+        }
+
+        let storage_root_pointer = storage_root.unwrap();
+        self.load_child_node_into_stack(
+            storage_root_pointer.location(),
+            current_key.clone(),
+            None,
+        )?;
+
+        let storage_root_loc = self.loc_stack.pop().unwrap();
+        self.loc_stack.clear();
+        self.loc_stack.push(storage_root_loc);
+
+        let storage_root_page_id = self.page_id_stack.pop().unwrap();
+        self.page_id_stack.clear();
+        self.page_id_stack.push(storage_root_page_id);
+
+        let storage_root_node = self.node_stack.pop().unwrap();
+        let storage_root_key = storage_root_node.prefix().clone();
+
+        self.node_stack.clear();
+        self.node_stack.push(storage_root_node);
+
+        self.key_stack.clear();
+        self.key_stack.push(storage_root_key);
+
+        Ok(())
     }
 
     /// Traverse children of a branch node
@@ -461,7 +444,7 @@ impl<'c> Cursor<'c> {
             // Pop current node
             let current_loc = self.loc_stack.pop().unwrap();
             if current_loc.page_id().is_some() {
-                self.page_stack.pop();
+                self.page_id_stack.pop();
             }
             self.node_stack.pop();
             let current_key = self.key_stack.pop().unwrap();
@@ -469,11 +452,6 @@ impl<'c> Cursor<'c> {
             // If we've reached the root, we're done
             if self.node_stack.is_empty() {
                 return Ok(None);
-            }
-            let parent_node = self.node_stack.last().unwrap();
-            if matches!(parent_node, Node::AccountLeaf { .. }) {
-                // If we've reached an account leaf, we need to backtrack to its parent
-                continue;
             }
 
             let parent_key = self.key_stack.last().unwrap().clone();
@@ -521,32 +499,27 @@ impl<'c> Cursor<'c> {
         // Pop current leaf node from stacks
         let current_loc = self.loc_stack.pop().unwrap();
         if current_loc.page_id().is_some() {
-            self.page_stack.pop();
+            self.page_id_stack.pop();
         }
         self.node_stack.pop();
         let mut child_key = self.key_stack.pop().unwrap();
 
         // Now continue backtracking until we find a parent with a next sibling
         while !self.node_stack.is_empty() {
-            let parent_node = self.node_stack.last().unwrap();
+            let parent_key = self.key_stack.last().unwrap();
 
-            // If we've reached an account leaf, we need to backtrack to its parent
-            if !matches!(parent_node, Node::AccountLeaf { .. }) {
-                let parent_key = self.key_stack.last().unwrap();
+            // Get the current child index from the child_key
+            let current_child_index = child_key.get(parent_key.len()).unwrap();
 
-                // Get the current child index from the child_key
-                let current_child_index = child_key.get(parent_key.len()).unwrap();
-
-                // Try to find the next sibling
-                if self.find_next_sibling_from_index(current_child_index + 1)? {
-                    return Ok(self.current_key_and_node());
-                }
+            // Try to find the next sibling
+            if self.find_next_sibling_from_index(current_child_index + 1)? {
+                return Ok(self.current_key_and_node());
             }
 
             // No sibling found at this level, backtrack further
             let current_loc = self.loc_stack.pop().unwrap();
             if current_loc.page_id().is_some() {
-                self.page_stack.pop();
+                self.page_id_stack.pop();
             }
             self.node_stack.pop();
             child_key = self.key_stack.pop().unwrap();
@@ -559,26 +532,32 @@ impl<'c> Cursor<'c> {
 
 #[cfg(test)]
 mod tests {
+    use alloy_primitives::{Address, B256, U256};
+
     use crate::{
-        path::AddressPath,
+        node::TrieValue,
+        path::{AddressPath, StoragePath},
         storage::test_utils::{create_test_account, create_test_engine},
     };
 
     use super::*;
 
     #[test]
-    fn test_cursor() {
+    fn test_account_cursor() {
         let (storage_engine, mut context) = create_test_engine(100);
 
         // top branch has 2 children, one is a leaf and the other is a branch with 2 children
 
-        let path1 = AddressPath::new(Nibbles::from_vec(vec![1; 64]));
+        let address_path1 = AddressPath::new(Nibbles::from_vec(vec![1; 64]));
         let account1 = create_test_account(1, 1);
 
-        let path2 = AddressPath::new(Nibbles::from_vec(vec![2; 64]));
+        let address_path2 = AddressPath::new(Nibbles::from_vec(vec![2; 64]));
         let account2 = create_test_account(2, 2);
 
-        let path3 = AddressPath::new(Nibbles::from_vec(
+        let addr2_storage1 =
+            StoragePath::for_address_path_and_slot(address_path2.clone(), B256::from([0x01; 32]));
+
+        let address_path3 = AddressPath::new(Nibbles::from_vec(
             vec![2, 2].into_iter().chain(vec![3; 62]).collect::<Vec<_>>(),
         ));
         let account3 = create_test_account(3, 3);
@@ -587,15 +566,18 @@ mod tests {
             .set_values(
                 &mut context,
                 vec![
-                    (path1.clone().into(), Some(account1.clone().into())),
-                    (path2.clone().into(), Some(account2.clone().into())),
-                    (path3.clone().into(), Some(account3.clone().into())),
+                    (address_path1.clone().into(), Some(account1.clone().into())),
+                    (address_path2.clone().into(), Some(account2.clone().into())),
+                    (addr2_storage1.clone().into(), Some(U256::from(123).into())),
+                    (address_path3.clone().into(), Some(account3.clone().into())),
                 ]
                 .as_mut(),
             )
             .unwrap();
 
-        let mut cursor = Cursor::new(&storage_engine, &context);
+        let mut cursor = Cursor::new_account_cursor(Arc::new(storage_engine), context);
+
+        // first item found is the root node (branch)
         let result = cursor.next();
         let (key, branch_node) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::default());
@@ -603,12 +585,14 @@ mod tests {
         assert!(branch_node.child(1).unwrap().is_some());
         assert!(branch_node.child(2).unwrap().is_some());
 
+        // second item found is the first account leaf node
         let result = cursor.next();
         let (key, leaf_node) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
         assert_eq!(leaf_node.prefix(), &Nibbles::from_vec(vec![1; 63]));
         assert!(matches!(leaf_node, Node::AccountLeaf { .. }));
 
+        // current also returns the first account leaf node
         let result = cursor.current();
         assert!(result.is_some());
         let (key, leaf_node) = result.unwrap();
@@ -616,6 +600,7 @@ mod tests {
         assert_eq!(leaf_node.prefix(), &Nibbles::from_vec(vec![1; 63]));
         assert!(matches!(leaf_node, Node::AccountLeaf { .. }));
 
+        // next item found is the nested branch node
         let result = cursor.next();
         let (key, branch_node) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![2, 2]));
@@ -623,12 +608,14 @@ mod tests {
         assert!(branch_node.child(2).unwrap().is_some());
         assert!(branch_node.child(3).unwrap().is_some());
 
+        // next item found is the second account leaf node
         let result = cursor.next();
         let (key, leaf_node) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![2; 64]));
         assert_eq!(leaf_node.prefix(), &Nibbles::from_vec(vec![2; 61]));
         assert!(matches!(leaf_node, Node::AccountLeaf { .. }));
 
+        // next item found is the third account leaf node (skipping the second account's storage)
         let result = cursor.next();
         let (key, leaf_node) = result.unwrap().unwrap();
         assert_eq!(
@@ -638,16 +625,14 @@ mod tests {
         assert_eq!(leaf_node.prefix(), &Nibbles::from_vec(vec![3; 61]));
         assert!(matches!(leaf_node, Node::AccountLeaf { .. }));
 
+        // no more account trie nodes found
         let result = cursor.next();
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
     }
 
     #[test]
-    fn test_cursor_with_storage() {
-        use crate::{node::TrieValue, path::StoragePath};
-        use alloy_primitives::{Address, B256, U256};
-
+    fn test_storage_cursor() {
         let (storage_engine, mut context) = create_test_engine(300);
 
         // Create an account
@@ -669,7 +654,7 @@ mod tests {
             .set_values(
                 &mut context,
                 vec![
-                    (account_path.into(), Some(TrieValue::Account(account.clone()))),
+                    (account_path.clone().into(), Some(TrieValue::Account(account.clone()))),
                     (storage_path1.into(), Some(TrieValue::Storage(storage_value1))),
                     (storage_path2.into(), Some(TrieValue::Storage(storage_value2))),
                 ]
@@ -677,20 +662,22 @@ mod tests {
             )
             .unwrap();
 
-        let mut cursor = Cursor::new(&storage_engine, &context);
+        let mut cursor =
+            Cursor::new_storage_cursor(Arc::new(storage_engine), context, account_path.into());
 
         // Iterate through all nodes and count what we find
         let mut found_account = false;
         let mut found_storage_nodes = 0;
+        let mut found_nodes = 0;
 
         while let Ok(Some((key, node))) = cursor.next() {
+            found_nodes += 1;
             match node {
                 Node::AccountLeaf { .. } => {
-                    assert_eq!(key.len(), 64);
                     found_account = true;
                 }
                 Node::StorageLeaf { .. } => {
-                    assert_eq!(key.len(), 128);
+                    assert_eq!(key.len(), 64);
                     found_storage_nodes += 1;
                 }
                 _ => {}
@@ -698,12 +685,46 @@ mod tests {
         }
 
         // We should have found the account and storage entries
-        assert!(found_account, "Should have found the account node");
+        assert!(!found_account, "Should not have found the account node");
         assert!(found_storage_nodes > 0, "Should have found storage nodes");
+        assert_eq!(found_nodes, 3, "Should have found 3 nodes");
     }
 
     #[test]
-    fn test_cursor_seek() {
+    fn test_storage_cursor_no_account_storage() {
+        let (storage_engine, mut context) = create_test_engine(100);
+
+        // Create an account
+        let address = Address::from([0x42; 20]);
+        let account = create_test_account(100, 1);
+        let account_path = AddressPath::for_address(address);
+
+        // Set account and storage values
+        storage_engine
+            .set_values(
+                &mut context,
+                vec![
+                    (account_path.clone().into(), Some(TrieValue::Account(account.clone()))),
+                ]
+                .as_mut(),
+            )
+            .unwrap();
+
+        let mut cursor =
+            Cursor::new_storage_cursor(Arc::new(storage_engine), context.clone(), account_path.into());
+
+        let result = cursor.next();
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+
+        let mut cursor = Cursor::new_storage_cursor(cursor.storage_engine.clone(), context, B256::from([0x00; 32]));
+        let result = cursor.next();
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_account_cursor_seek() {
         let (storage_engine, mut context) = create_test_engine(100);
 
         // Create accounts with different patterns to test nearby seeking
@@ -723,12 +744,23 @@ mod tests {
             storage_engine
                 .set_values(
                     &mut context,
-                    vec![(path.into(), Some(account.clone().into()))].as_mut(),
+                    vec![
+                        (path.clone().into(), Some(account.clone().into())),
+                        (
+                            StoragePath::for_address_path_and_slot(
+                                path.clone(),
+                                B256::from([0x01; 32]),
+                            )
+                            .into(),
+                            Some(U256::from(123).into()),
+                        ),
+                    ]
+                    .as_mut(),
                 )
                 .unwrap();
         }
 
-        let mut cursor = Cursor::new(&storage_engine, &context);
+        let mut cursor = Cursor::new_account_cursor(Arc::new(storage_engine), context);
 
         // First, position the cursor at [1, 0, 0, 0, ...]
         let mut target1 = vec![1, 0];
@@ -797,7 +829,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_seek_storage() {
+    fn test_storage_cursor_seek() {
         use crate::{node::TrieValue, path::StoragePath};
         use alloy_primitives::{Address, B256, U256};
 
@@ -822,7 +854,7 @@ mod tests {
             .set_values(
                 &mut context,
                 vec![
-                    (account_path.into(), Some(TrieValue::Account(account.clone()))),
+                    (account_path.clone().into(), Some(TrieValue::Account(account.clone()))),
                     (storage_path1.full_path(), Some(TrieValue::Storage(storage_value1))),
                     (storage_path2.full_path(), Some(TrieValue::Storage(storage_value2))),
                 ]
@@ -830,19 +862,46 @@ mod tests {
             )
             .unwrap();
 
-        let mut cursor = Cursor::new(&storage_engine, &context);
+        let mut cursor = Cursor::new_storage_cursor(
+            Arc::new(storage_engine),
+            context,
+            account_path.clone().into(),
+        );
 
-        // Seek to the first storage slot
-        let result = cursor.seek(&storage_path1.full_path());
+        // Seek to an empty path (should find the root branch)
+        let result = cursor.seek(&Nibbles::default());
         assert!(result.is_ok());
         let result = result.unwrap();
         assert!(result.is_some());
+        assert_eq!(result.unwrap().0, &Nibbles::default());
+        assert!(matches!(result.unwrap().1, Node::Branch { .. }));
+
+        // Seek to the first storage slot
+        let result = cursor.seek(storage_path1.get_slot());
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().0, storage_path1.get_slot());
+
+        // Seek to the storage slot defined by all zero bytes (should find next higher)
+        let missing_storage_key = B256::from([0x00; 32]);
+        let result = cursor.seek(&Nibbles::unpack(missing_storage_key));
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().0, storage_path1.get_slot());
 
         // Seek to a storage slot that doesn't exist (should find next higher)
         let missing_storage_key = B256::from([0x03; 32]);
-        let missing_storage_path = StoragePath::for_address_and_slot(address, missing_storage_key);
-        let result = cursor.seek(&missing_storage_path.full_path());
+        let result = cursor.seek(&Nibbles::unpack(missing_storage_key));
         assert!(result.is_ok());
-        // Should find the next storage slot (storage_key2) or the next account
+        let result = result.unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().0, storage_path1.get_slot());
+
+        // Seek to the very end of the storage trie (should find nothing)
+        let result = cursor.seek(&Nibbles::from_vec(vec![0x0F; 32]));
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
     }
 }

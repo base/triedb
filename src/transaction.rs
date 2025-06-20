@@ -132,8 +132,12 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         Ok(())
     }
 
-    pub fn new_cursor(&self) -> Cursor<'_> {
-        Cursor::new(&self.database.storage_engine, &self.context)
+    pub fn new_account_cursor(&self) -> Cursor {
+        Cursor::new_account_cursor(&self.database.storage_engine, &self.context)
+    }
+
+    pub fn new_storage_cursor(&self, address_path: AddressPath) -> Cursor {
+        Cursor::new_storage_cursor(&self.database.storage_engine, &self.context, address_path.into())
     }
 }
 
