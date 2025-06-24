@@ -581,7 +581,7 @@ impl MetadataManager {
     pub fn wipe(&mut self) -> io::Result<()> {
         let size = Self::SIZE_MIN;
         self.file.set_len(size)?;
-        self.mmap.as_mut()[size as usize..].fill(0);
+        self.mmap.as_mut()[..size as usize].fill(0);
         Ok(())
     }
 

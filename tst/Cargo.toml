@@ -1,0 +1,13 @@
+[package]
+name = "tst"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+triedb = { path = ".." }
+alloy-primitives = { version = "1.2.1", features = ["arbitrary", "rand"] }
+alloy-trie = { version = "0.8.1", features = ["arbitrary", "ethereum"] }
+rand = "0.9.1"
+
+[profile.release]
+debug = true
