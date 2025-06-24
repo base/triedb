@@ -1878,7 +1878,7 @@ impl StorageEngine {
             .meta_manager
             .lock()
             .orphan_pages()
-            .pop_if(|orphan| orphan.orphaned_at() <= alive_snapshot)
+            .pop(alive_snapshot)
             .map(|orphan| orphan.page_id());
 
         let page_to_return = if let Some(orphaned_page_id) = orphaned_page_id {

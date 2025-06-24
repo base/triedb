@@ -693,52 +693,41 @@ impl<'a> OrphanPages<'a> {
         Err(orphan)
     }
 
-    /// Reclaims an page from the orphan page list.
-    pub fn pop(&mut self) -> Option<OrphanPage> {
+    /// Reclaims a page from the orphan page list.
+    ///
+    /// The returned page (if any) is guaranteed to have been orphaned at `snapshot_threshold` or
+    /// earlier.
+    ///
+    /// This method uses an optimized algorithm that may return `None` even if an orphan page
+    /// exists.
+    pub fn pop(&mut self, snapshot_threshold: SnapshotId) -> Option<OrphanPage> {
         let (_, dirty, list) = self.manager.parts_mut();
         let (left, right) = dirty.actual_orphans_ranges();
 
-        if !right.is_empty() {
-            dirty.reclaimed_orphans_end += 1;
-            Some(list[right.start])
-        } else if !left.is_empty() {
-            dirty.reclaimed_orphans_start -= 1;
-            dirty.reclaimed_orphans_end += 1;
-            Some(list[left.end - 1])
-        } else {
-            None
-        }
-    }
-
-    /// Reclaims a page from the orphan page list that satisfies the given predicate.
-    pub fn pop_if(&mut self, mut predicate: impl FnMut(OrphanPage) -> bool) -> Option<OrphanPage> {
-        let (_, dirty, list) = self.manager.parts_mut();
-        let (left, right) = dirty.actual_orphans_ranges();
+        // The following code checks the `left` and `right` ranges for orphaned pages that have an
+        // `orphaned_at()` equal or below `snapshot_threshold`.
+        //
+        // Instead of scanning the whole `left` and `right` lists, the code only check the boundary
+        // elements. The assumption is that snapshot IDs are always increasing, never decreasing,
+        // and therefore each call to `push()` always adds pages with an increasing
+        // `orphaned_at()`. So if the first element has an `orphaned_at()` that is already too
+        // high, there's no point in checking the other elements, because they will also be above
+        // the threshold.
 
         if !right.is_empty() {
-            let right_bound = right.start;
-
-            for index in right {
-                let page_id = list[index];
-                if predicate(page_id) {
-                    list.swap(index, right_bound);
-                    dirty.reclaimed_orphans_end += 1;
-                    return Some(page_id);
-                }
+            let orphan = list[right.start];
+            if orphan.orphaned_at() <= snapshot_threshold {
+                dirty.reclaimed_orphans_end += 1;
+                return Some(orphan);
             }
         }
 
         if !left.is_empty() {
-            let left_bound = left.end - 1;
-
-            for index in left {
-                let page_id = list[index];
-                if predicate(page_id) {
-                    list.swap(index, left_bound);
-                    dirty.reclaimed_orphans_start -= 1;
-                    dirty.reclaimed_orphans_end += 1;
-                    return Some(page_id);
-                }
+            let orphan = list[left.end - 1];
+            if orphan.orphaned_at() <= snapshot_threshold {
+                dirty.reclaimed_orphans_start -= 1;
+                dirty.reclaimed_orphans_end += 1;
+                return Some(orphan);
             }
         }
 
@@ -831,7 +820,7 @@ mod tests {
         }
 
         fn pop(manager: &mut MetadataManager, expected: &mut HashSet<OrphanPage>) {
-            match manager.orphan_pages().pop() {
+            match manager.orphan_pages().pop(1) {
                 None => assert!(
                     expected.is_empty(),
                     "metadata manager did not return an orphan page even though {} are available",
