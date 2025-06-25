@@ -90,14 +90,17 @@ impl Cursor {
     pub fn seek(&mut self, key: &Nibbles) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
         println!("seek from {:?} to {:?}", self.current_key_and_node(), key);
         // If not initialized, start from root
-        if !self.initialized {
+        if !self.initialized || self.key_stack.is_empty() {
             self.initialized = true;
-            self.start_from_root()?;
-        }
-
-        // If we have no current position, start from root
-        if self.key_stack.is_empty() {
-            self.start_from_root()?;
+            match self.start_from_root()? {
+                Some((new_key, _)) => {
+                    // If the new key is greater than or equal to the target key, return it
+                    if new_key >= key {
+                        return Ok(self.current_key_and_node());
+                    }
+                }
+                None => return Ok(None),
+            }
         }
 
         let current_key = self.key_stack.last().unwrap();
@@ -116,7 +119,10 @@ impl Cursor {
         match self.current_key_and_node() {
             Some((_, node)) => {
                 // Continue seeking from the common ancestor
-                self.seek_recursive(key, common_prefix_len - node.prefix().len())
+                self.seek_recursive(
+                    key,
+                    common_prefix_len - std::cmp::min(common_prefix_len, node.prefix().len()),
+                )
             }
             // If we've backtracked to empty, no higher key exists
             None => Ok(None),
@@ -128,9 +134,10 @@ impl Cursor {
         &mut self,
         target_prefix_len: usize,
     ) -> Result<(), CursorError> {
-        // Keep popping until we reach a key that is a prefix of the target length
+        // Keep popping until we reach a key that is a prefix of the target length or we've popped
+        // all the way to the root
         while let Some(current_key) = self.key_stack.last() {
-            if current_key.len() <= target_prefix_len {
+            if current_key.len() <= target_prefix_len || self.node_stack.len() <= 1 {
                 break;
             }
 
@@ -153,6 +160,10 @@ impl Cursor {
         path_offset: usize,
     ) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
         let (current_key, current_node) = self.current_key_and_node().unwrap();
+        // println!(
+        //     "seek_recursive {:?}, {:?}, {:?}, {:?}",
+        //     current_key, current_node, target_key, path_offset
+        // );
 
         // Compare current node's prefix with remaining target path
         let remaining_target = if path_offset < target_key.len() {
@@ -342,6 +353,10 @@ impl Cursor {
 
     /// Initialize cursor from root node
     fn start_from_root(&mut self) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
+        if self.context.root_node_page_id.is_none() {
+            return Ok(None);
+        }
+
         let root_node_page_id = self.context.root_node_page_id.unwrap();
         let root_page = self.storage_engine.get_page(&self.context, root_node_page_id).unwrap();
         let root_slotted_page = SlottedPage::try_from(root_page).unwrap();
@@ -543,6 +558,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_single_account_cursor() {
+        let (storage_engine, mut context) = create_test_engine(100);
+
+        let address_path = AddressPath::new(Nibbles::from_vec(vec![1; 64]));
+        let account = create_test_account(1, 1);
+
+        storage_engine
+            .set_values(
+                &mut context,
+                vec![(address_path.into(), Some(TrieValue::Account(account.clone())))].as_mut(),
+            )
+            .unwrap();
+
+        let mut cursor = Cursor::new_account_cursor(Arc::new(storage_engine), context);
+
+        // first item found is the single account leaf node
+        let result = cursor.next();
+        assert!(result.is_ok());
+        let (key, node) = result.unwrap().unwrap();
+        assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
+        assert!(matches!(node, Node::AccountLeaf { .. }), "node: {:?}", node);
+
+        // next item found is none
+        let result = cursor.next();
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+
+        // seek to the same key as the first item
+        let result = cursor.seek(&Nibbles::from_vec(vec![1; 64]));
+        assert!(result.is_ok());
+        let (key, node) = result.unwrap().unwrap();
+        assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
+        assert!(matches!(node, Node::AccountLeaf { .. }), "node: {:?}", node);
+
+        // seek to a key that is less than the first item
+        let result = cursor.seek(&Nibbles::from_vec(vec![0; 64]));
+        assert!(result.is_ok());
+        let (key, node) = result.unwrap().unwrap();
+        assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
+        assert!(matches!(node, Node::AccountLeaf { .. }), "node: {:?}", node);
+
+        // seek to a key that is greater than the first item
+        let result = cursor.seek(&Nibbles::from_vec(vec![15; 64]));
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
     fn test_account_cursor() {
         let (storage_engine, mut context) = create_test_engine(100);
 
@@ -632,6 +695,63 @@ mod tests {
     }
 
     #[test]
+    fn test_single_storage_cursor() {
+        let (storage_engine, mut context) = create_test_engine(100);
+
+        let address_path = AddressPath::for_address(Address::from([0x42; 20]));
+        let account = create_test_account(1, 1);
+        let storage_key = Nibbles::from_vec(vec![1; 64]);
+        let storage_value = U256::from(0x1111);
+
+        storage_engine
+            .set_values(
+                &mut context,
+                vec![
+                    (address_path.clone().into(), Some(TrieValue::Account(account.clone()))),
+                    (
+                        StoragePath::for_address_path_and_slot_hash(
+                            address_path.clone(),
+                            storage_key.clone(),
+                        )
+                        .into(),
+                        Some(TrieValue::Storage(storage_value.clone())),
+                    ),
+                ]
+                .as_mut(),
+            )
+            .unwrap();
+
+        let mut cursor =
+            Cursor::new_storage_cursor(Arc::new(storage_engine), context, address_path.into());
+
+        // first item found is the storage leaf node
+        let result = cursor.next();
+        assert!(result.is_ok());
+        let (key, node) = result.unwrap().unwrap();
+        assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
+        assert!(matches!(node, Node::StorageLeaf { .. }), "node: {:?}", node);
+
+        // seek to the same key as the first item
+        let result = cursor.seek(&Nibbles::from_vec(vec![1; 64]));
+        assert!(result.is_ok());
+        let (key, node) = result.unwrap().unwrap();
+        assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
+        assert!(matches!(node, Node::StorageLeaf { .. }), "node: {:?}", node);
+
+        // seek to a key that is less than the first item
+        let result = cursor.seek(&Nibbles::from_vec(vec![0; 64]));
+        assert!(result.is_ok());
+        let (key, node) = result.unwrap().unwrap();
+        assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
+        assert!(matches!(node, Node::StorageLeaf { .. }), "node: {:?}", node);
+
+        // seek to a key that is greater than the first item
+        let result = cursor.seek(&Nibbles::from_vec(vec![15; 64]));
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
     fn test_storage_cursor() {
         let (storage_engine, mut context) = create_test_engine(300);
 
@@ -703,21 +823,26 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
-                vec![
-                    (account_path.clone().into(), Some(TrieValue::Account(account.clone()))),
-                ]
-                .as_mut(),
+                vec![(account_path.clone().into(), Some(TrieValue::Account(account.clone())))]
+                    .as_mut(),
             )
             .unwrap();
 
-        let mut cursor =
-            Cursor::new_storage_cursor(Arc::new(storage_engine), context.clone(), account_path.into());
+        let mut cursor = Cursor::new_storage_cursor(
+            Arc::new(storage_engine),
+            context.clone(),
+            account_path.into(),
+        );
 
         let result = cursor.next();
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
 
-        let mut cursor = Cursor::new_storage_cursor(cursor.storage_engine.clone(), context, B256::from([0x00; 32]));
+        let mut cursor = Cursor::new_storage_cursor(
+            cursor.storage_engine.clone(),
+            context,
+            B256::from([0x00; 32]),
+        );
         let result = cursor.next();
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());

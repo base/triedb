@@ -1936,6 +1936,20 @@ pub enum Error {
     DebugError(String),
 }
 
+impl Clone for Error {
+    fn clone(&self) -> Self {
+        match self {
+            Self::IO(e) => Self::IO(std::io::Error::new(e.kind(), e.to_string())),
+            Self::NodeError(e) => Self::NodeError(e.clone()),
+            Self::PageError(e) => Self::PageError(e.clone()),
+            Self::InvalidCommonPrefixIndex => Self::InvalidCommonPrefixIndex,
+            Self::InvalidSnapshotId => Self::InvalidSnapshotId,
+            Self::PageSplit(e) => Self::PageSplit(*e),
+            Self::DebugError(e) => Self::DebugError(e.clone()),
+        }
+    }
+}
+
 impl From<PageError> for Error {
     fn from(error: PageError) -> Self {
         Self::PageError(error)

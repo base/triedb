@@ -6,7 +6,8 @@ use crate::{
     context::TransactionContext,
     database::Database,
     node::TrieValue,
-    path::{AddressPath, StoragePath}, storage::cursor::Cursor,
+    path::{AddressPath, StoragePath},
+    storage::cursor::Cursor,
 };
 use alloy_primitives::{StorageValue, B256};
 use alloy_trie::Nibbles;
@@ -34,21 +35,21 @@ impl TransactionKind for RO {}
 // Compile-time assertion to ensure that `Transaction` is `Send`
 const _: fn() = || {
     fn consumer<T: Send>() {}
-    consumer::<Transaction<'_, RO>>();
-    consumer::<Transaction<'_, RW>>();
+    consumer::<Transaction<RO>>();
+    consumer::<Transaction<RW>>();
 };
 
 #[derive(Debug)]
-pub struct Transaction<'tx, K: TransactionKind> {
+pub struct Transaction<K: TransactionKind> {
     committed: bool,
     context: TransactionContext,
-    database: &'tx Database,
+    database: Database,
     pending_changes: HashMap<Nibbles, Option<TrieValue>>,
     _marker: std::marker::PhantomData<K>,
 }
 
-impl<'tx, K: TransactionKind> Transaction<'tx, K> {
-    pub(crate) fn new(context: TransactionContext, database: &'tx Database) -> Self {
+impl<K: TransactionKind> Transaction<K> {
+    pub(crate) fn new(context: TransactionContext, database: Database) -> Self {
         Self {
             committed: false,
             context,
@@ -62,9 +63,13 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         &mut self,
         address_path: AddressPath,
     ) -> Result<Option<Account>, TransactionError> {
-        let account =
-            self.database.storage_engine.get_account(&mut self.context, address_path).unwrap();
-        self.database.update_metrics_ro(&self.context);
+        let account = self
+            .database
+            .inner
+            .storage_engine
+            .get_account(&mut self.context, address_path)
+            .unwrap();
+        self.database.inner.update_metrics_ro(&self.context);
         Ok(account)
     }
 
@@ -72,9 +77,13 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         &mut self,
         storage_path: StoragePath,
     ) -> Result<Option<StorageValue>, TransactionError> {
-        let storage_slot =
-            self.database.storage_engine.get_storage(&mut self.context, storage_path).unwrap();
-        self.database.update_metrics_ro(&self.context);
+        let storage_slot = self
+            .database
+            .inner
+            .storage_engine
+            .get_storage(&mut self.context, storage_path)
+            .unwrap();
+        self.database.inner.update_metrics_ro(&self.context);
         Ok(storage_slot)
     }
 
@@ -88,6 +97,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
     ) -> Result<Option<(Account, MultiProof)>, TransactionError> {
         let result = self
             .database
+            .inner
             .storage_engine
             .get_account_with_proof(&self.context, address_path)
             .unwrap();
@@ -100,6 +110,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
     ) -> Result<Option<(StorageValue, MultiProof)>, TransactionError> {
         let result = self
             .database
+            .inner
             .storage_engine
             .get_storage_with_proof(&self.context, storage_path)
             .unwrap();
@@ -113,6 +124,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         verbosity_level: u8,
     ) -> Result<(), TransactionError> {
         self.database
+            .inner
             .storage_engine
             .print_path(&self.context, address_path.to_nibbles(), output_file, verbosity_level)
             .unwrap();
@@ -126,6 +138,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         verbosity_level: u8,
     ) -> Result<(), TransactionError> {
         self.database
+            .inner
             .storage_engine
             .print_path(&self.context, &storage_path.full_path(), output_file, verbosity_level)
             .unwrap();
@@ -133,15 +146,19 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
     }
 
     pub fn new_account_cursor(&self) -> Cursor {
-        Cursor::new_account_cursor(&self.database.storage_engine, &self.context)
+        Cursor::new_account_cursor(self.database.inner.storage_engine.clone(), self.context.clone())
     }
 
     pub fn new_storage_cursor(&self, address_path: AddressPath) -> Cursor {
-        Cursor::new_storage_cursor(&self.database.storage_engine, &self.context, address_path.into())
+        Cursor::new_storage_cursor(
+            self.database.inner.storage_engine.clone(),
+            self.context.clone(),
+            address_path.into(),
+        )
     }
 }
 
-impl Transaction<'_, RW> {
+impl Transaction<RW> {
     pub fn set_account(
         &mut self,
         address_path: AddressPath,
@@ -160,18 +177,35 @@ impl Transaction<'_, RW> {
         Ok(())
     }
 
+    pub fn apply_changes(&mut self) -> Result<(), TransactionError> {
+        let mut changes =
+            self.pending_changes.drain().collect::<Vec<(Nibbles, Option<TrieValue>)>>();
+        if !changes.is_empty() {
+            self.database
+                .inner
+                .storage_engine
+                .set_values(&mut self.context, changes.as_mut())
+                .unwrap();
+        }
+        Ok(())
+    }
+
     pub fn commit(mut self) -> Result<(), TransactionError> {
         let mut changes =
             self.pending_changes.drain().collect::<Vec<(Nibbles, Option<TrieValue>)>>();
 
         if !changes.is_empty() {
-            self.database.storage_engine.set_values(&mut self.context, changes.as_mut()).unwrap();
+            self.database
+                .inner
+                .storage_engine
+                .set_values(&mut self.context, changes.as_mut())
+                .unwrap();
         }
 
-        let mut transaction_manager = self.database.transaction_manager.lock();
-        self.database.storage_engine.commit(&self.context).unwrap();
+        let mut transaction_manager = self.database.inner.transaction_manager.lock();
+        self.database.inner.storage_engine.commit(&self.context).unwrap();
 
-        self.database.update_metrics_rw(&self.context);
+        self.database.inner.update_metrics_rw(&self.context);
 
         transaction_manager.remove_tx(self.context.snapshot_id, true);
 
@@ -180,9 +214,9 @@ impl Transaction<'_, RW> {
     }
 
     pub fn rollback(mut self) -> Result<(), TransactionError> {
-        self.database.storage_engine.rollback(&self.context).unwrap();
+        self.database.inner.storage_engine.rollback(&self.context).unwrap();
 
-        let mut transaction_manager = self.database.transaction_manager.lock();
+        let mut transaction_manager = self.database.inner.transaction_manager.lock();
         transaction_manager.remove_tx(self.context.snapshot_id, true);
 
         self.committed = false;
@@ -190,9 +224,9 @@ impl Transaction<'_, RW> {
     }
 }
 
-impl Transaction<'_, RO> {
+impl Transaction<RO> {
     pub fn commit(mut self) -> Result<(), TransactionError> {
-        let mut transaction_manager = self.database.transaction_manager.lock();
+        let mut transaction_manager = self.database.inner.transaction_manager.lock();
         transaction_manager.remove_tx(self.context.snapshot_id, false);
 
         self.committed = true;
@@ -200,7 +234,7 @@ impl Transaction<'_, RO> {
     }
 }
 
-impl<K: TransactionKind> Drop for Transaction<'_, K> {
+impl<K: TransactionKind> Drop for Transaction<K> {
     fn drop(&mut self) {
         // TODO: panic if the transaction is not committed
     }
