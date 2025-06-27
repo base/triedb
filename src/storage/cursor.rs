@@ -2,11 +2,12 @@ use std::sync::Arc;
 
 use alloy_primitives::B256;
 use alloy_trie::Nibbles;
+use reth_trie_common::RlpNode;
 
 use crate::{
     context::TransactionContext,
     location::Location,
-    node::Node,
+    node::{encode_branch, Node},
     page::{PageId, SlottedPage},
     storage::engine::StorageEngine,
 };
@@ -19,6 +20,7 @@ pub struct Cursor {
     page_id_stack: Vec<PageId>,
     node_stack: Vec<Node>,
     key_stack: Vec<Nibbles>,
+    hash_stack: Vec<B256>,
     initialized: bool,
     account_key: Option<B256>,
 }
@@ -56,58 +58,64 @@ impl Cursor {
             page_id_stack: Vec::new(),
             node_stack: Vec::new(),
             key_stack: Vec::new(),
+            hash_stack: Vec::new(),
             initialized: false,
             account_key,
         }
     }
 
     /// Return the current key and node.
-    pub fn current(&self) -> Option<(&Nibbles, &Node)> {
-        self.current_key_and_node()
+    pub fn current(&self) -> Option<(&Nibbles, &Node, B256)> {
+        self.current_key_node_and_hash()
     }
 
     /// Move the cursor to the next key.
-    pub fn next(&mut self) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
+    pub fn next(&mut self) -> Result<Option<(&Nibbles, &Node, B256)>, CursorError> {
         if !self.initialized {
             self.initialized = true;
             return self.start_from_root();
         }
 
-        if self.key_stack.is_empty() {
-            return Ok(None);
-        }
-
-        let (_, current_node) = self.current_key_and_node().unwrap();
-
-        match current_node {
-            Node::Branch { .. } => self.traverse_branch_children(),
-            Node::AccountLeaf { .. } => self.backtrack_from_leaf(),
-            Node::StorageLeaf { .. } => self.backtrack_from_leaf(),
+        match self.current_node() {
+            Some(Node::Branch { .. }) => self.traverse_branch_children(),
+            Some(Node::AccountLeaf { .. } | Node::StorageLeaf { .. }) => self.backtrack_from_leaf(),
+            None => Ok(None),
         }
     }
 
     /// Move the cursor to the key and return a value matching or greater than the key.
-    pub fn seek(&mut self, key: &Nibbles) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
-        println!("seek from {:?} to {:?}", self.current_key_and_node(), key);
+    pub fn seek(&mut self, key: &Nibbles) -> Result<Option<(&Nibbles, &Node, B256)>, CursorError> {
+        let result = self.seek_internal(key);
+        if let Some((new_key, _, _)) = result.as_ref().unwrap() {
+            assert!(*new_key >= key, "TrieDB Cursor seek returned a key less than the target key");
+        }
+
+        result
+    }
+
+    fn seek_internal(
+        &mut self,
+        key: &Nibbles,
+    ) -> Result<Option<(&Nibbles, &Node, B256)>, CursorError> {
         // If not initialized, start from root
-        if !self.initialized || self.key_stack.is_empty() {
+        if !self.initialized || !self.has_current() {
             self.initialized = true;
             match self.start_from_root()? {
-                Some((new_key, _)) => {
+                Some((new_key, _, _)) => {
                     // If the new key is greater than or equal to the target key, return it
                     if new_key >= key {
-                        return Ok(self.current_key_and_node());
+                        return Ok(self.current());
                     }
                 }
                 None => return Ok(None),
             }
         }
 
-        let current_key = self.key_stack.last().unwrap();
+        let current_key = self.current_key().unwrap();
 
         // If we're already at the target key, return current position
         if current_key == key {
-            return Ok(self.current_key_and_node());
+            return Ok(self.current());
         }
 
         // Find the longest common prefix between current position and target
@@ -116,17 +124,10 @@ impl Cursor {
         // Optimize: backtrack only to the point where paths diverge
         self.backtrack_to_common_ancestor(common_prefix_len)?;
 
-        match self.current_key_and_node() {
-            Some((_, node)) => {
-                // Continue seeking from the common ancestor
-                self.seek_recursive(
-                    key,
-                    common_prefix_len - std::cmp::min(common_prefix_len, node.prefix().len()),
-                )
-            }
-            // If we've backtracked to empty, no higher key exists
-            None => Ok(None),
-        }
+        assert!(self.has_current(), "TrieDB Cursor seek backtracked to empty node");
+
+        // Continue seeking from the common ancestor
+        self.seek_recursive(key)
     }
 
     /// Backtrack the cursor to the common ancestor at the given prefix length
@@ -136,7 +137,7 @@ impl Cursor {
     ) -> Result<(), CursorError> {
         // Keep popping until we reach a key that is a prefix of the target length or we've popped
         // all the way to the root
-        while let Some(current_key) = self.key_stack.last() {
+        while let Some(current_key) = self.current_key() {
             if current_key.len() <= target_prefix_len || self.node_stack.len() <= 1 {
                 break;
             }
@@ -148,6 +149,7 @@ impl Cursor {
             }
             self.node_stack.pop();
             self.key_stack.pop();
+            self.hash_stack.pop();
         }
 
         Ok(())
@@ -157,68 +159,44 @@ impl Cursor {
     fn seek_recursive(
         &mut self,
         target_key: &Nibbles,
-        path_offset: usize,
-    ) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
-        let (current_key, current_node) = self.current_key_and_node().unwrap();
-        // println!(
-        //     "seek_recursive {:?}, {:?}, {:?}, {:?}",
-        //     current_key, current_node, target_key, path_offset
-        // );
-
-        // Compare current node's prefix with remaining target path
-        let remaining_target = if path_offset < target_key.len() {
-            target_key.slice(path_offset..)
-        } else {
-            Nibbles::default()
-        };
-
-        let common_prefix_len = std::cmp::min(current_node.prefix().len(), remaining_target.len());
-        let mut matches_prefix = true;
-        for i in 0..common_prefix_len {
-            if current_node.prefix()[i] != remaining_target[i] {
-                matches_prefix = false;
-                break;
-            }
+        // path_offset: usize,
+    ) -> Result<Option<(&Nibbles, &Node, B256)>, CursorError> {
+        let current_key = self.current_key().unwrap();
+        // If the current key is not a prefix of the target key, we need to find the next higher key
+        if !target_key.has_prefix(current_key) {
+            return self.find_next_higher_key_from_current_level(target_key);
         }
-
-        // If prefix doesn't match, we need to find next higher key
-        if !matches_prefix {
-            return self.find_next_higher_key_from_current_level(target_key, path_offset);
-        }
-
-        // If we've matched the entire prefix
-        let new_path_offset = path_offset + current_node.prefix().len();
 
         // If we've consumed the entire target key, this is our result
-        if new_path_offset >= target_key.len() {
-            println!(
-                "seek_recursive {:?}: {:?}, {:?}",
-                target_key, self.key_stack, self.node_stack
-            );
-            return Ok(self.current_key_and_node());
+        if current_key.len() >= target_key.len() {
+            return Ok(self.current());
         }
+
+        let current_node = self.current_node().unwrap();
 
         // Handle different node types
         match current_node {
             Node::Branch { .. } => {
                 // This is a branch node, navigate to the appropriate child
-                let next_nibble = target_key[new_path_offset];
+                let next_nibble = target_key[current_key.len()];
 
                 // Try to find a child at or after the target nibble
                 for child_index in next_nibble..16 {
                     if let Some(child_pointer) = current_node.child(child_index).unwrap() {
                         // Load the child and continue recursion
+                        let child_hash = child_pointer.rlp().as_hash().unwrap_or_default();
                         self.load_child_node_into_stack(
                             child_pointer.location(),
                             current_key.clone(),
                             Some(child_index),
+                            child_hash,
                         )?;
                         if child_index == next_nibble {
                             // This is the exact path we want, continue recursion
-                            return self.seek_recursive(target_key, new_path_offset + 1);
+                            return self.seek_recursive(target_key);
                         } else {
                             // This child is higher than our target, return it
-                            return Ok(self.current_key_and_node());
+                            return Ok(self.current());
                         }
                     }
                 }
@@ -226,8 +204,7 @@ impl Cursor {
                 // No suitable child found at this level, backtrack to find next higher key
                 self.backtrack_to_find_next_higher_key(target_key)
             }
-            Node::AccountLeaf { .. } => self.backtrack_from_leaf(),
-            Node::StorageLeaf { .. } => self.backtrack_from_leaf(),
+            Node::AccountLeaf { .. } | Node::StorageLeaf { .. } => self.backtrack_from_leaf(),
         }
     }
 
@@ -235,11 +212,10 @@ impl Cursor {
     fn find_next_higher_key_from_current_level(
         &mut self,
         target_key: &Nibbles,
-        _path_offset: usize,
-    ) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
+    ) -> Result<Option<(&Nibbles, &Node, B256)>, CursorError> {
         // Check if current key is already >= target
         if self.key_stack.last().unwrap() >= target_key {
-            return Ok(self.current_key_and_node());
+            return Ok(self.current());
         }
 
         // Otherwise, backtrack to find next higher key
@@ -250,7 +226,7 @@ impl Cursor {
     fn backtrack_to_find_next_higher_key(
         &mut self,
         target_key: &Nibbles,
-    ) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
+    ) -> Result<Option<(&Nibbles, &Node, B256)>, CursorError> {
         // Pop current node since it doesn't satisfy our condition
         if !self.key_stack.is_empty() {
             let current_loc = self.loc_stack.pop().unwrap();
@@ -259,6 +235,7 @@ impl Cursor {
             }
             self.node_stack.pop();
             self.key_stack.pop();
+            self.hash_stack.pop();
         }
 
         // If we've backtracked to empty, no higher key exists
@@ -266,12 +243,14 @@ impl Cursor {
             return Ok(None);
         }
 
-        let (parent_key, parent_node) = self.current_key_and_node().unwrap();
+        let parent_node = self.current_node().unwrap();
 
         // If this is not a branch, continue backtracking
         if !parent_node.is_branch() {
             return self.backtrack_to_find_next_higher_key(target_key);
         }
+
+        let parent_key = self.current_key().unwrap();
 
         // Find the next sibling that might contain a higher key
         let current_child_index = if parent_key.len() < target_key.len() {
@@ -280,15 +259,17 @@ impl Cursor {
             15 // If we've consumed the target, look for any remaining children
         };
 
-        // Look for the next available child after current_child_index
+        // Look for the next available child at or after current_child_index
         for child_index in (current_child_index + 1)..16 {
             if let Some(child_pointer) = parent_node.child(child_index).unwrap() {
+                let child_hash = child_pointer.rlp().as_hash().unwrap_or_default();
                 self.load_child_node_into_stack(
                     child_pointer.location(),
                     parent_key.clone(),
-                    Some(child_index),
+                    Some(child_index as u8),
+                    child_hash,
                 )?;
-                return Ok(self.current_key_and_node());
+                return Ok(self.current());
             }
         }
 
@@ -302,6 +283,7 @@ impl Cursor {
         child_location: Location,
         parent_key: Nibbles,
         child_index: Option<u8>,
+        child_hash: B256,
     ) -> Result<(), CursorError> {
         self.loc_stack.push(child_location);
 
@@ -329,6 +311,7 @@ impl Cursor {
         let child_key = Self::build_child_key(parent_key, child_index, &child_node);
         self.key_stack.push(child_key);
         self.node_stack.push(child_node);
+        self.hash_stack.push(child_hash);
 
         Ok(())
     }
@@ -343,16 +326,48 @@ impl Cursor {
         child_key
     }
 
+    fn has_current(&self) -> bool {
+        !self.key_stack.is_empty()
+    }
+
+    fn current_key(&self) -> Option<&Nibbles> {
+        self.key_stack.last()
+    }
+
+    fn current_node(&self) -> Option<&Node> {
+        self.node_stack.last()
+    }
+
     /// Get the current key and node from the stack
-    fn current_key_and_node(&self) -> Option<(&Nibbles, &Node)> {
-        match (self.key_stack.last(), self.node_stack.last()) {
-            (Some(key), Some(node)) => Some((key, node)),
+    fn current_key_node_and_hash(&self) -> Option<(&Nibbles, &Node, B256)> {
+        match (self.key_stack.last(), self.node_stack.last(), self.hash_stack.last()) {
+            (Some(key), Some(node), Some(hash)) => {
+                match node {
+                    Node::Branch { children, .. } => {
+                        if !node.prefix().is_empty() {
+                            // we will need to hash this node directly, as the parent pointer has
+                            // the hash of the implied extension node
+                            let mut buf = [0u8; 3 + 33 * 16 + 1]; // max RLP length for a branch: 3 bytes for the list length, 33 bytes
+                                                                  // for each
+                            let mut branch_rlp = buf.as_mut();
+                            let branch_rlp_length = encode_branch(children, &mut branch_rlp);
+                            let node_rlp = RlpNode::from_rlp(&buf[..branch_rlp_length]);
+                            let node_hash: alloy_primitives::FixedBytes<32> =
+                                node_rlp.as_hash().unwrap_or_default();
+                            Some((key, node, node_hash))
+                        } else {
+                            Some((key, node, *hash))
+                        }
+                    }
+                    _ => Some((key, node, *hash)),
+                }
+            }
             _ => None,
         }
     }
 
     /// Initialize cursor from root node
-    fn start_from_root(&mut self) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
+    fn start_from_root(&mut self) -> Result<Option<(&Nibbles, &Node, B256)>, CursorError> {
         if self.context.root_node_page_id.is_none() {
             return Ok(None);
         }
@@ -362,20 +377,21 @@ impl Cursor {
         let root_slotted_page = SlottedPage::try_from(root_page).unwrap();
         let root_node: Node = root_slotted_page.get_value(0).unwrap();
         let root_key = root_node.prefix().clone();
+        let root_hash = self.context.root_node_hash;
 
         self.loc_stack.push(Location::for_page(root_node_page_id));
         self.page_id_stack.push(root_node_page_id);
         self.node_stack.push(root_node);
         self.key_stack.push(root_key);
+        self.hash_stack.push(root_hash);
 
         if let Some(account_key) = self.account_key {
             let result = self.seek(&Nibbles::unpack(account_key))?;
             match result {
-                Some((key, _)) => {
+                Some((key, _, _)) => {
                     if key == &Nibbles::unpack(account_key) {
                         self.initialize_storage_stacks()?;
-                        println!("initialize_storage_stacks {:?}", self);
-                        return Ok(self.current_key_and_node());
+                        return Ok(self.current());
                     } else {
                         self.initialize_storage_stacks()?;
                         return Ok(None);
@@ -389,25 +405,30 @@ impl Cursor {
 
         let key_ref = self.key_stack.last().unwrap();
         let node_ref = self.node_stack.last().unwrap();
-        Ok(Some((key_ref, node_ref)))
+        let hash_ref = *self.hash_stack.last().unwrap();
+        Ok(Some((key_ref, node_ref, hash_ref)))
     }
 
     fn initialize_storage_stacks(&mut self) -> Result<(), CursorError> {
-        let (current_key, current_node) = self.current_key_and_node().unwrap();
+        let current_key = self.current_key().unwrap();
+        let current_node = self.current_node().unwrap();
         let storage_root = current_node.direct_child().unwrap();
         if storage_root.is_none() {
             self.loc_stack.clear();
             self.page_id_stack.clear();
             self.node_stack.clear();
             self.key_stack.clear();
+            self.hash_stack.clear();
             return Ok(());
         }
 
         let storage_root_pointer = storage_root.unwrap();
+        let storage_root_hash = storage_root_pointer.rlp().as_hash().unwrap_or_default();
         self.load_child_node_into_stack(
             storage_root_pointer.location(),
             current_key.clone(),
             None,
+            storage_root_hash,
         )?;
 
         let storage_root_loc = self.loc_stack.pop().unwrap();
@@ -420,6 +441,7 @@ impl Cursor {
 
         let storage_root_node = self.node_stack.pop().unwrap();
         let storage_root_key = storage_root_node.prefix().clone();
+        let storage_root_hash = self.hash_stack.pop().unwrap();
 
         self.node_stack.clear();
         self.node_stack.push(storage_root_node);
@@ -427,12 +449,16 @@ impl Cursor {
         self.key_stack.clear();
         self.key_stack.push(storage_root_key);
 
+        self.hash_stack.clear();
+        self.hash_stack.push(storage_root_hash);
+
         Ok(())
     }
 
     /// Traverse children of a branch node
-    fn traverse_branch_children(&mut self) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
-        let (parent_key, parent_node) = self.current_key_and_node().unwrap();
+    fn traverse_branch_children(&mut self) -> Result<Option<(&Nibbles, &Node, B256)>, CursorError> {
+        let parent_key = self.current_key().unwrap();
+        let parent_node = self.current_node().unwrap();
 
         for child_index in 0..16 {
             let child = parent_node.child(child_index).unwrap();
@@ -441,12 +467,32 @@ impl Cursor {
             }
 
             let child_pointer = child.as_ref().unwrap();
+            let child_hash = child_pointer.rlp().as_hash().unwrap_or_else(|| {
+                // If not a hash reference, compute hash from the node itself
+                let child_page_id = if child_pointer.location().page_id().is_some() {
+                    child_pointer.location().page_id().unwrap()
+                } else {
+                    *self.page_id_stack.last().unwrap()
+                };
+                let child_page =
+                    self.storage_engine.get_page(&self.context, child_page_id).unwrap();
+                let child_slotted_page = SlottedPage::try_from(child_page).unwrap();
+                let child_node: Node = if child_pointer.location().cell_index().is_some() {
+                    child_slotted_page
+                        .get_value(child_pointer.location().cell_index().unwrap())
+                        .unwrap()
+                } else {
+                    child_slotted_page.get_value(0).unwrap()
+                };
+                child_node.as_rlp_node().as_hash().unwrap()
+            });
             self.load_child_node_into_stack(
                 child_pointer.location(),
                 parent_key.clone(),
                 Some(child_index as u8),
+                child_hash,
             )?;
-            return Ok(self.current_key_and_node());
+            return Ok(self.current());
         }
 
         // No children found, backtrack
@@ -454,7 +500,9 @@ impl Cursor {
     }
 
     /// Backtrack to find the next sibling at any level
-    fn backtrack_to_next_sibling(&mut self) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
+    fn backtrack_to_next_sibling(
+        &mut self,
+    ) -> Result<Option<(&Nibbles, &Node, B256)>, CursorError> {
         while !self.node_stack.is_empty() {
             // Pop current node
             let current_loc = self.loc_stack.pop().unwrap();
@@ -463,6 +511,7 @@ impl Cursor {
             }
             self.node_stack.pop();
             let current_key = self.key_stack.pop().unwrap();
+            self.hash_stack.pop();
 
             // If we've reached the root, we're done
             if self.node_stack.is_empty() {
@@ -475,7 +524,7 @@ impl Cursor {
             let current_child_index = current_key.get(parent_key.len()).unwrap();
 
             if self.find_next_sibling_from_index(current_child_index + 1)? {
-                return Ok(self.current_key_and_node());
+                return Ok(self.current());
             }
 
             // No sibling found, continue backtracking
@@ -486,11 +535,12 @@ impl Cursor {
 
     /// Find the next sibling starting from the given index
     fn find_next_sibling_from_index(&mut self, start_index: u8) -> Result<bool, CursorError> {
-        let (parent_key, parent_node) = self.current_key_and_node().unwrap();
+        let parent_node = self.current_node().unwrap();
         let children = match parent_node {
             Node::Branch { children, .. } => children,
             _ => return Ok(false),
         };
+        let parent_key = self.current_key().unwrap();
 
         for child_index in start_index..16 {
             if children[child_index as usize].is_none() {
@@ -498,10 +548,30 @@ impl Cursor {
             }
 
             let child_pointer = children[child_index as usize].as_ref().unwrap();
+            let child_hash = child_pointer.rlp().as_hash().unwrap_or_else(|| {
+                // If not a hash reference, compute hash from the node itself
+                let child_page_id = if child_pointer.location().page_id().is_some() {
+                    child_pointer.location().page_id().unwrap()
+                } else {
+                    *self.page_id_stack.last().unwrap()
+                };
+                let child_page =
+                    self.storage_engine.get_page(&self.context, child_page_id).unwrap();
+                let child_slotted_page = SlottedPage::try_from(child_page).unwrap();
+                let child_node: Node = if child_pointer.location().cell_index().is_some() {
+                    child_slotted_page
+                        .get_value(child_pointer.location().cell_index().unwrap())
+                        .unwrap()
+                } else {
+                    child_slotted_page.get_value(0).unwrap()
+                };
+                child_node.as_rlp_node().as_hash().unwrap()
+            });
             self.load_child_node_into_stack(
                 child_pointer.location(),
                 parent_key.clone(),
                 Some(child_index as u8),
+                child_hash,
             )?;
             return Ok(true);
         }
@@ -510,7 +580,7 @@ impl Cursor {
     }
 
     /// Backtrack from a leaf node
-    fn backtrack_from_leaf(&mut self) -> Result<Option<(&Nibbles, &Node)>, CursorError> {
+    fn backtrack_from_leaf(&mut self) -> Result<Option<(&Nibbles, &Node, B256)>, CursorError> {
         // Pop current leaf node from stacks
         let current_loc = self.loc_stack.pop().unwrap();
         if current_loc.page_id().is_some() {
@@ -518,6 +588,7 @@ impl Cursor {
         }
         self.node_stack.pop();
         let mut child_key = self.key_stack.pop().unwrap();
+        self.hash_stack.pop();
 
         // Now continue backtracking until we find a parent with a next sibling
         while !self.node_stack.is_empty() {
@@ -528,7 +599,7 @@ impl Cursor {
 
             // Try to find the next sibling
             if self.find_next_sibling_from_index(current_child_index + 1)? {
-                return Ok(self.current_key_and_node());
+                return Ok(self.current());
             }
 
             // No sibling found at this level, backtrack further
@@ -538,6 +609,7 @@ impl Cursor {
             }
             self.node_stack.pop();
             child_key = self.key_stack.pop().unwrap();
+            self.hash_stack.pop();
         }
 
         // Reached root with no more siblings
@@ -571,14 +643,24 @@ mod tests {
             )
             .unwrap();
 
-        let mut cursor = Cursor::new_account_cursor(Arc::new(storage_engine), context);
+        let mut cursor = Cursor::new_account_cursor(Arc::new(storage_engine), context.clone());
 
         // first item found is the single account leaf node
         let result = cursor.next();
         assert!(result.is_ok());
-        let (key, node) = result.unwrap().unwrap();
+        let (key, node, hash) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
         assert!(matches!(node, Node::AccountLeaf { .. }), "node: {:?}", node);
+
+        // Verify the hash is correct - for root node it should match the context's root hash
+        assert_eq!(
+            hash, context.root_node_hash,
+            "Hash should match the root node hash from context"
+        );
+
+        // Also verify the hash matches what we'd compute from the node itself
+        let computed_hash = node.as_rlp_node().as_hash().unwrap();
+        assert_eq!(hash, computed_hash, "Hash should match the computed hash from node RLP");
 
         // next item found is none
         let result = cursor.next();
@@ -588,16 +670,25 @@ mod tests {
         // seek to the same key as the first item
         let result = cursor.seek(&Nibbles::from_vec(vec![1; 64]));
         assert!(result.is_ok());
-        let (key, node) = result.unwrap().unwrap();
+        let (key, node, hash) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
         assert!(matches!(node, Node::AccountLeaf { .. }), "node: {:?}", node);
+
+        // Verify hash again after seek
+        assert_eq!(
+            hash, context.root_node_hash,
+            "Hash should still match the root node hash after seek"
+        );
 
         // seek to a key that is less than the first item
         let result = cursor.seek(&Nibbles::from_vec(vec![0; 64]));
         assert!(result.is_ok());
-        let (key, node) = result.unwrap().unwrap();
+        let (key, node, hash) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
         assert!(matches!(node, Node::AccountLeaf { .. }), "node: {:?}", node);
+
+        // Verify hash for this case too
+        assert_eq!(hash, context.root_node_hash, "Hash should match the root node hash");
 
         // seek to a key that is greater than the first item
         let result = cursor.seek(&Nibbles::from_vec(vec![15; 64]));
@@ -638,55 +729,89 @@ mod tests {
             )
             .unwrap();
 
-        let mut cursor = Cursor::new_account_cursor(Arc::new(storage_engine), context);
+        let mut cursor = Cursor::new_account_cursor(Arc::new(storage_engine), context.clone());
 
         // first item found is the root node (branch)
         let result = cursor.next();
-        let (key, branch_node) = result.unwrap().unwrap();
+        let (key, branch_node, hash) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::default());
         assert_eq!(branch_node.prefix(), &Nibbles::default());
         assert!(branch_node.child(1).unwrap().is_some());
         assert!(branch_node.child(2).unwrap().is_some());
 
+        // Verify the root hash matches the context
+        assert_eq!(hash, context.root_node_hash, "Root node hash should match context");
+
+        // Verify the hash matches the computed hash
+        let computed_hash = branch_node.as_rlp_node().as_hash().unwrap();
+        assert_eq!(hash, computed_hash, "Root hash should match computed hash");
+
+        // Store the parent pointer for later verification before borrowing cursor again
+        let parent_child_pointer = branch_node.child(1).unwrap().unwrap().clone();
+
         // second item found is the first account leaf node
         let result = cursor.next();
-        let (key, leaf_node) = result.unwrap().unwrap();
+        let (key, leaf_node, hash) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
         assert_eq!(leaf_node.prefix(), &Nibbles::from_vec(vec![1; 63]));
         assert!(matches!(leaf_node, Node::AccountLeaf { .. }));
+
+        // Verify this child's hash matches what's stored in the parent's pointer
+        let expected_child_hash = parent_child_pointer.rlp().as_hash().unwrap();
+        assert_eq!(hash, expected_child_hash, "Child hash should match parent's pointer hash");
+
+        // Also verify it matches the computed hash
+        let computed_child_hash = leaf_node.as_rlp_node().as_hash().unwrap();
+        assert_eq!(hash, computed_child_hash, "Child hash should match computed hash");
 
         // current also returns the first account leaf node
         let result = cursor.current();
         assert!(result.is_some());
-        let (key, leaf_node) = result.unwrap();
+        let (key, leaf_node, hash) = result.unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
         assert_eq!(leaf_node.prefix(), &Nibbles::from_vec(vec![1; 63]));
         assert!(matches!(leaf_node, Node::AccountLeaf { .. }));
 
+        // Verify hash consistency in current() as well
+        let computed_hash = leaf_node.as_rlp_node().as_hash().unwrap();
+        assert_eq!(hash, computed_hash, "Current() should return consistent hash");
+
         // next item found is the nested branch node
         let result = cursor.next();
-        let (key, branch_node) = result.unwrap().unwrap();
+        let (key, branch_node, hash) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![2, 2]));
         assert_eq!(branch_node.prefix(), &Nibbles::from_vec(vec![2]));
         assert!(branch_node.child(2).unwrap().is_some());
         assert!(branch_node.child(3).unwrap().is_some());
 
+        // Verify this nested branch hash
+        let computed_hash = branch_node.as_rlp_node().as_hash().unwrap();
+        assert_ne!(hash, computed_hash, "Nested branch hash should NOT match computed hash, as the computed_hash is for the extension node");
+
         // next item found is the second account leaf node
         let result = cursor.next();
-        let (key, leaf_node) = result.unwrap().unwrap();
+        let (key, leaf_node, hash) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![2; 64]));
         assert_eq!(leaf_node.prefix(), &Nibbles::from_vec(vec![2; 61]));
         assert!(matches!(leaf_node, Node::AccountLeaf { .. }));
 
+        // Verify this leaf's hash
+        let computed_hash = leaf_node.as_rlp_node().as_hash().unwrap();
+        assert_eq!(hash, computed_hash, "Second leaf hash should match computed hash");
+
         // next item found is the third account leaf node (skipping the second account's storage)
         let result = cursor.next();
-        let (key, leaf_node) = result.unwrap().unwrap();
+        let (key, leaf_node, hash) = result.unwrap().unwrap();
         assert_eq!(
             key,
             &Nibbles::from_vec(vec![2, 2].into_iter().chain(vec![3; 62]).collect::<Vec<_>>())
         );
         assert_eq!(leaf_node.prefix(), &Nibbles::from_vec(vec![3; 61]));
         assert!(matches!(leaf_node, Node::AccountLeaf { .. }));
+
+        // Verify this leaf's hash
+        let computed_hash = leaf_node.as_rlp_node().as_hash().unwrap();
+        assert_eq!(hash, computed_hash, "Third leaf hash should match computed hash");
 
         // no more account trie nodes found
         let result = cursor.next();
@@ -721,29 +846,44 @@ mod tests {
             )
             .unwrap();
 
-        let mut cursor =
-            Cursor::new_storage_cursor(Arc::new(storage_engine), context, address_path.into());
+        let mut cursor = Cursor::new_storage_cursor(
+            Arc::new(storage_engine),
+            context.clone(),
+            address_path.into(),
+        );
 
         // first item found is the storage leaf node
         let result = cursor.next();
         assert!(result.is_ok());
-        let (key, node) = result.unwrap().unwrap();
+        let (key, node, hash) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
         assert!(matches!(node, Node::StorageLeaf { .. }), "node: {:?}", node);
+
+        // Verify the hash matches the computed hash for storage leaf
+        let computed_hash = node.as_rlp_node().as_hash().unwrap();
+        assert_eq!(hash, computed_hash, "Storage leaf hash should match computed hash");
 
         // seek to the same key as the first item
         let result = cursor.seek(&Nibbles::from_vec(vec![1; 64]));
         assert!(result.is_ok());
-        let (key, node) = result.unwrap().unwrap();
+        let (key, node, hash) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
         assert!(matches!(node, Node::StorageLeaf { .. }), "node: {:?}", node);
+
+        // Verify hash consistency after seek
+        let computed_hash = node.as_rlp_node().as_hash().unwrap();
+        assert_eq!(hash, computed_hash, "Storage leaf hash should be consistent after seek");
 
         // seek to a key that is less than the first item
         let result = cursor.seek(&Nibbles::from_vec(vec![0; 64]));
         assert!(result.is_ok());
-        let (key, node) = result.unwrap().unwrap();
+        let (key, node, hash) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
         assert!(matches!(node, Node::StorageLeaf { .. }), "node: {:?}", node);
+
+        // Verify hash for this case too
+        let computed_hash = node.as_rlp_node().as_hash().unwrap();
+        assert_eq!(hash, computed_hash, "Storage leaf hash should match computed hash");
 
         // seek to a key that is greater than the first item
         let result = cursor.seek(&Nibbles::from_vec(vec![15; 64]));
@@ -790,7 +930,7 @@ mod tests {
         let mut found_storage_nodes = 0;
         let mut found_nodes = 0;
 
-        while let Ok(Some((key, node))) = cursor.next() {
+        while let Ok(Some((key, node, _))) = cursor.next() {
             found_nodes += 1;
             match node {
                 Node::AccountLeaf { .. } => {
@@ -891,7 +1031,7 @@ mod tests {
         let mut target1 = vec![1, 0];
         target1.extend(vec![0; 62]);
         let result = cursor.seek(&Nibbles::from_vec(target1.clone()));
-        let (key, _) = result.unwrap().unwrap();
+        let (key, _, _) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(target1));
 
         // Now seek to a nearby key [1, 3] - should efficiently find [1, 5, ...]
@@ -900,16 +1040,28 @@ mod tests {
         let mut expected2 = vec![1, 5];
         expected2.extend(vec![0; 62]);
         let result = cursor.seek(&Nibbles::from_vec(target2));
-        let (key, _) = result.unwrap().unwrap();
+        let (key, _, _) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(expected2));
+
+        // Seek to the exact current location. This should return the current position.
+        let same_target = key.clone();
+        let result = cursor.seek(&same_target);
+        let (key, _, _) = result.unwrap().unwrap();
+        assert_eq!(key, &same_target);
 
         // Now move to the next key, which should be the branch at [2]
         let result = cursor.next();
-        let (key, branch_node) = result.unwrap().unwrap();
+        let (key, branch_node, _) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![2]));
         assert_eq!(branch_node.prefix(), &Nibbles::default()); // Branch prefix should be empty
         assert!(branch_node.child(0).unwrap().is_some());
         assert!(branch_node.child(5).unwrap().is_some());
+
+        // Seek to the exact current location. This should return the current position.
+        let same_target = key.clone();
+        let result = cursor.seek(&same_target);
+        let (key, _, _) = result.unwrap().unwrap();
+        assert_eq!(key, &same_target);
 
         // Seek to another nearby key [2, 3, ...] - should find [2, 5, ...]
         let mut target3 = vec![2, 3];
@@ -917,8 +1069,14 @@ mod tests {
         let mut expected3 = vec![2, 5];
         expected3.extend(vec![0; 62]);
         let result = cursor.seek(&Nibbles::from_vec(target3));
-        let (key, _) = result.unwrap().unwrap();
+        let (key, _, _) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(expected3.clone()));
+
+        // Seek to the exact current location. This should return the current position.
+        let same_target = key.clone();
+        let result = cursor.seek(&same_target);
+        let (key, _, _) = result.unwrap().unwrap();
+        assert_eq!(key, &same_target);
 
         // Seek backwards to a key we've already passed
         let mut target4 = vec![2, 0];
@@ -926,26 +1084,26 @@ mod tests {
         let mut expected4 = vec![2, 0];
         expected4.extend(vec![0; 62]);
         let result = cursor.seek(&Nibbles::from_vec(target4));
-        let (key, _) = result.unwrap().unwrap();
+        let (key, _, _) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(expected4.clone()));
 
         // Seek to exact current position - should return immediately
         let result = cursor.seek(&Nibbles::from_vec(expected4.clone()));
-        let (key, _) = result.unwrap().unwrap();
+        let (key, _, _) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(expected4));
 
         // Next should be [2, 5, ...]
         let mut expected3 = vec![2, 5];
         expected3.extend(vec![0; 62]);
         let result = cursor.next();
-        let (key, _) = result.unwrap().unwrap();
+        let (key, _, _) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(expected3));
 
         // Next should be [3, 0, ...]
         let mut expected = vec![3];
         expected.extend(vec![0; 63]);
         let result = cursor.next();
-        let (key, _) = result.unwrap().unwrap();
+        let (key, _, _) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(expected));
 
         // Next should be empty
@@ -965,7 +1123,7 @@ mod tests {
         let account = create_test_account(100, 1);
         let account_path = AddressPath::for_address(address);
 
-        // Create storage slots
+        // Create storage slots for the account
         let storage_key1 = B256::from([0x01; 32]);
         let storage_value1 = U256::from(0x1111);
         let storage_path1 = StoragePath::for_address_and_slot(address, storage_key1);
@@ -1028,5 +1186,96 @@ mod tests {
         let result = cursor.seek(&Nibbles::from_vec(vec![0x0F; 32]));
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_cursor_hash_verification() {
+        let (storage_engine, mut context) = create_test_engine(100);
+
+        // Create a simple tree structure for hash verification
+        let address_path1 = AddressPath::new(Nibbles::from_vec(vec![1; 64]));
+        let account1 = create_test_account(1, 1);
+
+        let address_path2 = AddressPath::new(Nibbles::from_vec(vec![2; 64]));
+        let account2 = create_test_account(2, 2);
+
+        storage_engine
+            .set_values(
+                &mut context,
+                vec![
+                    (address_path1.clone().into(), Some(account1.clone().into())),
+                    (address_path2.clone().into(), Some(account2.clone().into())),
+                ]
+                .as_mut(),
+            )
+            .unwrap();
+
+        let mut cursor = Cursor::new_account_cursor(Arc::new(storage_engine), context.clone());
+
+        // Test 1: Root node hash verification
+        let result = cursor.next();
+        assert!(result.is_ok());
+        let (_key, root_node, root_hash) = result.unwrap().unwrap();
+
+        // Root should match context hash
+        assert_eq!(root_hash, context.root_node_hash, "Root hash must match context");
+
+        // Root should match computed hash
+        let computed_root_hash = root_node.as_rlp_node().as_hash().unwrap();
+        assert_eq!(root_hash, computed_root_hash, "Root hash must match computed hash");
+
+        // Store child pointers for verification
+        let child1_pointer = root_node.child(1).unwrap().unwrap().clone();
+        let child2_pointer = root_node.child(2).unwrap().unwrap().clone();
+
+        // Test 2: First child hash verification
+        let result = cursor.next();
+        assert!(result.is_ok());
+        let (key, child1_node, child1_hash) = result.unwrap().unwrap();
+        assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
+
+        // Child hash should match parent's pointer
+        let expected_child1_hash = child1_pointer.rlp().as_hash().unwrap();
+        assert_eq!(child1_hash, expected_child1_hash, "Child1 hash must match parent pointer");
+
+        // Child hash should match computed hash
+        let computed_child1_hash = child1_node.as_rlp_node().as_hash().unwrap();
+        assert_eq!(child1_hash, computed_child1_hash, "Child1 hash must match computed hash");
+
+        // Test 3: Second child hash verification
+        let result = cursor.next();
+        assert!(result.is_ok());
+        let (key, child2_node, child2_hash) = result.unwrap().unwrap();
+        assert_eq!(key, &Nibbles::from_vec(vec![2; 64]));
+
+        // Child hash should match parent's pointer
+        let expected_child2_hash = child2_pointer.rlp().as_hash().unwrap();
+        assert_eq!(child2_hash, expected_child2_hash, "Child2 hash must match parent pointer");
+
+        // Child hash should match computed hash
+        let computed_child2_hash = child2_node.as_rlp_node().as_hash().unwrap();
+        assert_eq!(child2_hash, computed_child2_hash, "Child2 hash must match computed hash");
+
+        // Test 4: Verify current() returns same hash
+        let current_result = cursor.current();
+        assert!(current_result.is_some());
+        let (current_key, _current_node, current_hash) = current_result.unwrap();
+        assert_eq!(current_key, &Nibbles::from_vec(vec![2; 64]));
+        assert_eq!(current_hash, child2_hash, "current() should return same hash as last next()");
+
+        // Test 5: Seek operation hash verification
+        let mut new_cursor =
+            Cursor::new_account_cursor(cursor.storage_engine.clone(), context.clone());
+        let seek_result = new_cursor.seek(&Nibbles::from_vec(vec![1; 64]));
+        assert!(seek_result.is_ok());
+        let (seek_key, seek_node, seek_hash) = seek_result.unwrap().unwrap();
+        assert_eq!(seek_key, &Nibbles::from_vec(vec![1; 64]));
+
+        // Seek should return the same hash as when we traversed to this node
+        assert_eq!(seek_hash, child1_hash, "Seek should return consistent hash");
+
+        // Also verify against computed hash
+        let computed_seek_hash = seek_node.as_rlp_node().as_hash().unwrap();
+        assert_eq!(seek_hash, computed_seek_hash, "Seek hash must match computed hash");
     }
 }
