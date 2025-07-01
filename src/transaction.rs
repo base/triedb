@@ -205,7 +205,7 @@ impl Transaction<RW> {
         Ok(())
     }
 
-    pub fn commit(mut self) -> Result<(), TransactionError> {
+    pub fn apply_changes(&mut self) -> Result<(), TransactionError> {
         let mut changes =
             self.pending_changes.drain().collect::<Vec<(Nibbles, Option<TrieValue>)>>();
 
@@ -214,8 +214,14 @@ impl Transaction<RW> {
                 .inner
                 .storage_engine
                 .set_values(&mut self.context, changes.as_mut())
-                .unwrap();
+                .map_err(|_| TransactionError {})?;
         }
+
+        Ok(())
+    }
+
+    pub fn commit(mut self) -> Result<(), TransactionError> {
+        self.apply_changes()?;
 
         self.database.inner.storage_engine.commit(&self.context).unwrap();
         self.database.inner.update_metrics_rw(&self.context);
