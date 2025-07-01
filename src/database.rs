@@ -8,16 +8,21 @@ use crate::{
 };
 use alloy_primitives::B256;
 use parking_lot::Mutex;
-use std::{io, path::Path};
+use std::{io, path::Path, sync::Arc};
+
+#[derive(Clone, Debug)]
+pub struct Database {
+    pub(crate) inner: Arc<DatabaseInner>,
+}
 
 #[derive(Debug)]
-pub struct Database {
+pub(crate) struct DatabaseInner {
     pub(crate) storage_engine: StorageEngine,
     pub(crate) transaction_manager: Mutex<TransactionManager>,
     metrics: DatabaseMetrics,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Error {
     PageError(PageError),
     EngineError(engine::Error),
@@ -28,6 +33,16 @@ pub enum OpenError {
     PageError(PageError),
     MetadataError(OpenMetadataError),
     IO(io::Error),
+}
+
+impl Clone for OpenError {
+    fn clone(&self) -> Self {
+        match self {
+            Self::PageError(e) => Self::PageError(e.clone()),
+            Self::MetadataError(e) => Self::MetadataError(e.clone()),
+            Self::IO(e) => Self::IO(std::io::Error::new(e.kind(), e.to_string())),
+        }
+    }
 }
 
 impl Database {
@@ -67,17 +82,65 @@ impl Database {
 
     pub fn new(storage_engine: StorageEngine) -> Self {
         Self {
-            storage_engine,
-            transaction_manager: Mutex::new(TransactionManager::new()),
-            metrics: DatabaseMetrics::default(),
+            inner: Arc::new(DatabaseInner {
+                storage_engine,
+                transaction_manager: Mutex::new(TransactionManager::new()),
+                metrics: DatabaseMetrics::default(),
+            }),
         }
     }
 
+    pub fn begin_rw(&self) -> Result<Transaction<RW>, TransactionError> {
+        let context = self.inner.storage_engine.write_context();
+        let min_snapshot_id =
+            self.inner.transaction_manager.lock().begin_rw(context.snapshot_id)?;
+        if min_snapshot_id > 0 {
+            self.inner.storage_engine.unlock(min_snapshot_id - 1);
+        }
+        Ok(Transaction::new(context, self.clone()))
+    }
+
+    pub fn begin_ro(&self) -> Result<Transaction<RO>, TransactionError> {
+        let context = self.inner.storage_engine.read_context();
+        self.inner.transaction_manager.lock().begin_ro(context.snapshot_id);
+        Ok(Transaction::new(context, self.clone()))
+    }
+
+    pub fn print_page<W: io::Write>(&self, buf: W, page_id: Option<PageId>) -> Result<(), Error> {
+        self.inner.print_page(buf, page_id)
+    }
+
+    pub fn root_page_info<W: io::Write>(
+        &self,
+        buf: W,
+        file_path: impl AsRef<Path>,
+    ) -> Result<(), OpenError> {
+        self.inner.root_page_info(buf, file_path)
+    }
+
+    pub fn print_statistics<W: io::Write>(&self, buf: W) -> Result<(), Error> {
+        self.inner.print_statistics(buf)
+    }
+
+    pub fn size(&self) -> u32 {
+        self.inner.size()
+    }
+
+    pub fn state_root(&self) -> B256 {
+        self.inner.state_root()
+    }
+
     pub fn close(self) -> io::Result<()> {
+        Arc::try_unwrap(self.inner).unwrap().close()
+    }
+}
+
+impl DatabaseInner {
+    fn close(self) -> io::Result<()> {
         self.storage_engine.close()
     }
 
-    pub fn print_page<W: io::Write>(self, buf: W, page_id: Option<PageId>) -> Result<(), Error> {
+    fn print_page<W: io::Write>(&self, buf: W, page_id: Option<PageId>) -> Result<(), Error> {
         let context = self.storage_engine.read_context();
         // TODO: Must use `expect()` because `storage::engine::Error` and `database::Error` are not
         // compatible. There's probably no reason to use two different error enums here, so maybe
@@ -86,8 +149,8 @@ impl Database {
         Ok(())
     }
 
-    pub fn root_page_info<W: io::Write>(
-        self,
+    fn root_page_info<W: io::Write>(
+        &self,
         mut buf: W,
         file_path: impl AsRef<Path>,
     ) -> Result<(), OpenError> {
@@ -103,47 +166,32 @@ impl Database {
         let root_node_page_id = active_slot.root_node_page_id();
         let orphaned_page_list = meta_manager.orphan_pages().iter().collect::<Vec<_>>();
 
-        writeln!(buf, "Root Node Page ID: {:?}", root_node_page_id).expect("write failed");
+        writeln!(buf, "Root Node Page ID: {root_node_page_id:?}").expect("write failed");
 
         //root subtrie pageID
-        writeln!(buf, "Total Page Count: {:?}", page_count).expect("write failed");
+        writeln!(buf, "Total Page Count: {page_count:?}").expect("write failed");
 
         //orphaned pages list (grouped by page)
-        writeln!(buf, "Orphaned Pages: {:?}", orphaned_page_list).expect("write failed");
+        writeln!(buf, "Orphaned Pages: {orphaned_page_list:?}").expect("write failed");
 
         Ok(())
     }
 
-    pub fn print_statistics<W: io::Write>(self, buf: W) -> Result<(), Error> {
+    fn print_statistics<W: io::Write>(&self, buf: W) -> Result<(), Error> {
         let context = self.storage_engine.read_context();
         self.storage_engine.debug_statistics(&context, buf).expect("write failed");
         Ok(())
     }
 
-    pub fn begin_rw(&self) -> Result<Transaction<'_, RW>, TransactionError> {
-        let context = self.storage_engine.write_context();
-        let min_snapshot_id = self.transaction_manager.lock().begin_rw(context.snapshot_id)?;
-        if min_snapshot_id > 0 {
-            self.storage_engine.unlock(min_snapshot_id - 1);
-        }
-        Ok(Transaction::new(context, self))
-    }
-
-    pub fn begin_ro(&self) -> Result<Transaction<'_, RO>, TransactionError> {
-        let context = self.storage_engine.read_context();
-        self.transaction_manager.lock().begin_ro(context.snapshot_id);
-        Ok(Transaction::new(context, self))
-    }
-
-    pub fn state_root(&self) -> B256 {
+    fn state_root(&self) -> B256 {
         self.storage_engine.read_context().root_node_hash
     }
 
-    pub fn size(&self) -> u32 {
+    fn size(&self) -> u32 {
         self.storage_engine.size()
     }
 
-    pub fn update_metrics_ro(&self, context: &TransactionContext) {
+    pub(crate) fn update_metrics_ro(&self, context: &TransactionContext) {
         self.metrics
             .ro_transaction_pages_read
             .record(context.transaction_metrics.take_pages_read() as f64);
@@ -154,7 +202,7 @@ impl Database {
         self.metrics.cache_storage_read_miss.increment(cache_storage_read_miss as u64);
     }
 
-    pub fn update_metrics_rw(&self, context: &TransactionContext) {
+    pub(crate) fn update_metrics_rw(&self, context: &TransactionContext) {
         self.metrics
             .rw_transaction_pages_read
             .record(context.transaction_metrics.take_pages_read() as f64);
@@ -287,6 +335,7 @@ mod tests {
 
         fn alive_page_ids(db: &Database) -> Vec<PageId> {
             let orphan_pages = db
+                .inner
                 .storage_engine
                 .meta_manager
                 .lock()
@@ -294,7 +343,7 @@ mod tests {
                 .iter()
                 .map(|orphan| orphan.page_id())
                 .collect::<Vec<_>>();
-            let all_pages = (1..db.storage_engine.page_manager.size())
+            let all_pages = (1..db.inner.storage_engine.page_manager.size())
                 .map(|page_id| PageId::new(page_id).unwrap());
             all_pages.filter(move |page_id| !orphan_pages.contains(page_id)).collect()
         }
@@ -303,7 +352,7 @@ mod tests {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
         let db = Database::create(file_path).unwrap();
-        assert_eq!(db.storage_engine.page_manager.size(), 0);
+        assert_eq!(db.inner.storage_engine.page_manager.size(), 0);
 
         // Add 1000 accounts
         let mut tx = db.begin_rw().expect("rw transaction creation failed");
@@ -318,7 +367,8 @@ mod tests {
         assert!(page_ids.len() > 1, "storage has no pages");
         for page_id in &page_ids {
             assert_eq!(
-                db.storage_engine
+                db.inner
+                    .storage_engine
                     .page_manager
                     .get(1, *page_id)
                     .unwrap_or_else(|err| panic!("page {page_id} not found: {err:?}"))
@@ -347,6 +397,7 @@ mod tests {
         );
         for page_id in &new_page_ids {
             let page = db
+                .inner
                 .storage_engine
                 .page_manager
                 .get(1, *page_id)

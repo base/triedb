@@ -1049,21 +1049,14 @@ impl StorageEngine {
         } else if children.len() == 1 {
             // Merge branch with its only child
             let (idx, ptr) = children[0];
-            return self.merge_branch_with_only_child(
-                context,
-                slotted_page,
-                page_index,
-                node,
-                idx,
-                ptr,
-            );
+            self.merge_branch_with_only_child(context, slotted_page, page_index, node, idx, ptr)
         } else {
             // Normal branch node with multiple children
             let rlp_node = node.as_rlp_node();
-            return Ok(PointerChange::Update(Pointer::new(
+            Ok(PointerChange::Update(Pointer::new(
                 node_location(slotted_page.id(), page_index),
                 rlp_node,
-            )));
+            )))
         }
     }
 
@@ -1397,7 +1390,7 @@ impl StorageEngine {
                     // child is on different page, and we are only printing the current page
                     if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
                         let child_page_id = direct_child.location().page_id().unwrap();
-                        writeln!(buf, "{}Child on new page: {:?}", new_indent, child_page_id)?;
+                        writeln!(buf, "{new_indent}Child on new page: {child_page_id:?}")?;
                         Ok(())
                     } else {
                         self.print_page_helper(
@@ -1410,7 +1403,7 @@ impl StorageEngine {
                         )
                     }
                 } else {
-                    writeln!(buf, "{}No direct child", new_indent)?;
+                    writeln!(buf, "{new_indent}No direct child")?;
                     Ok(())
                 }
             }
@@ -1427,7 +1420,7 @@ impl StorageEngine {
                     // child is on new page, and we are only printing the current page
                     if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
                         let child_page_id = child.location().page_id().unwrap();
-                        writeln!(buf, "{}Child on new page: {:?}", new_indent, child_page_id)?;
+                        writeln!(buf, "{new_indent}Child on new page: {child_page_id:?}")?;
                         return Ok(());
                     } else {
                         self.print_page_helper(
@@ -1471,14 +1464,14 @@ impl StorageEngine {
             0 => (),
             1 => {
                 //verbose; print page ID and nodes accessed from page
-                writeln!(buf, "\nNODES ACCESSED FROM PAGE {}\n", page_id)?;
+                writeln!(buf, "\nNODES ACCESSED FROM PAGE {page_id}\n")?;
             }
             2 => {
                 //extra verbose; print page ID, nodes accessed from page, and page contents
-                writeln!(buf, "PAGE: {}\n", page_id)?;
+                writeln!(buf, "PAGE: {page_id}\n")?;
 
                 self.print_page(context, &mut buf, Some(page_id))?;
-                writeln!(buf, "\nNODES ACCESSED FROM PAGE {}:", page_id)?;
+                writeln!(buf, "\nNODES ACCESSED FROM PAGE {page_id}:")?;
             }
             _ => return Err(Error::DebugError("Invalid verbosity level".to_string())),
         }
@@ -1609,7 +1602,7 @@ impl StorageEngine {
                         )?;
                     }
                     _ => {
-                        writeln!(buf, "{}AccountLeaf: no value ", indent)?;
+                        writeln!(buf, "{indent}AccountLeaf: no value ")?;
                     }
                 };
                 Ok(())
@@ -1620,12 +1613,11 @@ impl StorageEngine {
                         let str_prefix = alloy_primitives::hex::encode(prefix.pack());
                         writeln!(
                             buf,
-                            "{}StorageLeaf: storage: {:?}, prefix: {}",
-                            indent, strg, str_prefix
+                            "{indent}StorageLeaf: storage: {strg:?}, prefix: {str_prefix}"
                         )?;
                     }
                     _ => {
-                        writeln!(buf, "{}StorageLeaf: no value", indent)?;
+                        writeln!(buf, "{indent}StorageLeaf: no value")?;
                     }
                 };
                 Ok(())
@@ -1655,7 +1647,7 @@ impl StorageEngine {
 
         self.debug_statistics_helper(context, slotted_page, 0, 1, 1, &mut stats)?;
 
-        writeln!(buf, "Page Statistics: {:?}", stats)?;
+        writeln!(buf, "Page Statistics: {stats:?}")?;
         Ok(())
     }
 
@@ -1942,6 +1934,21 @@ pub enum Error {
     PageSplit(usize),
     DebugError(String),
     ProofError(String),
+}
+
+impl Clone for Error {
+    fn clone(&self) -> Self {
+        match self {
+            Self::IO(e) => Self::IO(std::io::Error::new(e.kind(), e.to_string())),
+            Self::NodeError(e) => Self::NodeError(e.clone()),
+            Self::PageError(e) => Self::PageError(e.clone()),
+            Self::InvalidCommonPrefixIndex => Self::InvalidCommonPrefixIndex,
+            Self::InvalidSnapshotId => Self::InvalidSnapshotId,
+            Self::PageSplit(e) => Self::PageSplit(*e),
+            Self::DebugError(e) => Self::DebugError(e.clone()),
+            Self::ProofError(e) => Self::ProofError(e.clone()),
+        }
+    }
 }
 
 impl From<PageError> for Error {
