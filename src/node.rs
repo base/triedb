@@ -545,7 +545,7 @@ impl Value for Node {
             }
             Ok(Self::Branch { prefix, children })
         } else {
-            return Err(value::Error::InvalidEncoding);
+            Err(value::Error::InvalidEncoding)
         }
     }
 }

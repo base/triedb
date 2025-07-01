@@ -1941,6 +1941,7 @@ pub enum Error {
     InvalidSnapshotId,
     PageSplit(usize),
     DebugError(String),
+    ProofError(String),
 }
 
 impl From<PageError> for Error {
