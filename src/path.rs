@@ -1,4 +1,4 @@
-use alloy_primitives::{keccak256, Address, StorageKey};
+use alloy_primitives::{keccak256, Address, StorageKey, B256};
 use alloy_trie::Nibbles;
 use proptest_derive::Arbitrary;
 
@@ -39,6 +39,18 @@ impl AddressPath {
 impl From<AddressPath> for Nibbles {
     fn from(path: AddressPath) -> Self {
         path.path
+    }
+}
+
+impl From<AddressPath> for B256 {
+    fn from(path: AddressPath) -> Self {
+        B256::from_slice(&path.path.pack())
+    }
+}
+
+impl From<B256> for AddressPath {
+    fn from(hash: B256) -> Self {
+        Self { path: Nibbles::unpack(hash) }
     }
 }
 

@@ -1,11 +1,15 @@
+mod cursor;
 mod error;
 mod manager;
+
+pub use cursor::{Cursor, CursorError};
 
 use crate::{
     account::Account,
     context::TransactionContext,
     database::Database,
     node::TrieValue,
+    page::{PageId, SlottedPage},
     path::{AddressPath, StoragePath},
     storage::proofs::AccountProof,
 };
@@ -17,19 +21,29 @@ use sealed::sealed;
 use std::{collections::HashMap, fmt::Debug};
 
 #[sealed]
-pub trait TransactionKind: Debug {}
+pub trait TransactionKind: Debug {
+    fn is_writer() -> bool;
+}
 
 #[derive(Debug)]
 pub struct RW {}
 
 #[sealed]
-impl TransactionKind for RW {}
+impl TransactionKind for RW {
+    fn is_writer() -> bool {
+        true
+    }
+}
 
 #[derive(Debug)]
 pub struct RO {}
 
 #[sealed]
-impl TransactionKind for RO {}
+impl TransactionKind for RO {
+    fn is_writer() -> bool {
+        false
+    }
+}
 
 // Compile-time assertion to ensure that `Transaction` is `Send`
 const _: fn() = || {
@@ -40,7 +54,6 @@ const _: fn() = || {
 
 #[derive(Debug)]
 pub struct Transaction<K: TransactionKind> {
-    committed: bool,
     context: TransactionContext,
     database: Database,
     pending_changes: HashMap<Nibbles, Option<TrieValue>>,
@@ -50,7 +63,6 @@ pub struct Transaction<K: TransactionKind> {
 impl<K: TransactionKind> Transaction<K> {
     pub(crate) fn new(context: TransactionContext, database: Database) -> Self {
         Self {
-            committed: false,
             context,
             database,
             pending_changes: HashMap::new(),
@@ -147,6 +159,31 @@ impl<K: TransactionKind> Transaction<K> {
             .unwrap();
         Ok(())
     }
+
+    pub fn new_account_cursor(&self) -> Cursor {
+        Cursor::new_account_cursor(self.ro_clone())
+    }
+
+    pub fn new_storage_cursor(&self, address_path: AddressPath) -> Cursor {
+        Cursor::new_storage_cursor(self.ro_clone(), address_path.into())
+    }
+
+    pub(crate) fn get_slotted_page(
+        &self,
+        page_id: PageId,
+    ) -> Result<SlottedPage<'_>, TransactionError> {
+        self.database
+            .inner
+            .storage_engine
+            .get_slotted_page(&self.context, page_id)
+            .map_err(|_| TransactionError {})
+    }
+
+    fn ro_clone(&self) -> Transaction<RO> {
+        let context = self.context.clone();
+        self.database.inner.transaction_manager.lock().begin_ro(context.snapshot_id);
+        Transaction::<RO>::new(context, self.database.clone())
+    }
 }
 
 impl Transaction<RW> {
@@ -180,40 +217,26 @@ impl Transaction<RW> {
                 .unwrap();
         }
 
-        let mut transaction_manager = self.database.inner.transaction_manager.lock();
         self.database.inner.storage_engine.commit(&self.context).unwrap();
-
         self.database.inner.update_metrics_rw(&self.context);
-
-        transaction_manager.remove_tx(self.context.snapshot_id, true);
-
-        self.committed = true;
         Ok(())
     }
 
-    pub fn rollback(mut self) -> Result<(), TransactionError> {
+    pub fn rollback(self) -> Result<(), TransactionError> {
         self.database.inner.storage_engine.rollback(&self.context).unwrap();
-
-        let mut transaction_manager = self.database.inner.transaction_manager.lock();
-        transaction_manager.remove_tx(self.context.snapshot_id, true);
-
-        self.committed = false;
-        Ok(())
-    }
-}
-
-impl Transaction<RO> {
-    pub fn commit(mut self) -> Result<(), TransactionError> {
-        let mut transaction_manager = self.database.inner.transaction_manager.lock();
-        transaction_manager.remove_tx(self.context.snapshot_id, false);
-
-        self.committed = true;
         Ok(())
     }
 }
 
 impl<K: TransactionKind> Drop for Transaction<K> {
     fn drop(&mut self) {
-        // TODO: panic if the transaction is not committed
+        let mut transaction_manager = self.database.inner.transaction_manager.lock();
+        transaction_manager.remove_tx(self.context.snapshot_id, K::is_writer());
+    }
+}
+
+impl Transaction<RO> {
+    pub fn commit(self) -> Result<(), TransactionError> {
+        Ok(())
     }
 }
