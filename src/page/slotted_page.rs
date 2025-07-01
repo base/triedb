@@ -229,7 +229,7 @@ impl<'a> SlottedPageMut<'a> {
     }
 
     // Returns the index of the next free cell in the page, which may include deleted cells.
-    fn next_free_cell_index(&self) -> Result<u8, PageError> {
+    pub fn next_free_cell_index(&self) -> Result<u8, PageError> {
         let num_cells = self.num_cells();
         for i in 0..num_cells {
             if self.get_cell_pointer(i)?.is_deleted() {
@@ -240,6 +240,19 @@ impl<'a> SlottedPageMut<'a> {
             return Err(PageError::NoFreeCells);
         }
         Ok(num_cells)
+    }
+
+    // Swaps the cell pointers at the given indices.
+    pub fn swap_cell_pointers(&mut self, index1: u8, index2: u8) -> Result<(), PageError> {
+        if index1 >= self.num_cells() || index2 >= self.num_cells() {
+            return Err(PageError::InvalidCellPointer);
+        }
+        let start_index_1 = 1 + CELL_POINTER_SIZE * (index1 as usize);
+        let start_index_2 = 1 + CELL_POINTER_SIZE * (index2 as usize);
+        for i in 0..CELL_POINTER_SIZE {
+            self.page.contents_mut().swap(start_index_1 + i, start_index_2 + i);
+        }
+        Ok(())
     }
 
     // Allocates a cell pointer at the given index with the given length and returns the cell
