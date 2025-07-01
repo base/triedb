@@ -1,3 +1,4 @@
+pub mod cursor;
 pub mod debug;
 pub mod engine;
 pub mod proofs;

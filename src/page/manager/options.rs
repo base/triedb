@@ -17,7 +17,7 @@ impl PageManagerOptions {
         open_options.read(true).write(true).create(true).truncate(false);
 
         let max_pages = if cfg!(not(test)) {
-            Page::MAX_COUNT
+            Page::MAX_COUNT / 1024
         } else {
             // Because tests run in parallel, it's easy to exhaust the address space, so use a more
             // conservative limit

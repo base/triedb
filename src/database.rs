@@ -8,16 +8,21 @@ use crate::{
 };
 use alloy_primitives::B256;
 use parking_lot::Mutex;
-use std::{io, path::Path};
+use std::{io, path::Path, sync::Arc};
+
+#[derive(Debug, Clone)]
+pub struct Database {
+    pub(crate) inner: Arc<DatabaseInner>,
+}
 
 #[derive(Debug)]
-pub struct Database {
-    pub(crate) storage_engine: StorageEngine,
+pub struct DatabaseInner {
+    pub(crate) storage_engine: Arc<StorageEngine>,
     pub(crate) transaction_manager: Mutex<TransactionManager>,
     metrics: DatabaseMetrics,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Error {
     PageError(PageError),
     EngineError(engine::Error),
@@ -28,6 +33,16 @@ pub enum OpenError {
     PageError(PageError),
     MetadataError(OpenMetadataError),
     IO(io::Error),
+}
+
+impl Clone for OpenError {
+    fn clone(&self) -> Self {
+        match self {
+            Self::PageError(e) => Self::PageError(e.clone()),
+            Self::MetadataError(e) => Self::MetadataError(e.clone()),
+            Self::IO(e) => Self::IO(std::io::Error::new(e.kind(), e.to_string())),
+        }
+    }
 }
 
 impl Database {
@@ -67,17 +82,49 @@ impl Database {
 
     pub fn new(storage_engine: StorageEngine) -> Self {
         Self {
-            storage_engine,
-            transaction_manager: Mutex::new(TransactionManager::new()),
-            metrics: DatabaseMetrics::default(),
+            inner: Arc::new(DatabaseInner {
+                storage_engine: Arc::new(storage_engine),
+                transaction_manager: Mutex::new(TransactionManager::new()),
+                metrics: DatabaseMetrics::default(),
+            }),
         }
     }
 
-    pub fn close(self) -> io::Result<()> {
-        self.storage_engine.close()
+    pub fn begin_rw(&self) -> Result<Transaction<RW>, TransactionError> {
+        let context = self.inner.storage_engine.write_context();
+        let min_snapshot_id =
+            self.inner.transaction_manager.lock().begin_rw(context.snapshot_id)?;
+        if min_snapshot_id > 0 {
+            self.inner.storage_engine.unlock(min_snapshot_id - 1);
+        }
+        Ok(Transaction::new(context, self.clone()))
     }
 
-    pub fn print_page<W: io::Write>(self, buf: W, page_id: Option<PageId>) -> Result<(), Error> {
+    pub fn begin_ro(&self) -> Result<Transaction<RO>, TransactionError> {
+        let context = self.inner.storage_engine.read_context();
+        self.inner.transaction_manager.lock().begin_ro(context.snapshot_id);
+        Ok(Transaction::new(context, self.clone()))
+    }
+
+    pub fn size(&self) -> u32 {
+        self.inner.size()
+    }
+
+    pub fn state_root(&self) -> B256 {
+        self.inner.state_root()
+    }
+
+    pub fn close(self) -> io::Result<()> {
+        Arc::try_unwrap(self.inner).unwrap().close()
+    }
+}
+
+impl DatabaseInner {
+    fn close(self) -> io::Result<()> {
+        Arc::try_unwrap(self.storage_engine).unwrap().close()
+    }
+
+    fn print_page<W: io::Write>(self, buf: W, page_id: Option<PageId>) -> Result<(), Error> {
         let context = self.storage_engine.read_context();
         // TODO: Must use `expect()` because `storage::engine::Error` and `database::Error` are not
         // compatible. There's probably no reason to use two different error enums here, so maybe
@@ -114,32 +161,17 @@ impl Database {
         Ok(())
     }
 
-    pub fn print_statistics<W: io::Write>(self, buf: W) -> Result<(), Error> {
+    fn print_statistics<W: io::Write>(self, buf: W) -> Result<(), Error> {
         let context = self.storage_engine.read_context();
         self.storage_engine.debug_statistics(&context, buf).expect("write failed");
         Ok(())
     }
 
-    pub fn begin_rw(&self) -> Result<Transaction<'_, RW>, TransactionError> {
-        let context = self.storage_engine.write_context();
-        let min_snapshot_id = self.transaction_manager.lock().begin_rw(context.snapshot_id)?;
-        if min_snapshot_id > 0 {
-            self.storage_engine.unlock(min_snapshot_id - 1);
-        }
-        Ok(Transaction::new(context, self))
-    }
-
-    pub fn begin_ro(&self) -> Result<Transaction<'_, RO>, TransactionError> {
-        let context = self.storage_engine.read_context();
-        self.transaction_manager.lock().begin_ro(context.snapshot_id);
-        Ok(Transaction::new(context, self))
-    }
-
-    pub fn state_root(&self) -> B256 {
+    fn state_root(&self) -> B256 {
         self.storage_engine.read_context().root_node_hash
     }
 
-    pub fn size(&self) -> u32 {
+    fn size(&self) -> u32 {
         self.storage_engine.size()
     }
 
@@ -169,7 +201,6 @@ impl Database {
             .record(context.transaction_metrics.take_pages_split() as f64);
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

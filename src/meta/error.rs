@@ -17,6 +17,15 @@ pub enum OpenMetadataError {
     IO(io::Error),
 }
 
+impl Clone for OpenMetadataError {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Corrupted => Self::Corrupted,
+            Self::IO(e) => Self::IO(std::io::Error::new(e.kind(), e.to_string())),
+        }
+    }
+}
+
 impl fmt::Display for OpenMetadataError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
