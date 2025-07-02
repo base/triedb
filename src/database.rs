@@ -7,12 +7,12 @@ use crate::{
     transaction::{Transaction, TransactionError, TransactionManager, RO, RW},
 };
 use alloy_primitives::B256;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use std::{collections::HashSet, io, path::Path};
 
 #[derive(Debug)]
 pub struct Database {
-    pub(crate) storage_engine: RwLock<StorageEngine>,
+    pub(crate) storage_engine: StorageEngine,
     pub(crate) transaction_manager: Mutex<TransactionManager>,
     metrics: DatabaseMetrics,
 }
@@ -67,23 +67,22 @@ impl Database {
 
     pub fn new(storage_engine: StorageEngine) -> Self {
         Self {
-            storage_engine: RwLock::new(storage_engine),
+            storage_engine,
             transaction_manager: Mutex::new(TransactionManager::new()),
             metrics: DatabaseMetrics::default(),
         }
     }
 
     pub fn close(self) -> io::Result<()> {
-        self.storage_engine.into_inner().close()
+        self.storage_engine.close()
     }
 
     pub fn print_page<W: io::Write>(self, buf: W, page_id: Option<PageId>) -> Result<(), Error> {
-        let storage_engine = self.storage_engine.read();
-        let context = storage_engine.read_context();
+        let context = self.storage_engine.read_context();
         // TODO: Must use `expect()` because `storage::engine::Error` and `database::Error` are not
         // compatible. There's probably no reason to use two different error enums here, so maybe
         // we should unify them. Or maybe we could just rely on `std::io::Error`.
-        storage_engine.print_page(&context, buf, page_id).expect("write failed");
+        self.storage_engine.print_page(&context, buf, page_id).expect("write failed");
         Ok(())
     }
 
@@ -116,9 +115,8 @@ impl Database {
     }
 
     pub fn print_statistics<W: io::Write>(self, buf: W) -> Result<(), Error> {
-        let storage_engine = self.storage_engine.read();
-        let context = storage_engine.read_context();
-        storage_engine.debug_statistics(&context, buf).expect("write failed");
+        let context = self.storage_engine.read_context();
+        self.storage_engine.debug_statistics(&context, buf).expect("write failed");
         Ok(())
     }
 
@@ -134,25 +132,24 @@ impl Database {
         let mut meta_manager =
             MetadataManager::open(meta_file_path).map_err(OpenError::MetadataError)?;
 
-        let storage_engine = self.storage_engine.read();
-        let context = storage_engine.read_context();
-        let active_slot_page_id = storage_engine.metadata().active_slot().root_node_page_id();
-        let dirty_slot_page_id = storage_engine.metadata().dirty_slot().root_node_page_id();
+        let context = self.storage_engine.read_context();
+        let active_slot_page_id = meta_manager.active_slot().root_node_page_id();
+        let dirty_slot_page_id = meta_manager.dirty_slot().root_node_page_id();
 
         let mut reachable_pages =
-            storage_engine.consistency_check(active_slot_page_id, &context).expect("write failed");
+            self.storage_engine.consistency_check(active_slot_page_id, &context).expect("write failed");
         let dirty_slot_pages =
-            storage_engine.consistency_check(dirty_slot_page_id, &context).expect("write failed");
+            self.storage_engine.consistency_check(dirty_slot_page_id, &context).expect("write failed");
         reachable_pages.extend(&dirty_slot_pages);
 
-        let orphaned_pages = meta_manager.orphan_pages().iter().collect::<HashSet<_>>();
+        let orphaned_pages = meta_manager.orphan_pages().iter().map(|orphan| orphan.page_id()).collect::<HashSet<_>>();
 
         let reachachable_orphaned_pages: HashSet<PageId> =
             orphaned_pages.intersection(&reachable_pages).cloned().collect();
 
         writeln!(buf, "Reachable Orphaned Pages: {:?}", reachachable_orphaned_pages)
             .expect("write failed");
-        let page_count = storage_engine.size();
+        let page_count = self.storage_engine.size();
 
         let all_pages: HashSet<PageId> = (1..page_count)
             .map(|id| PageId::new(id).unwrap()) // Unwrap Option from new()
@@ -165,40 +162,33 @@ impl Database {
         let unreachable_pages: HashSet<PageId> =
             all_pages.difference(&reachable_or_orphaned).cloned().collect();
 
-        // 4. Print unreachable pages
+        // Print unreachable pages
         writeln!(buf, "Unreachable Pages: {:?}", unreachable_pages).expect("write failed");
 
         Ok(())
     }
 
     pub fn begin_rw(&self) -> Result<Transaction<'_, RW>, TransactionError> {
-        let mut transaction_manager = self.transaction_manager.lock();
-        let mut storage_engine = self.storage_engine.write();
-        let metadata = storage_engine.metadata().dirty_slot();
-        let min_snapshot_id = transaction_manager.begin_rw(metadata.snapshot_id())?;
+        let context = self.storage_engine.write_context();
+        let min_snapshot_id = self.transaction_manager.lock().begin_rw(context.snapshot_id)?;
         if min_snapshot_id > 0 {
-            storage_engine.unlock(min_snapshot_id - 1);
+            self.storage_engine.unlock(min_snapshot_id - 1);
         }
-        let context = storage_engine.write_context();
         Ok(Transaction::new(context, self))
     }
 
     pub fn begin_ro(&self) -> Result<Transaction<'_, RO>, TransactionError> {
-        let mut transaction_manager = self.transaction_manager.lock();
-        let storage_engine = self.storage_engine.read();
-        let metadata = storage_engine.metadata().active_slot();
-        transaction_manager.begin_ro(metadata.snapshot_id());
-        let context = storage_engine.read_context();
+        let context = self.storage_engine.read_context();
+        self.transaction_manager.lock().begin_ro(context.snapshot_id);
         Ok(Transaction::new(context, self))
     }
 
     pub fn state_root(&self) -> B256 {
-        self.storage_engine.read().metadata().active_slot().root_node_hash()
+        self.storage_engine.read_context().root_node_hash
     }
 
     pub fn size(&self) -> u32 {
-        let storage_engine = self.storage_engine.read();
-        storage_engine.size()
+        self.storage_engine.size()
     }
 
     pub fn update_metrics_ro(&self, context: &TransactionContext) {
@@ -232,7 +222,7 @@ impl Database {
 mod tests {
     use super::*;
     use crate::{account::Account, path::AddressPath};
-    use alloy_primitives::{address, U256};
+    use alloy_primitives::{address, Address, U256};
     use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
     use tempdir::TempDir;
 
@@ -331,5 +321,115 @@ mod tests {
 
         let account = tx.get_account(AddressPath::for_address(address2)).unwrap().unwrap();
         assert_eq!(account, account2);
+    }
+
+    #[test]
+    fn test_orphan_page_recycling_safety() {
+        fn random_accounts(count: usize) -> impl Iterator<Item = (AddressPath, Option<Account>)> {
+            (0..count).map(|_| {
+                let address = Address::random();
+                let account = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
+                (AddressPath::for_address(address), Some(account))
+            })
+        }
+
+        fn alive_page_ids(db: &Database) -> Vec<PageId> {
+            let orphan_pages = db
+                .storage_engine
+                .meta_manager
+                .lock()
+                .orphan_pages()
+                .iter()
+                .map(|orphan| orphan.page_id())
+                .collect::<Vec<_>>();
+            let all_pages = (1..db.storage_engine.page_manager.size())
+                .map(|page_id| PageId::new(page_id).unwrap());
+            all_pages.filter(move |page_id| !orphan_pages.contains(page_id)).collect()
+        }
+
+        // Create a new database and verify it has no pages
+        let tmp_dir = TempDir::new("test_db").unwrap();
+        let file_path = tmp_dir.path().join("test.db");
+        let db = Database::create(file_path).unwrap();
+        assert_eq!(db.storage_engine.page_manager.size(), 0);
+
+        // Add 1000 accounts
+        let mut tx = db.begin_rw().expect("rw transaction creation failed");
+        let initial_accounts = random_accounts(1000).collect::<Vec<_>>();
+        for (address, account) in &initial_accounts {
+            tx.set_account(address.clone(), account.clone()).expect("adding account failed");
+        }
+        tx.commit().expect("commit failed");
+
+        // Verify that the 1000 accounts got recorded in more than 1 page at snapshot 1
+        let page_ids = alive_page_ids(&db);
+        assert!(page_ids.len() > 1, "storage has no pages");
+        for page_id in &page_ids {
+            assert_eq!(
+                db.storage_engine
+                    .page_manager
+                    .get(1, *page_id)
+                    .unwrap_or_else(|err| panic!("page {page_id} not found: {err:?}"))
+                    .snapshot_id(),
+                1
+            );
+        }
+
+        // Add 1000 more accounts
+        let mut tx = db.begin_rw().expect("rw transaction creation failed");
+        let more_accounts = random_accounts(1000).collect::<Vec<_>>();
+        for (address, account) in &more_accounts {
+            tx.set_account(address.clone(), account.clone()).expect("adding account failed");
+        }
+        tx.commit().expect("commit failed");
+
+        // Verify that the new accounts caused even more pages to get added, this time at snapshot
+        // 2
+        let old_page_ids = page_ids;
+        let new_page_ids = alive_page_ids(&db);
+        assert!(
+            new_page_ids.len() > old_page_ids.len(),
+            "number of pages did not increase: {} -> {}",
+            old_page_ids.len(),
+            new_page_ids.len()
+        );
+        for page_id in &new_page_ids {
+            let page = db
+                .storage_engine
+                .page_manager
+                .get(1, *page_id)
+                .unwrap_or_else(|err| panic!("page {page_id} not found: {err:?}"));
+            if old_page_ids.contains(page_id) {
+                assert_eq!(page.snapshot_id(), 1);
+            } else {
+                assert_eq!(page.snapshot_id(), 2);
+            }
+        }
+
+        // Obtain a read transaction, and verify that it can access all the initial accounts
+        let mut read_tx = db.begin_ro().expect("ro transaction creation failed");
+        for (address, account) in &initial_accounts {
+            assert_eq!(
+                read_tx.get_account(address.clone()).expect("error while reading account"),
+                account.clone()
+            );
+        }
+
+        // Delete the initial accounts
+        let mut tx = db.begin_rw().expect("rw transaction creation failed");
+        for (address, _) in &initial_accounts {
+            tx.set_account(address.clone(), None).expect("deleting account failed");
+        }
+        tx.commit().expect("commit failed");
+
+        // Verify that the read transaction that we created before the delete can still access the
+        // initial accounts
+        read_tx.clear_cache();
+        for (address, account) in &initial_accounts {
+            assert_eq!(
+                read_tx.get_account(address.clone()).expect("error while reading account"),
+                account.clone()
+            );
+        }
     }
 }

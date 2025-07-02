@@ -1,72 +1,84 @@
+use std::collections::BTreeMap;
+
 use crate::{
     account::Account,
     context::TransactionContext,
     node::{
         encode_branch,
         Node::{self, AccountLeaf, Branch},
-        TrieValue,
+        NodeError, TrieValue,
     },
     page::SlottedPage,
-    path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH},
-    pointer::Pointer,
+    path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH, STORAGE_PATH_LENGTH},
 };
 
-use alloy_primitives::{Bytes, StorageValue, B256};
-use alloy_rlp::BytesMut;
-use alloy_trie::{nybbles::common_prefix_length, Nibbles, TrieMask};
+use alloy_primitives::{map::B256Map, Bytes, B256, U256};
+use alloy_rlp::{decode_exact, BytesMut};
+use alloy_trie::{nybbles::common_prefix_length, Nibbles, EMPTY_ROOT_HASH};
 
-use reth_trie_common::{MultiProof, StorageMultiProof};
+use super::engine::{Error, StorageEngine};
 
-use super::engine::Error;
+/// A Merkle proof of an account and select storage slots.
+#[derive(Default, Debug)]
+pub struct AccountProof {
+    pub hashed_address: Nibbles,
+    pub account: Account,
+    pub proof: BTreeMap<Nibbles, Bytes>,
+    pub storage_proofs: B256Map<StorageProof>,
+}
 
-use super::engine::StorageEngine;
+/// A Merkle proof of a storage slot.
+#[derive(Default, Debug)]
+pub struct StorageProof {
+    pub hashed_slot: Nibbles,
+    pub value: U256,
+    pub proof: BTreeMap<Nibbles, Bytes>,
+}
 
 impl StorageEngine {
-    /// Retrieves a [(Account, MultiProof)] from the storage engine, identified by the given
+    /// Retrieves an [AccountProof] from the storage engine, identified by the given
     /// [AddressPath]. Returns [None] if the path is not found.
     pub fn get_account_with_proof(
         &self,
         context: &TransactionContext,
         address_path: AddressPath,
-    ) -> Result<Option<(Account, MultiProof)>, Error> {
-        let result = self.get_value_with_proof(context, address_path.into())?;
-        match result {
-            Some((TrieValue::Account(account), proof)) => Ok(Some((account, proof))),
-            Some((TrieValue::Storage(_), _)) => panic!("storage proof found for account path"),
-            None => Ok(None),
-        }
+    ) -> Result<Option<AccountProof>, Error> {
+        self.get_value_with_proof(context, address_path.into())
     }
 
-    /// Retrieves a [(StorageValue, MultiProof)] from the storage engine, identified by the given
-    /// [StoragePath]. Returns [None] if the path is not found.
+    /// Retrieves an [AccountProof] from the storage engine, containing the storage proof for the
+    /// given [StoragePath]. Returns [None] if the path is not found.
     pub fn get_storage_with_proof(
         &self,
         context: &TransactionContext,
         storage_path: StoragePath,
-    ) -> Result<Option<(StorageValue, MultiProof)>, Error> {
-        let result = self.get_value_with_proof(context, storage_path.into())?;
-        match result {
-            Some((TrieValue::Storage(storage_value), proof)) => Ok(Some((storage_value, proof))),
-            Some((TrieValue::Account(_), _)) => panic!("account proof found for storage path"),
-            None => Ok(None),
-        }
+    ) -> Result<Option<AccountProof>, Error> {
+        self.get_value_with_proof(context, storage_path.into())
     }
 
     fn get_value_with_proof(
         &self,
         context: &TransactionContext,
         path: Nibbles,
-    ) -> Result<Option<(TrieValue, MultiProof)>, Error> {
+    ) -> Result<Option<AccountProof>, Error> {
+        assert!(
+            path.len() == ADDRESS_PATH_LENGTH || path.len() == STORAGE_PATH_LENGTH,
+            "path must be exactly {ADDRESS_PATH_LENGTH} or {STORAGE_PATH_LENGTH} nibbles"
+        );
+
         let root_node_page_id = match context.root_node_page_id {
             None => return Ok(None),
             Some(page_id) => page_id,
         };
 
+        let account_proof = AccountProof {
+            hashed_address: path.slice(..ADDRESS_PATH_LENGTH).clone(),
+            ..Default::default()
+        };
         let slotted_page = self.get_slotted_page(context, root_node_page_id)?;
-        let mut proof = MultiProof::default();
-        let value =
-            self.get_value_with_proof_from_page(context, &path, 0, slotted_page, 0, &mut proof)?;
-        Ok(value.map(|value| (value, proof)))
+        let proof =
+            self.get_value_with_proof_from_page(context, &path, 0, slotted_page, 0, account_proof)?;
+        Ok(proof)
     }
 
     /// Retrieves a [TrieValue] from the given page or any of its descendants.
@@ -78,8 +90,8 @@ impl StorageEngine {
         path_offset: usize,
         slotted_page: SlottedPage<'_>,
         page_index: u8,
-        proof: &mut MultiProof,
-    ) -> Result<Option<TrieValue>, Error> {
+        mut proof: AccountProof,
+    ) -> Result<Option<AccountProof>, Error> {
         let node: Node = slotted_page.get_value(page_index)?;
 
         let common_prefix_length =
@@ -90,31 +102,54 @@ impl StorageEngine {
 
         let proof_node = node.rlp_encode();
         let full_node_path = original_path.slice(..path_offset);
-        proof.account_subtree.insert(full_node_path.clone(), Bytes::from(proof_node.to_vec()));
+        proof.proof.insert(full_node_path.clone(), Bytes::from(proof_node.to_vec()));
 
         let remaining_path = original_path.slice(path_offset + common_prefix_length..);
         if remaining_path.is_empty() {
-            return Ok(Some(node.value()?));
+            match node.value() {
+                Ok(TrieValue::Account(account)) => {
+                    proof.account = account;
+                    return Ok(Some(proof));
+                }
+                Ok(TrieValue::Storage(_)) => {
+                    return Err(Error::ProofError(
+                        "storage value found for account path".to_string(),
+                    ));
+                }
+                Err(NodeError::NoValue) => {
+                    return Err(Error::ProofError("no value found for account path".to_string()));
+                }
+                Err(_) => {
+                    return Err(Error::ProofError("unexpected error".to_string()));
+                }
+            }
         }
 
         assert!(path_offset <= 64);
 
         match node {
-            AccountLeaf { ref storage_root, .. } => {
+            AccountLeaf { prefix: _, nonce_rlp, balance_rlp, code_hash, storage_root } => {
                 assert_eq!(path_offset + common_prefix_length, ADDRESS_PATH_LENGTH);
 
+                let nonce: u64 = decode_exact(&nonce_rlp)
+                    .map_err(|e| Error::ProofError(format!("Failed to decode nonce: {e}")))?;
+                let balance: U256 = decode_exact(&balance_rlp)
+                    .map_err(|e| Error::ProofError(format!("Failed to decode balance: {e}")))?;
+                proof.account = Account::new(nonce, balance, EMPTY_ROOT_HASH, code_hash);
+
                 if let Some(storage_root) = storage_root {
-                    let mut storage_proof = StorageMultiProof::empty();
-                    storage_proof.root = storage_root.rlp().as_hash().unwrap();
+                    proof.account.storage_root = storage_root.rlp().as_hash().unwrap();
+                    let storage_proof =
+                        StorageProof { hashed_slot: remaining_path.clone(), ..Default::default() };
                     let storage_location = storage_root.location();
-                    let storage_value = if storage_location.cell_index().is_some() {
+                    let storage_proof = if storage_location.cell_index().is_some() {
                         self.get_storage_proof_from_page(
                             context,
                             &remaining_path,
                             0,
                             slotted_page,
                             storage_location.cell_index().unwrap(),
-                            &mut storage_proof,
+                            storage_proof,
                         )?
                     } else {
                         let child_page_id = storage_location.page_id().unwrap();
@@ -125,32 +160,31 @@ impl StorageEngine {
                             0,
                             child_slotted_page,
                             0,
-                            &mut storage_proof,
+                            storage_proof,
                         )?
                     };
-                    let account_path = original_path.slice(..path_offset + common_prefix_length);
-                    proof.storages.insert(B256::from_slice(&account_path.pack()), storage_proof);
-                    return Ok(storage_value);
+                    match storage_proof {
+                        Some(storage_proof) => {
+                            proof.storage_proofs.insert(
+                                B256::from_slice(&storage_proof.hashed_slot.pack()),
+                                storage_proof,
+                            );
+                            return Ok(Some(proof));
+                        }
+                        None => {
+                            return Ok(None);
+                        }
+                    }
                 }
                 Ok(None)
             }
             Branch { ref prefix, ref children, .. } => {
-                if prefix.is_empty() {
-                    // true branch node
-                    proof
-                        .branch_node_hash_masks
-                        .insert(full_node_path.clone(), Self::hash_mask(children));
-                    proof.branch_node_tree_masks.insert(full_node_path, Self::tree_mask(children));
-                } else {
+                if !prefix.is_empty() {
                     // extension + branch
                     let branch_path = original_path.slice(..path_offset + common_prefix_length);
                     let mut branch_rlp = BytesMut::new();
                     encode_branch(children, &mut branch_rlp);
-                    proof.account_subtree.insert(branch_path.clone(), branch_rlp.freeze().into());
-                    proof
-                        .branch_node_hash_masks
-                        .insert(branch_path.clone(), Self::hash_mask(children));
-                    proof.branch_node_tree_masks.insert(branch_path, Self::tree_mask(children));
+                    proof.proof.insert(branch_path.clone(), branch_rlp.freeze().into());
                 }
 
                 // go down the trie
@@ -197,8 +231,8 @@ impl StorageEngine {
         path_offset: usize,
         slotted_page: SlottedPage<'_>,
         page_index: u8,
-        proof: &mut StorageMultiProof,
-    ) -> Result<Option<TrieValue>, Error> {
+        mut proof: StorageProof,
+    ) -> Result<Option<StorageProof>, Error> {
         let node: Node = slotted_page.get_value(page_index)?;
 
         let common_prefix_length =
@@ -211,8 +245,24 @@ impl StorageEngine {
         if remaining_path.is_empty() {
             let full_node_path = original_path.slice(..path_offset);
             let proof_node = node.rlp_encode();
-            proof.subtree.insert(full_node_path, Bytes::from(proof_node.to_vec()));
-            return Ok(Some(node.value()?));
+            proof.proof.insert(full_node_path, Bytes::from(proof_node.to_vec()));
+            match node.value() {
+                Ok(TrieValue::Storage(storage_value)) => {
+                    proof.value = storage_value;
+                    return Ok(Some(proof));
+                }
+                Ok(TrieValue::Account(_)) => {
+                    return Err(Error::ProofError(
+                        "account value found for storage path".to_string(),
+                    ));
+                }
+                Err(NodeError::NoValue) => {
+                    return Err(Error::ProofError("no value found for storage path".to_string()));
+                }
+                Err(_) => {
+                    return Err(Error::ProofError("unexpected error".to_string()));
+                }
+            }
         }
 
         assert!(path_offset <= 64);
@@ -222,24 +272,14 @@ impl StorageEngine {
                 // update account subtree for branch node or branch+extension node
                 let full_node_path = original_path.slice(..path_offset);
                 let proof_node = node.rlp_encode();
-                proof.subtree.insert(full_node_path.clone(), Bytes::from(proof_node.to_vec()));
+                proof.proof.insert(full_node_path, Bytes::from(proof_node.to_vec()));
 
-                if prefix.is_empty() {
-                    // true branch node
-                    proof
-                        .branch_node_hash_masks
-                        .insert(full_node_path.clone(), Self::hash_mask(children));
-                    proof.branch_node_tree_masks.insert(full_node_path, Self::tree_mask(children));
-                } else {
+                if !prefix.is_empty() {
                     // extension + branch
                     let branch_path = original_path.slice(..path_offset + common_prefix_length);
                     let mut branch_rlp = BytesMut::new();
                     encode_branch(children, &mut branch_rlp);
-                    proof.subtree.insert(branch_path.clone(), branch_rlp.freeze().into());
-                    proof
-                        .branch_node_hash_masks
-                        .insert(branch_path.clone(), Self::hash_mask(children));
-                    proof.branch_node_tree_masks.insert(branch_path, Self::tree_mask(children));
+                    proof.proof.insert(branch_path.clone(), branch_rlp.freeze().into());
                 }
 
                 let child_pointer = children[remaining_path[0] as usize].as_ref();
@@ -277,47 +317,45 @@ impl StorageEngine {
             _ => unreachable!(),
         }
     }
-
-    fn tree_mask(children: &[Option<Pointer>]) -> TrieMask {
-        let mut mask = TrieMask::default();
-        children.iter().enumerate().filter(|(_, child)| child.is_some()).for_each(|(i, _)| {
-            mask.set_bit(i as u8);
-        });
-        mask
-    }
-
-    fn hash_mask(children: &[Option<Pointer>]) -> TrieMask {
-        let mut mask = TrieMask::default();
-        children
-            .iter()
-            .enumerate()
-            .filter(
-                |(_, child)| {
-                    if let Some(child) = child {
-                        child.rlp().as_hash().is_some()
-                    } else {
-                        false
-                    }
-                },
-            )
-            .for_each(|(i, _)| {
-                mask.set_bit(i as u8);
-            });
-        mask
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{address, b256, hex, U256};
-    use alloy_trie::{TrieMask, KECCAK_EMPTY};
+    use alloy_rlp::encode;
+    use alloy_trie::{proof::verify_proof, TrieAccount, KECCAK_EMPTY};
 
     use super::*;
     use crate::storage::test_utils::{create_test_account, create_test_engine};
 
+    fn verify_account_proof(proof: &AccountProof, root: B256) {
+        let expected = Some(encode(TrieAccount {
+            nonce: proof.account.nonce,
+            balance: proof.account.balance,
+            storage_root: proof.account.storage_root,
+            code_hash: proof.account.code_hash,
+        }));
+        verify_proof(root, proof.hashed_address.clone(), expected, proof.proof.values())
+            .expect("failed to verify account proof");
+
+        for storage_proof in proof.storage_proofs.values() {
+            verify_storage_proof(storage_proof, proof.account.storage_root);
+        }
+    }
+
+    fn verify_storage_proof(proof: &StorageProof, root: B256) {
+        verify_proof(
+            root,
+            proof.hashed_slot.clone(),
+            Some(alloy_rlp::encode(proof.value)),
+            proof.proof.values(),
+        )
+        .expect("failed to verify storage proof");
+    }
+
     #[test]
     fn test_get_nonexistent_proof() {
-        let (mut storage_engine, mut context) = create_test_engine(2000);
+        let (storage_engine, mut context) = create_test_engine(2000);
 
         // the account and storage slot are not present in the trie
         let address = address!("0x0000000000000000000000000000000000000001");
@@ -354,7 +392,7 @@ mod tests {
 
     #[test]
     fn test_get_proof() {
-        let (mut storage_engine, mut context) = create_test_engine(2000);
+        let (storage_engine, mut context) = create_test_engine(2000);
 
         // 1. insert a single account
         let address = address!("0x0000000000000000000000000000000000000001");
@@ -368,21 +406,17 @@ mod tests {
             )
             .unwrap();
 
-        let (read_account, proof) =
-            storage_engine.get_account_with_proof(&context, path.clone()).unwrap().unwrap();
-        assert_eq!(read_account, account);
+        let proof = storage_engine.get_account_with_proof(&context, path.clone()).unwrap().unwrap();
+        assert_eq!(proof.account, account);
 
-        assert_eq!(proof.account_subtree.len(), 1);
-        assert!(proof.account_subtree.contains_key(&Nibbles::default()));
-        let leaf_node_proof = proof.account_subtree.get(&Nibbles::default()).unwrap();
+        assert_eq!(proof.proof.len(), 1);
+        assert!(proof.proof.contains_key(&Nibbles::default()));
+        let leaf_node_proof = proof.proof.get(&Nibbles::default()).unwrap();
         assert_eq!(leaf_node_proof, &Bytes::from(hex!("0xf86aa1201468288056310c82aa4c01a7e12a10f8111a0560e72b700555479031b86c357db846f8440101a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470")));
 
-        assert_eq!(proof.branch_node_hash_masks.len(), 0);
-        assert_eq!(proof.branch_node_tree_masks.len(), 0);
-        assert_eq!(proof.storages.len(), 0);
+        assert_eq!(proof.storage_proofs.len(), 0);
 
-        let account_proof = proof.account_proof(address, &[]).unwrap();
-        account_proof.verify(context.root_node_hash).unwrap();
+        verify_account_proof(&proof, context.root_node_hash);
 
         // 2. insert a new account so that both accounts are under the same top-level branch node
         let address2 = address!("0x0000000000000000000000000000000000000002");
@@ -393,27 +427,19 @@ mod tests {
             .set_values(&mut context, vec![(path2.clone().into(), Some(account2.into()))].as_mut())
             .unwrap();
 
-        let (read_account, proof) =
-            storage_engine.get_account_with_proof(&context, path.clone()).unwrap().unwrap();
-        assert_eq!(read_account, account);
+        let proof = storage_engine.get_account_with_proof(&context, path.clone()).unwrap().unwrap();
+        assert_eq!(proof.account, account);
 
-        assert_eq!(proof.account_subtree.len(), 2, "Proof should contain a branch and a leaf");
-        assert!(proof.account_subtree.contains_key(&Nibbles::default()));
-        let branch_node_proof = proof.account_subtree.get(&Nibbles::default()).unwrap();
+        assert_eq!(proof.proof.len(), 2, "Proof should contain a branch and a leaf");
+        assert!(proof.proof.contains_key(&Nibbles::default()));
+        let branch_node_proof = proof.proof.get(&Nibbles::default()).unwrap();
         assert_eq!(branch_node_proof, &Bytes::from(hex!("0xf85180a0bf57afd571ba1e3c86b9109b8e1f3ea231a24a298029b7bc804ed53788918a5f8080808080808080808080a0687b2ec5bde2a80c990485ab23c35513c3180ddc6e7fea67986bbce7eee06a47808080")));
-        let leaf_node_proof = proof.account_subtree.get(&Nibbles::from_nibbles([1])).unwrap();
+        let leaf_node_proof = proof.proof.get(&Nibbles::from_nibbles([1])).unwrap();
         assert_eq!(leaf_node_proof, &Bytes::from(hex!("0xf869a03468288056310c82aa4c01a7e12a10f8111a0560e72b700555479031b86c357db846f8440101a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470")));
 
-        assert_eq!(proof.branch_node_hash_masks.len(), 1);
-        let hash_mask = proof.branch_node_hash_masks.get(&Nibbles::default()).unwrap();
-        assert_eq!(hash_mask, &TrieMask::new(0b0010000000000010));
-        assert_eq!(proof.branch_node_tree_masks.len(), 1);
-        let tree_mask = proof.branch_node_tree_masks.get(&Nibbles::default()).unwrap();
-        assert_eq!(tree_mask, &TrieMask::new(0b0010000000000010));
-        assert_eq!(proof.storages.len(), 0);
+        assert_eq!(proof.storage_proofs.len(), 0);
 
-        let account_proof = proof.account_proof(address, &[]).unwrap();
-        account_proof.verify(context.root_node_hash).unwrap();
+        verify_account_proof(&proof, context.root_node_hash);
 
         // 3. insert a new storage slot for the first account
         let storage_path = StoragePath::for_address_and_slot(
@@ -429,10 +455,10 @@ mod tests {
             )
             .unwrap();
 
-        let (read_account, account_proof) =
+        let account_proof =
             storage_engine.get_account_with_proof(&context, path.clone()).unwrap().unwrap();
         assert_eq!(
-            read_account,
+            account_proof.account,
             Account::new(
                 1,
                 U256::from(1),
@@ -441,67 +467,37 @@ mod tests {
             )
         );
 
-        let (read_storage, storage_proof) =
+        let storage_proof =
             storage_engine.get_storage_with_proof(&context, storage_path.clone()).unwrap().unwrap();
-        assert_eq!(read_storage, storage_value);
+        assert_eq!(storage_proof.storage_proofs.len(), 1);
 
         // both proofs should be the same except for the storage proof
-        assert_eq!(account_proof.account_subtree, storage_proof.account_subtree);
-        assert_eq!(account_proof.branch_node_hash_masks, storage_proof.branch_node_hash_masks);
-        assert_eq!(account_proof.branch_node_tree_masks, storage_proof.branch_node_tree_masks);
-        assert_eq!(account_proof.storages.len(), 0);
+        assert_eq!(account_proof.account, storage_proof.account);
+        assert_eq!(account_proof.proof, storage_proof.proof);
+        assert_eq!(account_proof.storage_proofs.len(), 0);
 
         // account-level proof should be the same as before, except with new hashes due to the new
         // storage value
-        assert_eq!(
-            storage_proof.account_subtree.len(),
-            2,
-            "Proof should contain a branch and a leaf"
-        );
-        assert!(storage_proof.account_subtree.contains_key(&Nibbles::default()));
-        let branch_node_proof = storage_proof.account_subtree.get(&Nibbles::default()).unwrap();
+        assert_eq!(storage_proof.proof.len(), 2, "Proof should contain a branch and a leaf");
+        let branch_node_proof = storage_proof.proof.get(&Nibbles::default()).unwrap();
         assert_eq!(branch_node_proof, &Bytes::from(hex!("0xf85180a057f0c70887b1c7a8e0e1b7c8945a3e9c2a28e82ac5594b10786171f4e30748f08080808080808080808080a0687b2ec5bde2a80c990485ab23c35513c3180ddc6e7fea67986bbce7eee06a47808080")));
-        let leaf_node_proof =
-            storage_proof.account_subtree.get(&Nibbles::from_nibbles([1])).unwrap();
+        let leaf_node_proof = storage_proof.proof.get(&Nibbles::from_nibbles([1])).unwrap();
         assert_eq!(leaf_node_proof, &Bytes::from(hex!("0xf869a03468288056310c82aa4c01a7e12a10f8111a0560e72b700555479031b86c357db846f8440101a02a2ec95a7e5360e7e4bee7c204bbdfdb16ad550f1e3e53d2ee2fafa31dfb4013a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470")));
 
-        assert_eq!(storage_proof.branch_node_hash_masks.len(), 1);
-        let hash_mask = storage_proof.branch_node_hash_masks.get(&Nibbles::default()).unwrap();
-        assert_eq!(hash_mask, &TrieMask::new(0b0010000000000010));
-        assert_eq!(storage_proof.branch_node_tree_masks.len(), 1);
-        let tree_mask = storage_proof.branch_node_tree_masks.get(&Nibbles::default()).unwrap();
-        assert_eq!(tree_mask, &TrieMask::new(0b0010000000000010));
-
-        assert_eq!(storage_proof.storages.len(), 1);
         let storage_slot_proof = storage_proof
-            .storages
-            .get(&B256::from_slice(&storage_path.get_address().to_nibbles().pack()))
+            .storage_proofs
+            .get(&B256::from_slice(&storage_path.get_slot().pack()))
             .unwrap();
         assert_eq!(
-            storage_slot_proof.root,
+            account_proof.account.storage_root,
             b256!("0x2a2ec95a7e5360e7e4bee7c204bbdfdb16ad550f1e3e53d2ee2fafa31dfb4013")
         );
-        assert_eq!(storage_slot_proof.subtree.len(), 1);
-        let storage_proof_node = storage_slot_proof.subtree.get(&Nibbles::default()).unwrap();
-        assert_eq!(storage_proof_node, &Bytes::from(hex!("0xe8a120b10e2d527612073b26eecdfd717e6a320cf44b4afac2b0732d9fcbe2b7fa0cf68584deadbeef")));
-        assert_eq!(storage_slot_proof.branch_node_hash_masks.len(), 0);
-        assert_eq!(storage_slot_proof.branch_node_tree_masks.len(), 0);
-
-        let storage_slot_proof = storage_slot_proof
-            .storage_proof(b256!(
-                "0x0000000000000000000000000000000000000000000000000000000000000001"
-            ))
-            .unwrap();
-        assert_eq!(
-            storage_slot_proof.key,
-            b256!("0x0000000000000000000000000000000000000000000000000000000000000001")
-        );
-        assert_eq!(&storage_slot_proof.nibbles, storage_path.get_slot());
-        assert_eq!(storage_slot_proof.value, U256::from(0xdeadbeefu64));
         assert_eq!(storage_slot_proof.proof.len(), 1);
-        assert_eq!(storage_slot_proof.proof[0], Bytes::from(hex!("0xe8a120b10e2d527612073b26eecdfd717e6a320cf44b4afac2b0732d9fcbe2b7fa0cf68584deadbeef")));
-        storage_slot_proof
-            .verify(b256!("0x2a2ec95a7e5360e7e4bee7c204bbdfdb16ad550f1e3e53d2ee2fafa31dfb4013"))
-            .unwrap();
+        let storage_proof_node = storage_slot_proof.proof.get(&Nibbles::default()).unwrap();
+        assert_eq!(storage_proof_node, &Bytes::from(hex!("0xe8a120b10e2d527612073b26eecdfd717e6a320cf44b4afac2b0732d9fcbe2b7fa0cf68584deadbeef")));
+
+        verify_storage_proof(storage_slot_proof, account_proof.account.storage_root);
+
+        verify_account_proof(&storage_proof, context.root_node_hash);
     }
 }

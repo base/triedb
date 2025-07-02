@@ -3,7 +3,7 @@ use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
 use proptest::prelude::*;
 use proptest_derive::Arbitrary;
 
-#[derive(Debug, Clone, PartialEq, Eq, Arbitrary)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Arbitrary)]
 pub struct Account {
     pub nonce: u64,
     pub balance: U256,

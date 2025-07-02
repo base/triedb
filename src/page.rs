@@ -9,6 +9,7 @@ use zerocopy::{Immutable, IntoBytes, KnownLayout};
 mod manager;
 mod page;
 mod slotted_page;
+mod state;
 
 pub use manager::{mmap::PageManager, options::PageManagerOptions, PageError};
 pub use page::{Page, PageMut};

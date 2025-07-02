@@ -7,12 +7,12 @@ use crate::{
     database::Database,
     node::TrieValue,
     path::{AddressPath, StoragePath},
+    storage::proofs::AccountProof,
 };
 use alloy_primitives::{StorageValue, B256};
 use alloy_trie::Nibbles;
 pub use error::TransactionError;
 pub use manager::TransactionManager;
-use reth_trie_common::MultiProof;
 use sealed::sealed;
 use std::{collections::HashMap, fmt::Debug};
 
@@ -62,11 +62,9 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         &mut self,
         address_path: AddressPath,
     ) -> Result<Option<Account>, TransactionError> {
-        let storage_engine = self.database.storage_engine.read();
-        let account = storage_engine.get_account(&mut self.context, address_path).unwrap();
-
+        let account =
+            self.database.storage_engine.get_account(&mut self.context, address_path).unwrap();
         self.database.update_metrics_ro(&self.context);
-
         Ok(account)
     }
 
@@ -74,9 +72,8 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         &mut self,
         storage_path: StoragePath,
     ) -> Result<Option<StorageValue>, TransactionError> {
-        let storage_engine = self.database.storage_engine.read();
-        let storage_slot = storage_engine.get_storage(&mut self.context, storage_path).unwrap();
-
+        let storage_slot =
+            self.database.storage_engine.get_storage(&mut self.context, storage_path).unwrap();
         self.database.update_metrics_ro(&self.context);
         Ok(storage_slot)
     }
@@ -88,32 +85,40 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
     pub fn get_account_with_proof(
         &self,
         address_path: AddressPath,
-    ) -> Result<Option<(Account, MultiProof)>, TransactionError> {
-        let storage_engine = self.database.storage_engine.read();
-        let result = storage_engine.get_account_with_proof(&self.context, address_path).unwrap();
+    ) -> Result<Option<AccountProof>, TransactionError> {
+        let result = self
+            .database
+            .storage_engine
+            .get_account_with_proof(&self.context, address_path)
+            .unwrap();
         Ok(result)
     }
 
     pub fn get_storage_with_proof(
         &self,
         storage_path: StoragePath,
-    ) -> Result<Option<(StorageValue, MultiProof)>, TransactionError> {
-        let storage_engine = self.database.storage_engine.read();
-        let result = storage_engine.get_storage_with_proof(&self.context, storage_path).unwrap();
+    ) -> Result<Option<AccountProof>, TransactionError> {
+        let result = self
+            .database
+            .storage_engine
+            .get_storage_with_proof(&self.context, storage_path)
+            .unwrap();
         Ok(result)
+    }
+
+    pub fn clear_cache(&mut self) {
+        self.context.clear_cache();
     }
 
     pub fn debug_account(
         &self,
-        output_file: Box<dyn std::io::Write>,
+        output_file: impl std::io::Write,
         address_path: AddressPath,
         verbosity_level: u8,
     ) -> Result<(), TransactionError> {
-        let context = self.context.clone();
-        let storage_engine = self.database.storage_engine.read();
-
-        storage_engine
-            .print_path(&context, address_path.to_nibbles(), output_file, verbosity_level)
+        self.database
+            .storage_engine
+            .print_path(&self.context, address_path.to_nibbles(), output_file, verbosity_level)
             .unwrap();
         Ok(())
     }
@@ -124,11 +129,9 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
         storage_path: StoragePath,
         verbosity_level: u8,
     ) -> Result<(), TransactionError> {
-        let context = self.context.clone();
-        let storage_engine = self.database.storage_engine.read();
-
-        storage_engine
-            .print_path(&context, &storage_path.full_path(), output_file, verbosity_level)
+        self.database
+            .storage_engine
+            .print_path(&self.context, &storage_path.full_path(), output_file, verbosity_level)
             .unwrap();
         Ok(())
     }
@@ -154,16 +157,15 @@ impl Transaction<'_, RW> {
     }
 
     pub fn commit(mut self) -> Result<(), TransactionError> {
-        let mut storage_engine = self.database.storage_engine.write();
         let mut changes =
             self.pending_changes.drain().collect::<Vec<(Nibbles, Option<TrieValue>)>>();
 
         if !changes.is_empty() {
-            storage_engine.set_values(&mut self.context, changes.as_mut()).unwrap();
+            self.database.storage_engine.set_values(&mut self.context, changes.as_mut()).unwrap();
         }
 
         let mut transaction_manager = self.database.transaction_manager.lock();
-        storage_engine.commit(&self.context).unwrap();
+        self.database.storage_engine.commit(&self.context).unwrap();
 
         self.database.update_metrics_rw(&self.context);
 
@@ -174,8 +176,7 @@ impl Transaction<'_, RW> {
     }
 
     pub fn rollback(mut self) -> Result<(), TransactionError> {
-        let storage_engine = self.database.storage_engine.write();
-        storage_engine.rollback(&self.context).unwrap();
+        self.database.storage_engine.rollback(&self.context).unwrap();
 
         let mut transaction_manager = self.database.transaction_manager.lock();
         transaction_manager.remove_tx(self.context.snapshot_id, true);
