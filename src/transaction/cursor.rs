@@ -1,3 +1,5 @@
+use std::ops::Deref;
+
 use alloy_primitives::B256;
 use alloy_trie::{nodes::RlpNode, Nibbles};
 
@@ -5,12 +7,12 @@ use crate::{
     location::Location,
     node::{encode_branch, Node},
     page::PageId,
-    transaction::{Transaction, RO},
+    transaction::{Transaction, RO}, Database,
 };
 
 #[derive(Debug)]
-pub struct Cursor {
-    transaction: Transaction<RO>,
+pub struct Cursor<DB: Deref<Target = Database>> {
+    transaction: Transaction<DB, RO>,
     account_key: Option<B256>,
     loc_stack: Vec<Location>,
     page_id_stack: Vec<PageId>,
@@ -25,16 +27,16 @@ pub enum CursorError {
     InvalidKey,
 }
 
-impl Cursor {
-    pub fn new_account_cursor(transaction: Transaction<RO>) -> Self {
+impl<DB: Deref<Target = Database>> Cursor<DB> {
+    pub fn new_account_cursor(transaction: Transaction<DB, RO>) -> Self {
         Self::new_with_account_key(transaction, None)
     }
 
-    pub fn new_storage_cursor(transaction: Transaction<RO>, account_key: B256) -> Self {
+    pub fn new_storage_cursor(transaction: Transaction<DB, RO>, account_key: B256) -> Self {
         Self::new_with_account_key(transaction, Some(account_key))
     }
 
-    fn new_with_account_key(transaction: Transaction<RO>, account_key: Option<B256>) -> Self {
+    fn new_with_account_key(transaction: Transaction<DB, RO>, account_key: Option<B256>) -> Self {
         Self {
             transaction,
             account_key,
@@ -597,14 +599,14 @@ impl Cursor {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use alloy_primitives::{Address, B256, U256};
     use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
     use tempdir::TempDir;
 
     use crate::{
-        account::Account,
-        path::{AddressPath, StoragePath},
-        Database,
+        account::Account, database::{begin_ro, begin_rw}, path::{AddressPath, StoragePath}, Database
     };
 
     use super::*;
@@ -613,7 +615,7 @@ mod tests {
     fn test_single_account_cursor() {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
-        let db = Database::create(file_path).unwrap();
+        let db = Database::create_new(file_path).unwrap();
 
         let address_path = AddressPath::new(Nibbles::from_vec(vec![1; 64]));
         let account = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
@@ -685,7 +687,7 @@ mod tests {
     fn test_account_cursor() {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
-        let db = Database::create(file_path).unwrap();
+        let db = Database::create_new(file_path).unwrap();
         let mut tx = db.begin_rw().unwrap();
 
         // top branch has 2 children, one is a leaf and the other is a branch with 2 children
@@ -805,14 +807,14 @@ mod tests {
     fn test_single_storage_cursor() {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
-        let db = Database::create(file_path).unwrap();
+        let db = Arc::new(Database::create_new(file_path).unwrap());
 
         let address_path = AddressPath::for_address(Address::from([0x42; 20]));
         let account = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
         let storage_key = Nibbles::from_vec(vec![1; 64]);
         let storage_value = U256::from(0x1111);
 
-        let mut tx = db.begin_rw().unwrap();
+        let mut tx = begin_rw(db.clone()).unwrap();
         tx.set_account(address_path.clone(), Some(account.clone())).unwrap();
         tx.set_storage_slot(
             StoragePath::for_address_path_and_slot_hash(address_path.clone(), storage_key.clone()),
@@ -826,7 +828,7 @@ mod tests {
         let result = early_cursor.next();
         assert!(result.unwrap().is_none());
 
-        let mut cursor = Cursor::new_storage_cursor(db.begin_ro().unwrap(), address_path.into());
+        let mut cursor = db.begin_ro().unwrap().new_storage_cursor(address_path.into());
 
         // first item found is the storage leaf node
         let result = cursor.next();
@@ -871,7 +873,7 @@ mod tests {
     fn test_storage_cursor() {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
-        let db = Database::create(file_path).unwrap();
+        let db = Database::create_new(file_path).unwrap();
 
         // Create an account
         let address = Address::from([0x42; 20]);
@@ -925,7 +927,7 @@ mod tests {
     fn test_storage_cursor_no_account_storage() {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
-        let db = Database::create(file_path).unwrap();
+        let db = Database::create_new(file_path).unwrap();
 
         // Create an account
         let address = Address::from([0x42; 20]);
@@ -956,7 +958,7 @@ mod tests {
     fn test_account_cursor_seek() {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
-        let db = Database::create(file_path).unwrap();
+        let db = Database::create_new(file_path).unwrap();
 
         // Create accounts with different patterns to test nearby seeking
         let accounts = vec![
@@ -1069,7 +1071,7 @@ mod tests {
 
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
-        let db = Database::create(file_path).unwrap();
+        let db = Database::create_new(file_path).unwrap();
 
         // Create an account with storage
         let address = Address::from([0x42; 20]);
@@ -1135,7 +1137,7 @@ mod tests {
     fn test_cursor_hash_verification() {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
-        let db = Database::create(file_path).unwrap();
+        let db = Database::create_new(file_path).unwrap();
 
         // Create a simple tree structure for hash verification
         let address_path1 = AddressPath::new(Nibbles::from_vec(vec![1; 64]));

@@ -9,16 +9,14 @@ use crate::{
 use alloy_primitives::B256;
 use parking_lot::Mutex;
 use std::{
-    fmt, fs::File, io, path::{Path, PathBuf}, sync::Arc
+    fs::File,
+    io,
+    ops::Deref,
+    path::{Path, PathBuf},
 };
 
-#[derive(Clone, Debug)]
-pub struct Database {
-    pub(crate) inner: Arc<DatabaseInner>,
-}
-
 #[derive(Debug)]
-pub(crate) struct DatabaseInner {
+pub struct Database {
     pub(crate) storage_engine: StorageEngine,
     pub(crate) transaction_manager: Mutex<TransactionManager>,
     metrics: DatabaseMetrics,
@@ -38,15 +36,6 @@ pub struct DatabaseOptions {
 pub enum Error {
     PageError(PageError),
     EngineError(engine::Error),
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::PageError(e) => write!(f, "Error: page error: {:?}", e),
-            Self::EngineError(e) => write!(f, "Error: engine error: {:?}", e),
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -160,65 +149,17 @@ impl Database {
 
     pub fn new(storage_engine: StorageEngine) -> Self {
         Self {
-            inner: Arc::new(DatabaseInner {
-                storage_engine,
-                transaction_manager: Mutex::new(TransactionManager::new()),
-                metrics: DatabaseMetrics::default(),
-            }),
+            storage_engine,
+            transaction_manager: Mutex::new(TransactionManager::new()),
+            metrics: DatabaseMetrics::default(),
         }
-    }
-
-    pub fn begin_rw(&self) -> Result<Transaction<RW>, TransactionError> {
-        let context = self.inner.storage_engine.write_context();
-        let min_snapshot_id =
-            self.inner.transaction_manager.lock().begin_rw(context.snapshot_id)?;
-        if min_snapshot_id > 0 {
-            self.inner.storage_engine.unlock(min_snapshot_id - 1);
-        }
-        Ok(Transaction::new(context, self.clone()))
-    }
-
-    pub fn begin_ro(&self) -> Result<Transaction<RO>, TransactionError> {
-        let context = self.inner.storage_engine.read_context();
-        self.inner.transaction_manager.lock().begin_ro(context.snapshot_id);
-        Ok(Transaction::new(context, self.clone()))
-    }
-
-    pub fn print_page<W: io::Write>(&self, buf: W, page_id: Option<PageId>) -> Result<(), Error> {
-        self.inner.print_page(buf, page_id)
-    }
-
-    pub fn root_page_info<W: io::Write>(
-        &self,
-        buf: W,
-        file_path: impl AsRef<Path>,
-    ) -> Result<(), OpenError> {
-        self.inner.root_page_info(buf, file_path)
-    }
-
-    pub fn print_statistics<W: io::Write>(&self, buf: W) -> Result<(), Error> {
-        self.inner.print_statistics(buf)
-    }
-
-    pub fn size(&self) -> u32 {
-        self.inner.size()
-    }
-
-    pub fn state_root(&self) -> B256 {
-        self.inner.state_root()
     }
 
     pub fn close(self) -> io::Result<()> {
-        Arc::try_unwrap(self.inner).unwrap().close()
-    }
-}
-
-impl DatabaseInner {
-    fn close(self) -> io::Result<()> {
         self.storage_engine.close()
     }
 
-    fn print_page<W: io::Write>(&self, buf: W, page_id: Option<PageId>) -> Result<(), Error> {
+    pub fn print_page<W: io::Write>(self, buf: W, page_id: Option<PageId>) -> Result<(), Error> {
         let context = self.storage_engine.read_context();
         // TODO: Must use `expect()` because `storage::engine::Error` and `database::Error` are not
         // compatible. There's probably no reason to use two different error enums here, so maybe
@@ -227,8 +168,8 @@ impl DatabaseInner {
         Ok(())
     }
 
-    fn root_page_info<W: io::Write>(
-        &self,
+    pub fn root_page_info<W: io::Write>(
+        self,
         mut buf: W,
         file_path: impl AsRef<Path>,
     ) -> Result<(), OpenError> {
@@ -244,32 +185,40 @@ impl DatabaseInner {
         let root_node_page_id = active_slot.root_node_page_id();
         let orphaned_page_list = meta_manager.orphan_pages().iter().collect::<Vec<_>>();
 
-        writeln!(buf, "Root Node Page ID: {root_node_page_id:?}").expect("write failed");
+        writeln!(buf, "Root Node Page ID: {:?}", root_node_page_id).expect("write failed");
 
         //root subtrie pageID
-        writeln!(buf, "Total Page Count: {page_count:?}").expect("write failed");
+        writeln!(buf, "Total Page Count: {:?}", page_count).expect("write failed");
 
         //orphaned pages list (grouped by page)
-        writeln!(buf, "Orphaned Pages: {orphaned_page_list:?}").expect("write failed");
+        writeln!(buf, "Orphaned Pages: {:?}", orphaned_page_list).expect("write failed");
 
         Ok(())
     }
 
-    fn print_statistics<W: io::Write>(&self, buf: W) -> Result<(), Error> {
+    pub fn print_statistics<W: io::Write>(self, buf: W) -> Result<(), Error> {
         let context = self.storage_engine.read_context();
         self.storage_engine.debug_statistics(&context, buf).expect("write failed");
         Ok(())
     }
 
-    fn state_root(&self) -> B256 {
+    pub fn begin_ro(&self) -> Result<Transaction<&Self, RO>, TransactionError> {
+        begin_ro(self)
+    }
+
+    pub fn begin_rw(&self) -> Result<Transaction<&Self, RW>, TransactionError> {
+        begin_rw(self)
+    }
+
+    pub fn state_root(&self) -> B256 {
         self.storage_engine.read_context().root_node_hash
     }
 
-    fn size(&self) -> u32 {
+    pub fn size(&self) -> u32 {
         self.storage_engine.size()
     }
 
-    pub(crate) fn update_metrics_ro(&self, context: &TransactionContext) {
+    pub fn update_metrics_ro(&self, context: &TransactionContext) {
         self.metrics
             .ro_transaction_pages_read
             .record(context.transaction_metrics.take_pages_read() as f64);
@@ -280,7 +229,7 @@ impl DatabaseInner {
         self.metrics.cache_storage_read_miss.increment(cache_storage_read_miss as u64);
     }
 
-    pub(crate) fn update_metrics_rw(&self, context: &TransactionContext) {
+    pub fn update_metrics_rw(&self, context: &TransactionContext) {
         self.metrics
             .rw_transaction_pages_read
             .record(context.transaction_metrics.take_pages_read() as f64);
@@ -296,13 +245,32 @@ impl DatabaseInner {
     }
 }
 
+pub fn begin_ro<DB: Deref<Target = Database>>(
+    db: DB,
+) -> Result<Transaction<DB, RO>, TransactionError> {
+    let context = db.storage_engine.read_context();
+    db.transaction_manager.lock().begin_ro(context.snapshot_id);
+    Ok(Transaction::new(context, db))
+}
+
+pub fn begin_rw<DB: Deref<Target = Database>>(
+    db: DB,
+) -> Result<Transaction<DB, RW>, TransactionError> {
+    let context = db.storage_engine.write_context();
+    let min_snapshot_id = db.transaction_manager.lock().begin_rw(context.snapshot_id)?;
+    if min_snapshot_id > 0 {
+        db.storage_engine.unlock(min_snapshot_id - 1);
+    }
+    Ok(Transaction::new(context, db))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{account::Account, path::AddressPath};
     use alloy_primitives::{address, Address, U256};
     use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
-    use std::fs;
+    use std::{fs, sync::Arc};
     use tempdir::TempDir;
 
     #[test]
@@ -367,13 +335,13 @@ mod tests {
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
 
         let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
-        let mut tx = db.begin_rw().unwrap();
+        let mut tx = begin_rw(&db).unwrap();
         tx.set_account(AddressPath::for_address(address), Some(account1.clone())).unwrap();
 
         tx.commit().unwrap();
 
         let account2 = Account::new(456, U256::from(123), EMPTY_ROOT_HASH, KECCAK_EMPTY);
-        let mut tx = db.begin_rw().unwrap();
+        let mut tx = begin_rw(&db).unwrap();
         tx.set_account(AddressPath::for_address(address), Some(account2.clone())).unwrap();
 
         let mut ro_tx = db.begin_ro().unwrap();
@@ -467,7 +435,6 @@ mod tests {
 
         fn alive_page_ids(db: &Database) -> Vec<PageId> {
             let orphan_pages = db
-                .inner
                 .storage_engine
                 .meta_manager
                 .lock()
@@ -475,7 +442,7 @@ mod tests {
                 .iter()
                 .map(|orphan| orphan.page_id())
                 .collect::<Vec<_>>();
-            let all_pages = (1..=db.inner.storage_engine.page_manager.size())
+            let all_pages = (1..=db.storage_engine.page_manager.size())
                 .map(|page_id| PageId::new(page_id).unwrap());
             all_pages.filter(move |page_id| !orphan_pages.contains(page_id)).collect()
         }
@@ -484,7 +451,7 @@ mod tests {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
         let db = Database::create_new(file_path).unwrap();
-        assert_eq!(db.inner.storage_engine.page_manager.size(), 0);
+        assert_eq!(db.storage_engine.page_manager.size(), 0);
 
         // Add 1000 accounts
         let mut tx = db.begin_rw().expect("rw transaction creation failed");
@@ -499,8 +466,7 @@ mod tests {
         assert!(page_ids.len() > 1, "storage has no pages");
         for page_id in &page_ids {
             assert_eq!(
-                db.inner
-                    .storage_engine
+                db.storage_engine
                     .page_manager
                     .get(1, *page_id)
                     .unwrap_or_else(|err| panic!("page {page_id} not found: {err:?}"))
@@ -529,7 +495,6 @@ mod tests {
         );
         for page_id in &new_page_ids {
             let page = db
-                .inner
                 .storage_engine
                 .page_manager
                 .get(1, *page_id)
@@ -566,5 +531,27 @@ mod tests {
                 account.clone()
             );
         }
+    }
+
+    #[test]
+    fn test_db_arc_tx() {
+        let tmp_dir = TempDir::new("test_db").unwrap();
+        let file_path = tmp_dir.path().join("test.db");
+        let db = Database::create_new(&file_path).unwrap();
+
+        let db_arc = Arc::new(db);
+
+        let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
+        let mut tx = begin_rw(db_arc.clone()).unwrap();
+        tx.set_account(
+            AddressPath::for_address(address),
+            Some(Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY)),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let mut tx = begin_ro(db_arc).unwrap();
+        let account = tx.get_account(AddressPath::for_address(address)).unwrap().unwrap();
+        assert_eq!(account, Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY));
     }
 }

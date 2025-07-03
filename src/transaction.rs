@@ -18,7 +18,7 @@ use alloy_trie::Nibbles;
 pub use error::TransactionError;
 pub use manager::TransactionManager;
 use sealed::sealed;
-use std::{collections::HashMap, fmt::Debug};
+use std::{collections::HashMap, fmt::Debug, ops::Deref, sync::Arc};
 
 #[sealed]
 pub trait TransactionKind: Debug {
@@ -48,20 +48,22 @@ impl TransactionKind for RO {
 // Compile-time assertion to ensure that `Transaction` is `Send`
 const _: fn() = || {
     fn consumer<T: Send>() {}
-    consumer::<Transaction<RO>>();
-    consumer::<Transaction<RW>>();
+    consumer::<Transaction<&Database, RO>>();
+    consumer::<Transaction<&Database, RW>>();
+    consumer::<Transaction<Arc<Database>, RO>>();
+    consumer::<Transaction<Arc<Database>, RW>>();
 };
 
 #[derive(Debug)]
-pub struct Transaction<K: TransactionKind> {
+pub struct Transaction<DB: Deref<Target = Database>, K: TransactionKind> {
     context: TransactionContext,
-    database: Database,
+    database: DB,
     pending_changes: HashMap<Nibbles, Option<TrieValue>>,
     _marker: std::marker::PhantomData<K>,
 }
 
-impl<K: TransactionKind> Transaction<K> {
-    pub(crate) fn new(context: TransactionContext, database: Database) -> Self {
+impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
+    pub(crate) fn new(context: TransactionContext, database: DB) -> Self {
         Self {
             context,
             database,
@@ -76,11 +78,10 @@ impl<K: TransactionKind> Transaction<K> {
     ) -> Result<Option<Account>, TransactionError> {
         let account = self
             .database
-            .inner
             .storage_engine
             .get_account(&mut self.context, address_path)
             .unwrap();
-        self.database.inner.update_metrics_ro(&self.context);
+        self.database.update_metrics_ro(&self.context);
         Ok(account)
     }
 
@@ -90,11 +91,10 @@ impl<K: TransactionKind> Transaction<K> {
     ) -> Result<Option<StorageValue>, TransactionError> {
         let storage_slot = self
             .database
-            .inner
             .storage_engine
             .get_storage(&mut self.context, storage_path)
             .unwrap();
-        self.database.inner.update_metrics_ro(&self.context);
+        self.database.update_metrics_ro(&self.context);
         Ok(storage_slot)
     }
 
@@ -108,7 +108,6 @@ impl<K: TransactionKind> Transaction<K> {
     ) -> Result<Option<AccountProof>, TransactionError> {
         let result = self
             .database
-            .inner
             .storage_engine
             .get_account_with_proof(&self.context, address_path)
             .unwrap();
@@ -121,7 +120,6 @@ impl<K: TransactionKind> Transaction<K> {
     ) -> Result<Option<AccountProof>, TransactionError> {
         let result = self
             .database
-            .inner
             .storage_engine
             .get_storage_with_proof(&self.context, storage_path)
             .unwrap();
@@ -139,7 +137,6 @@ impl<K: TransactionKind> Transaction<K> {
         verbosity_level: u8,
     ) -> Result<(), TransactionError> {
         self.database
-            .inner
             .storage_engine
             .print_path(&self.context, address_path.to_nibbles(), output_file, verbosity_level)
             .unwrap();
@@ -153,19 +150,10 @@ impl<K: TransactionKind> Transaction<K> {
         verbosity_level: u8,
     ) -> Result<(), TransactionError> {
         self.database
-            .inner
             .storage_engine
             .print_path(&self.context, &storage_path.full_path(), output_file, verbosity_level)
             .unwrap();
         Ok(())
-    }
-
-    pub fn new_account_cursor(&self) -> Cursor {
-        Cursor::new_account_cursor(self.ro_clone())
-    }
-
-    pub fn new_storage_cursor(&self, address_path: AddressPath) -> Cursor {
-        Cursor::new_storage_cursor(self.ro_clone(), address_path.into())
     }
 
     pub(crate) fn get_slotted_page(
@@ -173,20 +161,29 @@ impl<K: TransactionKind> Transaction<K> {
         page_id: PageId,
     ) -> Result<SlottedPage<'_>, TransactionError> {
         self.database
-            .inner
             .storage_engine
             .get_slotted_page(&self.context, page_id)
             .map_err(|_| TransactionError {})
     }
+}
 
-    fn ro_clone(&self) -> Transaction<RO> {
+impl<DB: Deref<Target = Database> + Clone, K: TransactionKind> Transaction<DB, K> {
+    pub fn new_account_cursor(&self) -> Cursor<DB> {
+        Cursor::new_account_cursor(self.ro_clone())
+    }
+
+    pub fn new_storage_cursor(&self, address_path: AddressPath) -> Cursor<DB> {
+        Cursor::new_storage_cursor(self.ro_clone(), address_path.into())
+    }
+
+    fn ro_clone(&self) -> Transaction<DB, RO> {
         let context = self.context.clone();
-        self.database.inner.transaction_manager.lock().begin_ro(context.snapshot_id);
-        Transaction::<RO>::new(context, self.database.clone())
+        self.database.transaction_manager.lock().begin_ro(context.snapshot_id);
+        Transaction::<DB, RO>::new(context, self.database.clone())
     }
 }
 
-impl Transaction<RW> {
+impl<DB: Deref<Target = Database>> Transaction<DB, RW> {
     pub fn set_account(
         &mut self,
         address_path: AddressPath,
@@ -211,7 +208,6 @@ impl Transaction<RW> {
 
         if !changes.is_empty() {
             self.database
-                .inner
                 .storage_engine
                 .set_values(&mut self.context, changes.as_mut())
                 .map_err(|_| TransactionError {})?;
@@ -223,26 +219,30 @@ impl Transaction<RW> {
     pub fn commit(mut self) -> Result<(), TransactionError> {
         self.apply_changes()?;
 
-        self.database.inner.storage_engine.commit(&self.context).unwrap();
-        self.database.inner.update_metrics_rw(&self.context);
+        self.database.storage_engine.commit(&self.context).unwrap();
+        self.database.update_metrics_rw(&self.context);
         Ok(())
     }
 
     pub fn rollback(self) -> Result<(), TransactionError> {
-        self.database.inner.storage_engine.rollback(&self.context).unwrap();
+        self.database.storage_engine.rollback(&self.context).unwrap();
         Ok(())
     }
 }
 
-impl<K: TransactionKind> Drop for Transaction<K> {
-    fn drop(&mut self) {
-        let mut transaction_manager = self.database.inner.transaction_manager.lock();
-        transaction_manager.remove_tx(self.context.snapshot_id, K::is_writer());
-    }
-}
-
-impl Transaction<RO> {
+impl<DB: Deref<Target = Database>> Transaction<DB, RO> {
     pub fn commit(self) -> Result<(), TransactionError> {
         Ok(())
+    }
+}
+
+impl<DB, K> Drop for Transaction<DB, K> 
+where 
+    DB: Deref<Target = Database>, 
+    K: TransactionKind
+{
+    fn drop(&mut self) {
+        let mut transaction_manager = self.database.transaction_manager.lock();
+        transaction_manager.remove_tx(self.context.snapshot_id, K::is_writer());
     }
 }
