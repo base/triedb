@@ -9,10 +9,7 @@ use crate::{
 use alloy_primitives::B256;
 use parking_lot::Mutex;
 use std::{
-    fs::File,
-    io,
-    path::{Path, PathBuf},
-    sync::Arc,
+    fmt, fs::File, io, path::{Path, PathBuf}, sync::Arc
 };
 
 #[derive(Clone, Debug)]
@@ -41,6 +38,15 @@ pub struct DatabaseOptions {
 pub enum Error {
     PageError(PageError),
     EngineError(engine::Error),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PageError(e) => write!(f, "Error: page error: {:?}", e),
+            Self::EngineError(e) => write!(f, "Error: engine error: {:?}", e),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -478,7 +484,7 @@ mod tests {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
         let db = Database::create_new(file_path).unwrap();
-        assert_eq!(db.storage_engine.page_manager.size(), 0);
+        assert_eq!(db.inner.storage_engine.page_manager.size(), 0);
 
         // Add 1000 accounts
         let mut tx = db.begin_rw().expect("rw transaction creation failed");
