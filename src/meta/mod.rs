@@ -577,6 +577,14 @@ impl MetadataManager {
         Ok(())
     }
 
+    /// Erases the metadata contents.
+    pub fn wipe(&mut self) -> io::Result<()> {
+        let size = Self::SIZE_MIN;
+        self.file.set_len(size)?;
+        self.mmap.as_mut()[size as usize..].fill(0);
+        Ok(())
+    }
+
     /// Saves the metadata to the storage device.
     pub fn sync(&self) -> io::Result<()> {
         if cfg!(not(miri)) {

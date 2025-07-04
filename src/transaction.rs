@@ -7,12 +7,12 @@ use crate::{
     database::Database,
     node::TrieValue,
     path::{AddressPath, StoragePath},
+    storage::proofs::AccountProof,
 };
 use alloy_primitives::{StorageValue, B256};
 use alloy_trie::Nibbles;
 pub use error::TransactionError;
 pub use manager::TransactionManager;
-use reth_trie_common::MultiProof;
 use sealed::sealed;
 use std::{collections::HashMap, fmt::Debug};
 
@@ -85,7 +85,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
     pub fn get_account_with_proof(
         &self,
         address_path: AddressPath,
-    ) -> Result<Option<(Account, MultiProof)>, TransactionError> {
+    ) -> Result<Option<AccountProof>, TransactionError> {
         let result = self
             .database
             .storage_engine
@@ -97,7 +97,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
     pub fn get_storage_with_proof(
         &self,
         storage_path: StoragePath,
-    ) -> Result<Option<(StorageValue, MultiProof)>, TransactionError> {
+    ) -> Result<Option<AccountProof>, TransactionError> {
         let result = self
             .database
             .storage_engine
