@@ -72,7 +72,7 @@ impl SlottedPage<'_> {
         if index >= self.num_cells() {
             return Err(PageError::InvalidCellPointer);
         }
-        let start_index = 1 + CELL_POINTER_SIZE * (index as usize);
+        let start_index = self.get_content_index(index);
         let end_index = start_index + CELL_POINTER_SIZE;
         let data = &self.page.contents()[start_index..end_index];
         Ok(data.try_into()?)
@@ -247,8 +247,8 @@ impl<'a> SlottedPageMut<'a> {
         if index1 >= self.num_cells() || index2 >= self.num_cells() {
             return Err(PageError::InvalidCellPointer);
         }
-        let start_index_1 = 1 + CELL_POINTER_SIZE * (index1 as usize);
-        let start_index_2 = 1 + CELL_POINTER_SIZE * (index2 as usize);
+        let start_index_1 = self.get_content_index(index1);
+        let start_index_2 = self.get_content_index(index2);
         for i in 0..CELL_POINTER_SIZE {
             self.page.contents_mut().swap(start_index_1 + i, start_index_2 + i);
         }
@@ -411,7 +411,7 @@ impl<'a> SlottedPageMut<'a> {
         offset: u16,
         length: u16,
     ) -> Result<CellPointer, PageError> {
-        let start_index = 1 + CELL_POINTER_SIZE * (index as usize);
+        let start_index = self.get_content_index(index);
         let end_index = start_index + CELL_POINTER_SIZE;
         let data = &mut self.page.contents_mut()[start_index..end_index];
         let cell_pointer = CellPointer::new(offset, length, data.try_into().unwrap());
@@ -421,6 +421,11 @@ impl<'a> SlottedPageMut<'a> {
     // Sets the number of cells in the page.
     fn set_num_cells(&mut self, num_cells: u8) {
         self.page.contents_mut()[0] = num_cells;
+    }
+
+    #[inline]
+    fn get_content_index(&self, cell_index: u8) -> usize {
+        1 + CELL_POINTER_SIZE * (cell_index as usize)
     }
 }
 
