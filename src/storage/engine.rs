@@ -545,8 +545,11 @@ impl StorageEngine {
         // Create a new branch node with the common prefix
         let mut new_parent_branch = Node::new_branch(common_prefix)?;
 
-        // Ensure page has enough space for a new branch
-        if slotted_page.num_free_bytes() < new_parent_branch.size() + CELL_POINTER_SIZE {
+        // Ensure page has enough space for a new branch, a new cell pointer for the new branch,
+        // while taking into account the space saving from shrinking the existing node's prefix.
+        if slotted_page.num_free_bytes() <
+            new_parent_branch.size() + CELL_POINTER_SIZE - common_prefix_length
+        {
             self.split_page(context, slotted_page)?;
             return Err(Error::PageSplit(0));
         }
