@@ -2932,7 +2932,7 @@ mod tests {
         // Ensure there are no duplicate paths
         let mut unique_paths = std::collections::HashSet::new();
         for (path, _) in &accounts {
-            assert!(unique_paths.insert(path.clone()), "Duplicate path found: {:?}", path);
+            assert!(unique_paths.insert(path.clone()), "Duplicate path found: {path:?}");
         }
 
         // Insert all accounts
@@ -2951,8 +2951,7 @@ mod tests {
             assert_eq!(
                 retrieved_account,
                 Some(expected_account.clone()),
-                "Account mismatch for path: {:?}",
-                path
+                "Account mismatch for path: {path:?}"
             );
         }
 
@@ -2979,8 +2978,7 @@ mod tests {
             assert_eq!(
                 retrieved_account,
                 Some(expected_account.clone()),
-                "Account mismatch after split for path: {:?}",
-                path
+                "Account mismatch after split for path: {path:?}"
             );
         }
 
@@ -3123,7 +3121,7 @@ mod tests {
 
         // Prepare updates for some existing accounts
         for (i, (path, _)) in accounts.iter().enumerate() {
-            if i % 5 == 0 {
+            if i.is_multiple_of(5) {
                 // Update every 5th account
                 let new_balance = rng.random_range(0..1_000_000);
                 let new_nonce = rng.random_range(0..100);

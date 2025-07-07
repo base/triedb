@@ -44,7 +44,7 @@ pub fn get_base_database(
         let file_name =
             std::env::var("FILE_NAME").expect("FILE_NAME must be set when using BASE_DIR");
         let main_file_name = file_name.to_string();
-        let meta_file_name = format!("{}.meta", file_name);
+        let meta_file_name = format!("{file_name}.meta");
         let file_name_path = Path::new(&base_dir).join(&main_file_name);
         let meta_file_name_path = Path::new(&base_dir).join(&meta_file_name);
 
