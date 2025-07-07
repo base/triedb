@@ -836,8 +836,7 @@ mod tests {
                 ),
                 Some(orphan) => assert!(
                     expected.remove(&orphan),
-                    "metadata manager returned an orphan page ({:?}) that is not available",
-                    orphan
+                    "metadata manager returned an orphan page ({orphan:?}) that is not available"
                 ),
             }
         }
