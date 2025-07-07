@@ -301,7 +301,7 @@ fn bench_mixed_operations(c: &mut Criterion) {
             |db| {
                 let mut tx = db.begin_rw().unwrap();
                 for i in 0..BATCH_SIZE {
-                    let op = eoa_rng.gen_range(0..=7);
+                    let op = eoa_rng.random_range(0..=7);
                     match op {
                         0 => {
                             // Read
