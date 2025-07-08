@@ -7,7 +7,8 @@ use crate::{
     location::Location,
     node::{encode_branch, Node},
     page::PageId,
-    transaction::{Transaction, RO}, Database,
+    transaction::{Transaction, RO},
+    Database,
 };
 
 #[derive(Debug)]
@@ -377,7 +378,6 @@ impl<DB: Deref<Target = Database>> Cursor<DB> {
                         self.initialize_storage_stacks()?;
                         return Ok(self.current());
                     } else {
-                        self.initialize_storage_stacks()?;
                         return Ok(None);
                     }
                 }
@@ -606,7 +606,10 @@ mod tests {
     use tempdir::TempDir;
 
     use crate::{
-        account::Account, database::{begin_ro, begin_rw}, path::{AddressPath, StoragePath}, Database
+        account::Account,
+        database::begin_rw,
+        path::{AddressPath, StoragePath},
+        Database,
     };
 
     use super::*;

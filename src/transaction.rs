@@ -76,11 +76,8 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
         &mut self,
         address_path: AddressPath,
     ) -> Result<Option<Account>, TransactionError> {
-        let account = self
-            .database
-            .storage_engine
-            .get_account(&mut self.context, address_path)
-            .unwrap();
+        let account =
+            self.database.storage_engine.get_account(&mut self.context, address_path).unwrap();
         self.database.update_metrics_ro(&self.context);
         Ok(account)
     }
@@ -89,11 +86,8 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
         &mut self,
         storage_path: StoragePath,
     ) -> Result<Option<StorageValue>, TransactionError> {
-        let storage_slot = self
-            .database
-            .storage_engine
-            .get_storage(&mut self.context, storage_path)
-            .unwrap();
+        let storage_slot =
+            self.database.storage_engine.get_storage(&mut self.context, storage_path).unwrap();
         self.database.update_metrics_ro(&self.context);
         Ok(storage_slot)
     }
@@ -236,10 +230,10 @@ impl<DB: Deref<Target = Database>> Transaction<DB, RO> {
     }
 }
 
-impl<DB, K> Drop for Transaction<DB, K> 
-where 
-    DB: Deref<Target = Database>, 
-    K: TransactionKind
+impl<DB, K> Drop for Transaction<DB, K>
+where
+    DB: Deref<Target = Database>,
+    K: TransactionKind,
 {
     fn drop(&mut self) {
         let mut transaction_manager = self.database.transaction_manager.lock();
