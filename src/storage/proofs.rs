@@ -4,9 +4,9 @@ use crate::{
     account::Account,
     context::TransactionContext,
     node::{
-        encode_branch,
-        Node::{self, AccountLeaf, Branch},
-        NodeError, TrieValue,
+        encode_branch, Node, NodeError,
+        NodeKind::{AccountLeaf, Branch},
+        TrieValue,
     },
     page::SlottedPage,
     path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH, STORAGE_PATH_LENGTH},
@@ -127,15 +127,16 @@ impl StorageEngine {
 
         assert!(path_offset <= 64);
 
-        match node {
-            AccountLeaf { prefix: _, nonce_rlp, balance_rlp, code_hash, storage_root } => {
+        let prefix = node.prefix();
+        match node.kind() {
+            AccountLeaf { ref nonce_rlp, ref balance_rlp, ref code_hash, ref storage_root } => {
                 assert_eq!(path_offset + common_prefix_length, ADDRESS_PATH_LENGTH);
 
-                let nonce: u64 = decode_exact(&nonce_rlp)
+                let nonce: u64 = decode_exact(nonce_rlp)
                     .map_err(|e| Error::ProofError(format!("Failed to decode nonce: {e}")))?;
-                let balance: U256 = decode_exact(&balance_rlp)
+                let balance: U256 = decode_exact(balance_rlp)
                     .map_err(|e| Error::ProofError(format!("Failed to decode balance: {e}")))?;
-                proof.account = Account::new(nonce, balance, EMPTY_ROOT_HASH, code_hash);
+                proof.account = Account::new(nonce, balance, EMPTY_ROOT_HASH, *code_hash);
 
                 if let Some(storage_root) = storage_root {
                     proof.account.storage_root = storage_root.rlp().as_hash().unwrap();
@@ -178,7 +179,7 @@ impl StorageEngine {
                 }
                 Ok(None)
             }
-            Branch { ref prefix, ref children, .. } => {
+            Branch { ref children } => {
                 if !prefix.is_empty() {
                     // extension + branch
                     let branch_path = original_path.slice(..path_offset + common_prefix_length);
@@ -267,8 +268,9 @@ impl StorageEngine {
 
         assert!(path_offset <= 64);
 
-        match node {
-            Branch { ref prefix, ref children, .. } => {
+        let prefix = node.prefix();
+        match node.kind() {
+            Branch { ref children } => {
                 // update account subtree for branch node or branch+extension node
                 let full_node_path = original_path.slice(..path_offset);
                 let proof_node = node.rlp_encode();
