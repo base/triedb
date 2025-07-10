@@ -645,17 +645,21 @@ impl<'a> OrphanPages<'a> {
     }
 
     /// Adds a page to the orphan page list, increasing the capacity of the list if necessary.
-    pub fn push(&mut self, orphan: OrphanPage) -> io::Result<()> {
-        if self.push_within_capacity(orphan).is_err() {
+    pub fn push(&mut self, orphan: OrphanPage, snapshot_id: SnapshotId) -> io::Result<()> {
+        if self.push_within_capacity(orphan, snapshot_id).is_err() {
             self.manager.grow()?;
-            self.push_within_capacity(orphan)
+            self.push_within_capacity(orphan, snapshot_id)
                 .expect("`push_within_capacity` failed even though capacity was increased");
         }
         Ok(())
     }
 
     /// Adds a page to the orphan page list if there is enough capacity.
-    pub fn push_within_capacity(&mut self, orphan: OrphanPage) -> Result<(), OrphanPage> {
+    pub fn push_within_capacity(
+        &mut self,
+        orphan: OrphanPage,
+        snapshot_id: SnapshotId,
+    ) -> Result<(), OrphanPage> {
         // To make sure the previous snapshot is always valid, we cannot modify orphan pages that
         // are referenced by the previous snapshot. We can only modify the reclaimed orphans
         // slice, or the the additional orphans elements added at the end of the list (if any).
@@ -674,15 +678,28 @@ impl<'a> OrphanPages<'a> {
             active_reclaimed_range.end.min(dirty_reclaimed_range.end);
 
         if !intersection.is_empty() {
-            if intersection.start == dirty_reclaimed_range.start {
-                list[dirty_reclaimed_range.start] = orphan;
-                dirty.reclaimed_orphans_start += 1;
-                dirty.reclaimed_orphans_end -= 1;
-                return Ok(());
-            } else if intersection.end == dirty_reclaimed_range.end {
-                list[dirty_reclaimed_range.end - 1] = orphan;
-                dirty.reclaimed_orphans_end -= 1;
-                return Ok(());
+            if snapshot_id & 1 == 0 {
+                if intersection.start == dirty_reclaimed_range.start {
+                    list[dirty_reclaimed_range.start] = orphan;
+                    dirty.reclaimed_orphans_start += 1;
+                    dirty.reclaimed_orphans_end -= 1;
+                    return Ok(());
+                } else if intersection.end == dirty_reclaimed_range.end {
+                    list[dirty_reclaimed_range.end - 1] = orphan;
+                    dirty.reclaimed_orphans_end -= 1;
+                    return Ok(());
+                }
+            } else {
+                if intersection.end == dirty_reclaimed_range.end {
+                    list[dirty_reclaimed_range.end - 1] = orphan;
+                    dirty.reclaimed_orphans_end -= 1;
+                    return Ok(());
+                } else if intersection.start == dirty_reclaimed_range.start {
+                    list[dirty_reclaimed_range.start] = orphan;
+                    dirty.reclaimed_orphans_start += 1;
+                    dirty.reclaimed_orphans_end -= 1;
+                    return Ok(());
+                }
             }
         }
 
@@ -708,7 +725,11 @@ impl<'a> OrphanPages<'a> {
     ///
     /// This method uses an optimized algorithm that may return `None` even if an orphan page
     /// exists.
-    pub fn pop(&mut self, snapshot_threshold: SnapshotId) -> Option<OrphanPage> {
+    pub fn pop(
+        &mut self,
+        snapshot_threshold: SnapshotId,
+        snapshot_id: SnapshotId,
+    ) -> Option<OrphanPage> {
         let (_, dirty, list) = self.manager.parts_mut();
         let (left, right) = dirty.actual_orphans_ranges();
 
@@ -722,20 +743,39 @@ impl<'a> OrphanPages<'a> {
         // high, there's no point in checking the other elements, because they will also be above
         // the threshold.
 
-        if !right.is_empty() {
-            let orphan = list[right.start];
-            if orphan.orphaned_at() <= snapshot_threshold {
-                dirty.reclaimed_orphans_end += 1;
-                return Some(orphan);
+        // if snapshot_id is even, check the right side first, then the left side
+        // if snapshot_id is odd, check the left side first, then the right side
+        if snapshot_id & 1 == 0 {
+            if !right.is_empty() {
+                let orphan = list[right.start];
+                if orphan.orphaned_at() <= snapshot_threshold {
+                    dirty.reclaimed_orphans_end += 1;
+                    return Some(orphan);
+                }
             }
-        }
-
-        if !left.is_empty() {
-            let orphan = list[left.end - 1];
-            if orphan.orphaned_at() <= snapshot_threshold {
-                dirty.reclaimed_orphans_start -= 1;
-                dirty.reclaimed_orphans_end += 1;
-                return Some(orphan);
+            if !left.is_empty() {
+                let orphan = list[left.end - 1];
+                if orphan.orphaned_at() <= snapshot_threshold {
+                    dirty.reclaimed_orphans_start -= 1;
+                    dirty.reclaimed_orphans_end += 1;
+                    return Some(orphan);
+                }
+            }
+        } else {
+            if !left.is_empty() {
+                let orphan = list[left.end - 1];
+                if orphan.orphaned_at() <= snapshot_threshold {
+                    dirty.reclaimed_orphans_start -= 1;
+                    dirty.reclaimed_orphans_end += 1;
+                    return Some(orphan);
+                }
+            }
+            if !right.is_empty() {
+                let orphan = list[right.start];
+                if orphan.orphaned_at() <= snapshot_threshold {
+                    dirty.reclaimed_orphans_end += 1;
+                    return Some(orphan);
+                }
             }
         }
 
@@ -762,10 +802,10 @@ mod tests {
         ]));
         dirty.set_root_node_page_id(Some(page_id!(123)));
         dirty.set_page_count(456);
-        manager.orphan_pages().push(OrphanPage::new(page_id!(0xaa), 1)).expect("push failed");
-        manager.orphan_pages().push(OrphanPage::new(page_id!(0xbb), 2)).expect("push failed");
-        manager.orphan_pages().push(OrphanPage::new(page_id!(0xcc), 3)).expect("push failed");
-        manager.orphan_pages().push(OrphanPage::new(page_id!(0xdd), 4)).expect("push failed");
+        manager.orphan_pages().push(OrphanPage::new(page_id!(0xaa), 1), 2).expect("push failed");
+        manager.orphan_pages().push(OrphanPage::new(page_id!(0xbb), 2), 2).expect("push failed");
+        manager.orphan_pages().push(OrphanPage::new(page_id!(0xcc), 3), 2).expect("push failed");
+        manager.orphan_pages().push(OrphanPage::new(page_id!(0xdd), 4), 2).expect("push failed");
 
         manager.commit().expect("commit failed");
         manager.close().expect("close failed");
@@ -823,12 +863,12 @@ mod tests {
         ) {
             let orphan = OrphanPage::new(*next_page_id, 1);
             expected.insert(orphan);
-            manager.orphan_pages().push(orphan).expect("push failed");
+            manager.orphan_pages().push(orphan, 2).expect("push failed");
             *next_page_id = next_page_id.inc().expect("page id overflow");
         }
 
         fn pop(manager: &mut MetadataManager, expected: &mut HashSet<OrphanPage>) {
-            match manager.orphan_pages().pop(1) {
+            match manager.orphan_pages().pop(1, 2) {
                 None => assert!(
                     expected.is_empty(),
                     "metadata manager did not return an orphan page even though {} are available",
