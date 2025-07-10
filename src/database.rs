@@ -87,7 +87,7 @@ impl DatabaseOptions {
     }
 
     /// Opens the database file at the given path.
-    pub fn open(&self, db_path: impl AsRef<Path>) -> Result<Database, OpenError> {
+    pub fn open(&self, db_path: impl AsRef<Path>, cfg: &Config) -> Result<Database, OpenError> {
         let db_path = db_path.as_ref();
         let meta_path = self.meta_path.clone().unwrap_or_else(|| {
             let mut meta_path = db_path.to_path_buf();
@@ -95,23 +95,17 @@ impl DatabaseOptions {
             meta_path
         });
 
-        Database::open_with_options(db_path, meta_path, self)
+        Database::open_with_options(db_path, meta_path, self, cfg)
     }
 }
 
 impl Database {
-    pub fn open(db_path: impl AsRef<Path>) -> Result<Self, OpenError> {
-        Self::options().open(db_path)
+    pub fn open(db_path: impl AsRef<Path>, cfg: &Config) -> Result<Self, OpenError> {
+        Self::options().open(db_path, cfg)
     }
 
-    pub fn create_new(db_path: impl AsRef<Path>) -> Result<Self, OpenError> {
-        Self::options().create_new(true).open(db_path)
-    }
-
-    /// Sets a particular configuration for the database.
-    pub fn cfg(&mut self, cfg: Config) -> &mut Self {
-        self.cfg = cfg;
-        self
+    pub fn create_new(db_path: impl AsRef<Path>, cfg: &Config) -> Result<Self, OpenError> {
+        Self::options().create_new(true).open(db_path, cfg)
     }
 
     pub fn options() -> DatabaseOptions {
@@ -122,6 +116,7 @@ impl Database {
         db_path: impl AsRef<Path>,
         meta_path: impl AsRef<Path>,
         opts: &DatabaseOptions,
+        cfg: &Config,
     ) -> Result<Self, OpenError> {
         let db_path = db_path.as_ref();
         let meta_path = meta_path.as_ref();
@@ -150,14 +145,14 @@ impl Database {
             .open(db_path)
             .map_err(OpenError::PageError)?;
 
-        Ok(Self::new(StorageEngine::new(page_manager, meta_manager)))
+        Ok(Self::new(StorageEngine::new(page_manager, meta_manager), cfg))
     }
 
-    pub fn new(storage_engine: StorageEngine) -> Self {
+    pub fn new(storage_engine: StorageEngine, cfg: &Config) -> Self {
         Self {
             storage_engine,
             transaction_manager: Mutex::new(TransactionManager::new()),
-            cfg: Config::default(),
+            cfg: cfg.clone(),
         }
     }
 
@@ -293,7 +288,7 @@ mod tests {
 
         // Try to open a non-existing database
         Database::options()
-            .open(&db_path)
+            .open(&db_path, &Config::default())
             .expect_err("opening a non-existing database should have failed");
         assert!(!db_path.exists());
         assert!(!auto_meta_path.exists());
@@ -301,7 +296,7 @@ mod tests {
         // Open with create(true)
         Database::options()
             .create(true)
-            .open(&db_path)
+            .open(&db_path, &Config::default())
             .expect("database creation should have succeeded");
         assert!(db_path.exists());
         assert!(auto_meta_path.exists());
@@ -309,7 +304,7 @@ mod tests {
         // Open again with create_new(true)
         Database::options()
             .create_new(true)
-            .open(&db_path)
+            .open(&db_path, &Config::default())
             .expect_err("database creation should have failed");
         assert!(db_path.exists());
         assert!(auto_meta_path.exists());
@@ -319,7 +314,7 @@ mod tests {
         fs::remove_file(&auto_meta_path).expect("metadata file removal failed");
         Database::options()
             .create_new(true)
-            .open(&db_path)
+            .open(&db_path, &Config::default())
             .expect("database creation should have succeeded");
         assert!(db_path.exists());
         assert!(auto_meta_path.exists());
@@ -330,7 +325,7 @@ mod tests {
         Database::options()
             .create(true)
             .meta_path(&custom_meta_path)
-            .open(&db_path)
+            .open(&db_path, &Config::default())
             .expect("database creation should have succeeded");
         assert!(db_path.exists());
         assert!(custom_meta_path.exists());
@@ -341,7 +336,7 @@ mod tests {
     fn test_set_get_account() {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
-        let db = Database::create_new(file_path).unwrap();
+        let db = Database::create_new(file_path, &Config::default()).unwrap();
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
 
@@ -382,10 +377,10 @@ mod tests {
         // create the database on disk. currently this will create a database with 0 pages
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
-        let _db = Database::create_new(&file_path).unwrap();
+        let _db = Database::create_new(&file_path, &Config::default()).unwrap();
 
         // WHEN: the database is opened
-        let db = Database::open(&file_path).unwrap();
+        let db = Database::open(&file_path, &Config::default()).unwrap();
 
         // THEN: the size of the database should be 0
         assert_eq!(db.size(), 0);
@@ -398,7 +393,7 @@ mod tests {
     fn test_data_persistence() {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
-        let db = Database::create_new(&file_path).unwrap();
+        let db = Database::create_new(&file_path, &Config::default()).unwrap();
 
         let address1 = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
@@ -409,7 +404,7 @@ mod tests {
         tx.commit().unwrap();
         db.close().unwrap();
 
-        let db = Database::open(&file_path).unwrap();
+        let db = Database::open(&file_path, &Config::default()).unwrap();
         let mut tx = db.begin_ro().unwrap();
         let account = tx.get_account(AddressPath::for_address(address1)).unwrap().unwrap();
         assert_eq!(account, account1);
@@ -424,7 +419,7 @@ mod tests {
         tx.commit().unwrap();
         db.close().unwrap();
 
-        let db = Database::open(&file_path).unwrap();
+        let db = Database::open(&file_path, &Config::default()).unwrap();
         let mut tx = db.begin_ro().unwrap();
 
         let account = tx.get_account(AddressPath::for_address(address1)).unwrap().unwrap();
@@ -461,7 +456,7 @@ mod tests {
         // Create a new database and verify it has no pages
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
-        let db = Database::create_new(file_path).unwrap();
+        let db = Database::create_new(file_path, &Config::default()).unwrap();
         assert_eq!(db.storage_engine.page_manager.size(), 0);
 
         // Add 1000 accounts

@@ -14,6 +14,7 @@ use triedb::{
     account::Account,
     path::{AddressPath, StoragePath},
     Database,
+    Config,
 };
 use walkdir::WalkDir;
 
@@ -34,7 +35,7 @@ fn run_ethereum_execution_spec_state_tests() {
                 .as_str()
                 .replace("/", "_")[0..min(test_case_name.len(), 100)];
             let file_path = tmp_dir.path().join(database_file_name).to_str().unwrap().to_owned();
-            let test_database = Database::create_new(file_path).unwrap();
+            let test_database = Database::create_new(file_path, &Config::default()).unwrap();
 
             // will track accounts and storage that need to be deleted. this is essentially the
             // "diff" between the pre state and post state.
