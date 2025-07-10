@@ -251,7 +251,8 @@ impl MetadataSlot {
     #[inline]
     #[must_use]
     fn reclaimed_range(&self) -> Range<usize> {
-        self.reclaimed_orphans_start as usize..self.reclaimed_orphans_end as usize
+        self.reclaimed_orphans_start as usize..
+            (self.reclaimed_orphans_start + self.reclaimed_orphans_end) as usize
     }
 
     /// Returns the range of pages that are actually orphans (not reclaimed) in the `orphan_pages`
