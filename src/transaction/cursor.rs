@@ -5,7 +5,7 @@ use alloy_trie::{nodes::RlpNode, Nibbles};
 
 use crate::{
     location::Location,
-    node::{encode_branch, Node},
+    node::{encode_branch, Node, NodeKind},
     page::PageId,
     transaction::{Transaction, RO},
     Database,
@@ -63,8 +63,12 @@ impl<DB: Deref<Target = Database>> Cursor<DB> {
         }
 
         match self.current_node() {
-            Some(Node::Branch { .. }) => self.traverse_branch_children(),
-            Some(Node::AccountLeaf { .. } | Node::StorageLeaf { .. }) => self.backtrack_from_leaf(),
+            Some(node) => {
+                match node.kind() {
+                    NodeKind::Branch { .. } => self.traverse_branch_children(),
+                    NodeKind::AccountLeaf { .. } | NodeKind::StorageLeaf { .. } => self.backtrack_from_leaf(),
+                }
+            }
             None => Ok(None),
         }
     }
@@ -161,8 +165,8 @@ impl<DB: Deref<Target = Database>> Cursor<DB> {
         let current_node = self.current_node().unwrap();
 
         // Handle different node types
-        match current_node {
-            Node::Branch { .. } => {
+        match current_node.kind() {
+            NodeKind::Branch { .. } => {
                 // This is a branch node, navigate to the appropriate child
                 let next_nibble = target_key[current_key.len()];
 
@@ -190,7 +194,7 @@ impl<DB: Deref<Target = Database>> Cursor<DB> {
                 // No suitable child found at this level, backtrack to find next higher key
                 self.backtrack_to_find_next_higher_key(target_key)
             }
-            Node::AccountLeaf { .. } | Node::StorageLeaf { .. } => self.backtrack_from_leaf(),
+            NodeKind::AccountLeaf { .. } | NodeKind::StorageLeaf { .. } => self.backtrack_from_leaf(),
         }
     }
 
@@ -326,8 +330,8 @@ impl<DB: Deref<Target = Database>> Cursor<DB> {
     fn current_key_node_and_hash(&self) -> Option<(&Nibbles, &Node, B256)> {
         match (self.key_stack.last(), self.node_stack.last(), self.hash_stack.last()) {
             (Some(key), Some(node), Some(hash)) => {
-                match node {
-                    Node::Branch { children, .. } => {
+                match node.kind() {
+                    NodeKind::Branch { children, .. } => {
                         if !node.prefix().is_empty() {
                             // we will need to hash this node directly, as the parent pointer has
                             // the hash of the implied extension node
@@ -466,7 +470,7 @@ impl<DB: Deref<Target = Database>> Cursor<DB> {
                 } else {
                     child_slotted_page.get_value(0).unwrap()
                 };
-                child_node.as_rlp_node().as_hash().unwrap()
+                child_node.to_rlp_node().as_hash().unwrap()
             });
             self.load_child_node_into_stack(
                 child_pointer.location(),
@@ -518,8 +522,8 @@ impl<DB: Deref<Target = Database>> Cursor<DB> {
     /// Find the next sibling starting from the given index
     fn find_next_sibling_from_index(&mut self, start_index: u8) -> Result<bool, CursorError> {
         let parent_node = self.current_node().unwrap();
-        let children = match parent_node {
-            Node::Branch { children, .. } => children,
+        let children = match parent_node.kind() {
+            NodeKind::Branch { children, .. } => children,
             _ => return Ok(false),
         };
         let parent_key = self.current_key().unwrap();
@@ -545,7 +549,7 @@ impl<DB: Deref<Target = Database>> Cursor<DB> {
                 } else {
                     child_slotted_page.get_value(0).unwrap()
                 };
-                child_node.as_rlp_node().as_hash().unwrap()
+                child_node.to_rlp_node().as_hash().unwrap()
             });
             self.load_child_node_into_stack(
                 child_pointer.location(),
@@ -640,13 +644,13 @@ mod tests {
         assert!(result.is_ok());
         let (key, node, hash) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
-        assert!(matches!(node, Node::AccountLeaf { .. }), "node: {:?}", node);
+        assert!(matches!(node.kind(), NodeKind::AccountLeaf { .. }), "node: {:?}", node);
 
         // Verify the hash is correct - for root node it should match the context's root hash
         assert_eq!(hash, root_hash, "Hash should match the root node hash from context");
 
         // Also verify the hash matches what we'd compute from the node itself
-        let computed_hash = node.as_rlp_node().as_hash().unwrap();
+        let computed_hash = node.to_rlp_node().as_hash().unwrap();
         assert_eq!(hash, computed_hash, "Hash should match the computed hash from node RLP");
 
         // next item found is none
@@ -659,7 +663,7 @@ mod tests {
         assert!(result.is_ok());
         let (key, node, hash) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
-        assert!(matches!(node, Node::AccountLeaf { .. }), "node: {:?}", node);
+        assert!(matches!(node.kind(), NodeKind::AccountLeaf { .. }), "node: {:?}", node);
 
         // Verify hash again after seek
         assert_eq!(
@@ -672,7 +676,7 @@ mod tests {
         assert!(result.is_ok());
         let (key, node, hash) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
-        assert!(matches!(node, Node::AccountLeaf { .. }), "node: {:?}", node);
+        assert!(matches!(node.kind(), NodeKind::AccountLeaf { .. }), "node: {:?}", node);
 
         // Verify hash for this case too
         assert_eq!(
@@ -730,7 +734,7 @@ mod tests {
         assert_eq!(hash, root_hash, "Root node hash should match context");
 
         // Verify the hash matches the computed hash
-        let computed_hash = branch_node.as_rlp_node().as_hash().unwrap();
+        let computed_hash = branch_node.to_rlp_node().as_hash().unwrap();
         assert_eq!(hash, computed_hash, "Root hash should match computed hash");
 
         // Store the parent pointer for later verification before borrowing cursor again
@@ -741,14 +745,14 @@ mod tests {
         let (key, leaf_node, hash) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
         assert_eq!(leaf_node.prefix(), &Nibbles::from_vec(vec![1; 63]));
-        assert!(matches!(leaf_node, Node::AccountLeaf { .. }));
+        assert!(matches!(leaf_node.kind(), NodeKind::AccountLeaf { .. }));
 
         // Verify this child's hash matches what's stored in the parent's pointer
         let expected_child_hash = parent_child_pointer.rlp().as_hash().unwrap();
         assert_eq!(hash, expected_child_hash, "Child hash should match parent's pointer hash");
 
         // Also verify it matches the computed hash
-        let computed_child_hash = leaf_node.as_rlp_node().as_hash().unwrap();
+        let computed_child_hash = leaf_node.to_rlp_node().as_hash().unwrap();
         assert_eq!(hash, computed_child_hash, "Child hash should match computed hash");
 
         // current also returns the first account leaf node
@@ -757,10 +761,10 @@ mod tests {
         let (key, leaf_node, hash) = result.unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
         assert_eq!(leaf_node.prefix(), &Nibbles::from_vec(vec![1; 63]));
-        assert!(matches!(leaf_node, Node::AccountLeaf { .. }));
+                assert!(matches!(leaf_node.kind(), NodeKind::AccountLeaf { .. }));
 
         // Verify hash consistency in current() as well
-        let computed_hash = leaf_node.as_rlp_node().as_hash().unwrap();
+        let computed_hash = leaf_node.to_rlp_node().as_hash().unwrap();
         assert_eq!(hash, computed_hash, "Current() should return consistent hash");
 
         // next item found is the nested branch node
@@ -772,7 +776,7 @@ mod tests {
         assert!(branch_node.child(3).unwrap().is_some());
 
         // Verify this nested branch hash
-        let computed_hash = branch_node.as_rlp_node().as_hash().unwrap();
+        let computed_hash = branch_node.to_rlp_node().as_hash().unwrap();
         assert_ne!(hash, computed_hash, "Nested branch hash should NOT match computed hash, as the computed_hash is for the extension node");
 
         // next item found is the second account leaf node
@@ -780,10 +784,10 @@ mod tests {
         let (key, leaf_node, hash) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![2; 64]));
         assert_eq!(leaf_node.prefix(), &Nibbles::from_vec(vec![2; 61]));
-        assert!(matches!(leaf_node, Node::AccountLeaf { .. }));
+        assert!(matches!(leaf_node.kind(), NodeKind::AccountLeaf { .. }));
 
         // Verify this leaf's hash
-        let computed_hash = leaf_node.as_rlp_node().as_hash().unwrap();
+        let computed_hash = leaf_node.to_rlp_node().as_hash().unwrap();
         assert_eq!(hash, computed_hash, "Second leaf hash should match computed hash");
 
         // next item found is the third account leaf node (skipping the second account's storage)
@@ -794,10 +798,10 @@ mod tests {
             &Nibbles::from_vec(vec![2, 2].into_iter().chain(vec![3; 62]).collect::<Vec<_>>())
         );
         assert_eq!(leaf_node.prefix(), &Nibbles::from_vec(vec![3; 61]));
-        assert!(matches!(leaf_node, Node::AccountLeaf { .. }));
+        assert!(matches!(leaf_node.kind(), NodeKind::AccountLeaf { .. }));
 
         // Verify this leaf's hash
-        let computed_hash = leaf_node.as_rlp_node().as_hash().unwrap();
+        let computed_hash = leaf_node.to_rlp_node().as_hash().unwrap();
         assert_eq!(hash, computed_hash, "Third leaf hash should match computed hash");
 
         // no more account trie nodes found
@@ -838,10 +842,10 @@ mod tests {
         assert!(result.is_ok());
         let (key, node, hash) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
-        assert!(matches!(node, Node::StorageLeaf { .. }), "node: {:?}", node);
+        assert!(matches!(node.kind(), NodeKind::StorageLeaf { .. }), "node: {:?}", node);
 
         // Verify the hash matches the computed hash for storage leaf
-        let computed_hash = node.as_rlp_node().as_hash().unwrap();
+        let computed_hash = node.to_rlp_node().as_hash().unwrap();
         assert_eq!(hash, computed_hash, "Storage leaf hash should match computed hash");
 
         // seek to the same key as the first item
@@ -849,10 +853,10 @@ mod tests {
         assert!(result.is_ok());
         let (key, node, hash) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
-        assert!(matches!(node, Node::StorageLeaf { .. }), "node: {:?}", node);
+        assert!(matches!(node.kind(), NodeKind::StorageLeaf { .. }), "node: {:?}", node);
 
         // Verify hash consistency after seek
-        let computed_hash = node.as_rlp_node().as_hash().unwrap();
+        let computed_hash = node.to_rlp_node().as_hash().unwrap();
         assert_eq!(hash, computed_hash, "Storage leaf hash should be consistent after seek");
 
         // seek to a key that is less than the first item
@@ -860,10 +864,10 @@ mod tests {
         assert!(result.is_ok());
         let (key, node, hash) = result.unwrap().unwrap();
         assert_eq!(key, &Nibbles::from_vec(vec![1; 64]));
-        assert!(matches!(node, Node::StorageLeaf { .. }), "node: {:?}", node);
+        assert!(matches!(node.kind(), NodeKind::StorageLeaf { .. }), "node: {:?}", node);
 
         // Verify hash for this case too
-        let computed_hash = node.as_rlp_node().as_hash().unwrap();
+        let computed_hash = node.to_rlp_node().as_hash().unwrap();
         assert_eq!(hash, computed_hash, "Storage leaf hash should match computed hash");
 
         // seek to a key that is greater than the first item
@@ -908,11 +912,11 @@ mod tests {
 
         while let Ok(Some((key, node, _))) = cursor.next() {
             found_nodes += 1;
-            match node {
-                Node::AccountLeaf { .. } => {
+            match node.kind() {
+                NodeKind::AccountLeaf { .. } => {
                     found_account = true;
                 }
-                Node::StorageLeaf { .. } => {
+                NodeKind::StorageLeaf { .. } => {
                     assert_eq!(key.len(), 64);
                     found_storage_nodes += 1;
                 }
@@ -1105,7 +1109,7 @@ mod tests {
         let result = result.unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().0, &Nibbles::default());
-        assert!(matches!(result.unwrap().1, Node::Branch { .. }));
+        assert!(matches!(result.unwrap().1.kind(), NodeKind::Branch { .. }));
 
         // Seek to the first storage slot
         let result = cursor.seek(storage_path1.get_slot());
@@ -1165,7 +1169,7 @@ mod tests {
         assert_eq!(root_hash, root_hash, "Root hash must match context");
 
         // Root should match computed hash
-        let computed_root_hash = root_node.as_rlp_node().as_hash().unwrap();
+        let computed_root_hash = root_node.to_rlp_node().as_hash().unwrap();
         assert_eq!(root_hash, computed_root_hash, "Root hash must match computed hash");
 
         // Store child pointers for verification
@@ -1183,7 +1187,7 @@ mod tests {
         assert_eq!(child1_hash, expected_child1_hash, "Child1 hash must match parent pointer");
 
         // Child hash should match computed hash
-        let computed_child1_hash = child1_node.as_rlp_node().as_hash().unwrap();
+        let computed_child1_hash = child1_node.to_rlp_node().as_hash().unwrap();
         assert_eq!(child1_hash, computed_child1_hash, "Child1 hash must match computed hash");
 
         // Test 3: Second child hash verification
@@ -1197,7 +1201,7 @@ mod tests {
         assert_eq!(child2_hash, expected_child2_hash, "Child2 hash must match parent pointer");
 
         // Child hash should match computed hash
-        let computed_child2_hash = child2_node.as_rlp_node().as_hash().unwrap();
+        let computed_child2_hash = child2_node.to_rlp_node().as_hash().unwrap();
         assert_eq!(child2_hash, computed_child2_hash, "Child2 hash must match computed hash");
 
         // Test 4: Verify current() returns same hash
@@ -1218,7 +1222,7 @@ mod tests {
         assert_eq!(seek_hash, child1_hash, "Seek should return consistent hash");
 
         // Also verify against computed hash
-        let computed_seek_hash = seek_node.as_rlp_node().as_hash().unwrap();
+        let computed_seek_hash = seek_node.to_rlp_node().as_hash().unwrap();
         assert_eq!(seek_hash, computed_seek_hash, "Seek hash must match computed hash");
     }
 }

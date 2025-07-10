@@ -729,9 +729,9 @@ mod tests {
     fn test_size_branch() {
         // 2 children, reserve 2 children slots
         let mut node = Node::new_branch(Nibbles::new()).expect("can create node");
-        node.set_child(0, Pointer::new(42.into(), RlpNode::from_rlp(&encode(10u8))))
+        node.set_child(0, Pointer::new_leaf(42.into(), RlpNode::from_rlp(&encode(10u8))))
             .expect("should set child");
-        node.set_child(11, Pointer::new(11.into(), RlpNode::from_rlp(&encode("foo"))))
+        node.set_child(11, Pointer::new_leaf(11.into(), RlpNode::from_rlp(&encode("foo"))))
             .expect("should set child");
         let size = node.size();
         assert_eq!(size, 2 + 2 + 37 * 2); // 2 bytes for type and prefix length, 2 for bitmask, 37 for each 2 children pointers
@@ -739,7 +739,7 @@ mod tests {
         // 3 children, reserve 4 children slots
         let mut node = Node::new_branch(Nibbles::new()).expect("can create node");
         for i in 0..3 {
-            node.set_child(i, Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i))))
+            node.set_child(i, Pointer::new_leaf((i as u32).into(), RlpNode::from_rlp(&encode(i))))
                 .expect("should set child");
         }
 
@@ -749,7 +749,7 @@ mod tests {
         // 4 children, reserve 4 children slots
         let mut node = Node::new_branch(Nibbles::new()).expect("can create node");
         for i in 10..14 {
-            node.set_child(i, Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i))))
+            node.set_child(i, Pointer::new_leaf((i as u32).into(), RlpNode::from_rlp(&encode(i))))
                 .expect("should set child");
         }
         let size = node.size();
@@ -758,7 +758,7 @@ mod tests {
         // 5 children, reserve 8 children slots
         let mut node = Node::new_branch(Nibbles::new()).expect("can create node");
         for i in 11..16 {
-            node.set_child(i, Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i))))
+            node.set_child(i, Pointer::new_leaf((i as u32).into(), RlpNode::from_rlp(&encode(i))))
                 .expect("should set child");
         }
         let size = node.size();
@@ -767,7 +767,7 @@ mod tests {
         // 8 children, reserve 8 children slots
         let mut node = Node::new_branch(Nibbles::new()).expect("can create node");
         for i in 5..13 {
-            node.set_child(i, Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i))))
+            node.set_child(i, Pointer::new_leaf((i as u32).into(), RlpNode::from_rlp(&encode(i))))
                 .expect("should set child");
         }
         let size = node.size();
@@ -776,7 +776,7 @@ mod tests {
         // 9 children, reserve 16 children slots
         let mut node = Node::new_branch(Nibbles::new()).expect("can create node");
         for i in 3..12 {
-            node.set_child(i, Pointer::new((i as u32).into(), RlpNode::from_rlp(&encode(i))))
+            node.set_child(i, Pointer::new_leaf((i as u32).into(), RlpNode::from_rlp(&encode(i))))
                 .expect("should set child");
         }
         let size = node.size();
@@ -879,7 +879,7 @@ mod tests {
         .expect("can create node");
         node.set_child(
             0,
-            Pointer::new(
+            Pointer::new_leaf(
                 42.into(),
                 RlpNode::word_rlp(&b256!(
                     "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
@@ -888,7 +888,7 @@ mod tests {
         )
         .expect("should set child");
         let bytes = node.serialize().unwrap();
-        assert_eq!(bytes, hex!("0xc10080840f0f0f0fdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef0000002a011234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"));
+        assert_eq!(bytes, hex!("0xc10080840f0f0f0fdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef0000002a021234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"));
     }
 
     #[test]
@@ -896,9 +896,9 @@ mod tests {
         let mut node: Node = Node::new_branch(Nibbles::new()).expect("can create node");
         let hash1 = b256!("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
         let hash2 = b256!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
-        node.set_child(0, Pointer::new(42.into(), RlpNode::word_rlp(&hash1)))
+        node.set_child(0, Pointer::new_branch(42.into(), RlpNode::word_rlp(&hash1)))
             .expect("should set child");
-        node.set_child(11, Pointer::new(43.into(), RlpNode::word_rlp(&hash2)))
+        node.set_child(11, Pointer::new_branch(43.into(), RlpNode::word_rlp(&hash2)))
             .expect("should set child");
         let bytes = node.serialize().unwrap();
         assert_eq!(bytes.len(), 2 + 2 + 37 * 2);
@@ -907,10 +907,10 @@ mod tests {
         // children bitmask (10000000 00010000)
         expected.extend([128, 16]);
         // child 0
-        expected.extend([0, 0, 0, 42, 1]);
+        expected.extend([0, 0, 0, 42, 3]);
         expected.extend(hash1.as_slice());
         // child 11
-        expected.extend([0, 0, 0, 43, 1]);
+        expected.extend([0, 0, 0, 43, 3]);
         expected.extend(hash2.as_slice());
         // children 12-15
         assert_eq!(bytes, expected);
@@ -920,11 +920,11 @@ mod tests {
         let hash1 = b256!("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
         let hash2 = b256!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
         let hash3 = b256!("0x1111111111111111111111111111111111111111111111111111111111111111");
-        node.set_child(2, Pointer::new(100.into(), RlpNode::word_rlp(&hash1)))
+        node.set_child(2, Pointer::new_branch(100.into(), RlpNode::word_rlp(&hash1)))
             .expect("should set child");
-        node.set_child(3, Pointer::new(200.into(), RlpNode::word_rlp(&hash2)))
+        node.set_child(3, Pointer::new_branch(200.into(), RlpNode::word_rlp(&hash2)))
             .expect("should set child");
-        node.set_child(15, Pointer::new(210.into(), RlpNode::word_rlp(&hash3)))
+        node.set_child(15, Pointer::new_branch(210.into(), RlpNode::word_rlp(&hash3)))
             .expect("should set child");
         let bytes = node.serialize().unwrap();
         assert_eq!(bytes.len(), 2 + 3 + 2 + 37 * 4);
@@ -933,13 +933,13 @@ mod tests {
         // children bitmask (00110000 00000001)
         expected.extend([48, 1]);
         // child 2
-        expected.extend([0, 0, 0, 100, 1]);
+        expected.extend([0, 0, 0, 100, 3]);
         expected.extend(hash1.as_slice());
         // child 3
-        expected.extend([0, 0, 0, 200, 1]);
+        expected.extend([0, 0, 0, 200, 3]);
         expected.extend(hash2.as_slice());
         // child 15
-        expected.extend([0, 0, 0, 210, 1]);
+        expected.extend([0, 0, 0, 210, 3]);
         expected.extend(hash3.as_slice());
         // remaining empty slot
         expected.extend([0; 37]);
@@ -949,9 +949,9 @@ mod tests {
             Node::new_branch(Nibbles::from_nibbles([0x0, 0x0])).expect("can create node");
         let v1 = encode(1u8);
         let v2 = encode("hello world");
-        node.set_child(1, Pointer::new(99999.into(), RlpNode::from_rlp(&v1)))
+        node.set_child(1, Pointer::new_leaf(99999.into(), RlpNode::from_rlp(&v1)))
             .expect("should set child");
-        node.set_child(2, Pointer::new(8675309.into(), RlpNode::from_rlp(&v2)))
+        node.set_child(2, Pointer::new_leaf(8675309.into(), RlpNode::from_rlp(&v2)))
             .expect("should set child");
         let bytes = node.serialize().unwrap();
 
@@ -1027,7 +1027,7 @@ mod tests {
         let mut node = Node::new_branch(Nibbles::new()).expect("can create node");
         node.set_child(
             0,
-            Pointer::new(
+            Pointer::new_branch(
                 0.into(),
                 RlpNode::word_rlp(&b256!(
                     "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
@@ -1037,7 +1037,7 @@ mod tests {
         .expect("should set child");
         node.set_child(
             15,
-            Pointer::new(
+            Pointer::new_branch(
                 15.into(),
                 RlpNode::word_rlp(&b256!(
                     "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
@@ -1052,7 +1052,7 @@ mod tests {
         let mut node = Node::new_branch(Nibbles::new()).expect("can create node");
         node.set_child(
             3,
-            Pointer::new(
+            Pointer::new_branch(
                 0.into(),
                 RlpNode::word_rlp(&b256!(
                     "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
@@ -1062,7 +1062,7 @@ mod tests {
         .expect("should set child");
         node.set_child(
             7,
-            Pointer::new(
+            Pointer::new_branch(
                 15.into(),
                 RlpNode::word_rlp(&b256!(
                     "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
@@ -1072,7 +1072,7 @@ mod tests {
         .expect("should set child");
         node.set_child(
             13,
-            Pointer::new(
+            Pointer::new_branch(
                 13.into(),
                 RlpNode::word_rlp(&b256!(
                     "0xf00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f"
@@ -1088,7 +1088,7 @@ mod tests {
             Node::new_branch(Nibbles::from_nibbles([0x1, 0x2])).expect("can create node");
         node.set_child(
             0,
-            Pointer::new(
+            Pointer::new_branch(
                 0.into(),
                 RlpNode::word_rlp(&b256!(
                     "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
@@ -1098,7 +1098,7 @@ mod tests {
         .expect("should set child");
         node.set_child(
             15,
-            Pointer::new(
+            Pointer::new_branch(
                 15.into(),
                 RlpNode::word_rlp(&b256!(
                     "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
@@ -1117,7 +1117,7 @@ mod tests {
             .expect("can create node");
         node.set_child(
             3,
-            Pointer::new(
+            Pointer::new_branch(
                 0.into(),
                 RlpNode::word_rlp(&b256!(
                     "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
@@ -1127,7 +1127,7 @@ mod tests {
         .expect("should set child");
         node.set_child(
             7,
-            Pointer::new(
+            Pointer::new_branch(
                 15.into(),
                 RlpNode::word_rlp(&b256!(
                     "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
@@ -1137,7 +1137,7 @@ mod tests {
         .expect("should set child");
         node.set_child(
             13,
-            Pointer::new(
+            Pointer::new_branch(
                 13.into(),
                 RlpNode::word_rlp(&b256!(
                     "0xf00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f00f"
@@ -1157,7 +1157,7 @@ mod tests {
         let mut node = Node::new_branch(Nibbles::new()).expect("can create node");
         node.set_child(
             5,
-            Pointer::new(
+            Pointer::new_branch(
                 5.into(),
                 RlpNode::word_rlp(&b256!(
                     "0x18e3b46e84b35270116303fb2a33c853861d45d99da2d87117c2136f7edbd0b9"
@@ -1167,7 +1167,7 @@ mod tests {
         .expect("should set child");
         node.set_child(
             7,
-            Pointer::new(
+            Pointer::new_branch(
                 7.into(),
                 RlpNode::word_rlp(&b256!(
                     "0x717aef38e7ba4a0ae477856a6e7f6ba8d4ee764c57908e6f22643a558db737ff"
