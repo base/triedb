@@ -130,6 +130,44 @@ impl Not for SlotIndex {
     }
 }
 
+macro_rules! mixed_checks_with_else_actions {
+    ($out_check:expr, $in_check_1:expr, $in_action_1:expr, $in_check_2:expr, $in_action_2:expr) => {
+        if $out_check {
+            if $in_check_1 {
+                $in_action_1;
+            } else if $in_check_2 {
+                $in_action_2;
+            }
+        } else {
+            if $in_check_2 {
+                $in_action_2;
+            } else if $in_check_1 {
+                $in_action_1;
+            }
+        }
+    };
+}
+
+macro_rules! mixed_checks_actions {
+    ($out_check:expr, $in_check_1:expr, $in_action_1:expr, $in_check_2:expr, $in_action_2:expr) => {
+        if $out_check {
+            if $in_check_1 {
+                $in_action_1;
+            }
+            if $in_check_2 {
+                $in_action_2;
+            }
+        } else {
+            if $in_check_2 {
+                $in_action_2;
+            }
+            if $in_check_1 {
+                $in_action_1;
+            }
+        }
+    };
+}
+
 /// Fixed-size portion of the metadata slot (excluding the hash).
 ///
 /// This contain the following information:
@@ -679,29 +717,22 @@ impl<'a> OrphanPages<'a> {
             active_reclaimed_range.end.min(dirty_reclaimed_range.end);
 
         if !intersection.is_empty() {
-            if snapshot_id & 1 == 0 {
-                if intersection.start == dirty_reclaimed_range.start {
+            mixed_checks_with_else_actions!(
+                snapshot_id & 1 == 0,
+                intersection.start == dirty_reclaimed_range.start,
+                {
                     list[dirty_reclaimed_range.start] = orphan;
                     dirty.reclaimed_orphans_start += 1;
                     dirty.reclaimed_orphans_end -= 1;
                     return Ok(());
-                } else if intersection.end == dirty_reclaimed_range.end {
+                },
+                intersection.end == dirty_reclaimed_range.end,
+                {
                     list[dirty_reclaimed_range.end - 1] = orphan;
                     dirty.reclaimed_orphans_end -= 1;
                     return Ok(());
                 }
-            } else {
-                if intersection.end == dirty_reclaimed_range.end {
-                    list[dirty_reclaimed_range.end - 1] = orphan;
-                    dirty.reclaimed_orphans_end -= 1;
-                    return Ok(());
-                } else if intersection.start == dirty_reclaimed_range.start {
-                    list[dirty_reclaimed_range.start] = orphan;
-                    dirty.reclaimed_orphans_start += 1;
-                    dirty.reclaimed_orphans_end -= 1;
-                    return Ok(());
-                }
-            }
+            );
         }
 
         // We need to write at the end of the list. We can only write past the active and dirty
@@ -746,15 +777,18 @@ impl<'a> OrphanPages<'a> {
 
         // if snapshot_id is even, check the right side first, then the left side
         // if snapshot_id is odd, check the left side first, then the right side
-        if snapshot_id & 1 == 0 {
-            if !right.is_empty() {
+        mixed_checks_actions!(
+            snapshot_id & 1 == 0,
+            !right.is_empty(),
+            {
                 let orphan = list[right.start];
                 if orphan.orphaned_at() <= snapshot_threshold {
                     dirty.reclaimed_orphans_end += 1;
                     return Some(orphan);
                 }
-            }
-            if !left.is_empty() {
+            },
+            !left.is_empty(),
+            {
                 let orphan = list[left.end - 1];
                 if orphan.orphaned_at() <= snapshot_threshold {
                     dirty.reclaimed_orphans_start -= 1;
@@ -762,23 +796,7 @@ impl<'a> OrphanPages<'a> {
                     return Some(orphan);
                 }
             }
-        } else {
-            if !left.is_empty() {
-                let orphan = list[left.end - 1];
-                if orphan.orphaned_at() <= snapshot_threshold {
-                    dirty.reclaimed_orphans_start -= 1;
-                    dirty.reclaimed_orphans_end += 1;
-                    return Some(orphan);
-                }
-            }
-            if !right.is_empty() {
-                let orphan = list[right.start];
-                if orphan.orphaned_at() <= snapshot_threshold {
-                    dirty.reclaimed_orphans_end += 1;
-                    return Some(orphan);
-                }
-            }
-        }
+        );
 
         None
     }
