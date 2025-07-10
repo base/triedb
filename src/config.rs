@@ -4,17 +4,10 @@ use std::time::Duration;
 /// Config lets you control certain aspects like caching, logging, metrics, and concurrency.
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub caching: CachingConfig,
     pub log_level: LogLevel,
-    pub metrics: MetricsConfig,
+    pub caching: CachingConfig,
+    pub metrics: DatabaseMetrics,
     pub concurrency: ConcurrencyConfig,
-}
-
-#[derive(Debug, Clone)]
-pub struct CachingConfig {
-    pub page_cache_size: usize,
-    pub node_cache_size: usize,
-    pub storage_cache_size: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -27,8 +20,10 @@ pub enum LogLevel {
 }
 
 #[derive(Debug, Clone)]
-pub struct MetricsConfig {
-    pub metrics: DatabaseMetrics,
+pub struct CachingConfig {
+    pub page_cache_size: usize,
+    pub node_cache_size: usize,
+    pub storage_cache_size: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -43,7 +38,7 @@ impl Default for Config {
         Self {
             caching: CachingConfig::default(),
             log_level: LogLevel::Info,
-            metrics: MetricsConfig::default(),
+            metrics: DatabaseMetrics::default(),
             concurrency: ConcurrencyConfig::default(),
         }
     }
@@ -55,14 +50,6 @@ impl Default for CachingConfig {
             page_cache_size: 1024 * 1024, // 1MB
             node_cache_size: 512 * 1024,  // 512KB
             storage_cache_size: 2 * 1024 * 1024, // 2MB
-        }
-    }
-}
-
-impl Default for MetricsConfig {
-    fn default() -> Self {
-        Self {
-            metrics: DatabaseMetrics::default(),
         }
     }
 }
@@ -89,11 +76,6 @@ impl Config {
 
     pub fn with_log_level(mut self, log_level: LogLevel) -> Self {
         self.log_level = log_level;
-        self
-    }
-
-    pub fn with_metrics(mut self, metrics: MetricsConfig) -> Self {
-        self.metrics = metrics;
         self
     }
 
