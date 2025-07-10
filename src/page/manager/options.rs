@@ -61,6 +61,15 @@ impl PageManagerOptions {
         self
     }
 
+    /// Causes the file length to be set to 0 after opening it.
+    ///
+    /// Note that if `wipe(true)` is set, then setting [`page_count()`](Self::page_count) with any
+    /// number greater than `0` will cause the open to fail.
+    pub fn wipe(&mut self, wipe: bool) -> &mut Self {
+        self.open_options.truncate(wipe);
+        self
+    }
+
     /// Opens the file at `path` with the options specified by `self`.
     pub fn open(&self, path: impl AsRef<Path>) -> Result<PageManager, PageError> {
         PageManager::open_with_options(self, path)

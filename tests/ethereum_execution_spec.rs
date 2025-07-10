@@ -29,12 +29,12 @@ fn run_ethereum_execution_spec_state_tests() {
         let test_cases = state_test_case.as_object().unwrap();
         for (test_case_name, test_case) in test_cases.iter() {
             let tmp_dir = TempDir::new("ethereum_execution_spec_state_tests").unwrap();
-            println!("running test: {:?}", test_case_name);
-            let database_file_name = &format!("test_db_{}", test_case_name)
+            println!("running test: {test_case_name:?}");
+            let database_file_name = &format!("test_db_{test_case_name}")
                 .as_str()
                 .replace("/", "_")[0..min(test_case_name.len(), 100)];
             let file_path = tmp_dir.path().join(database_file_name).to_str().unwrap().to_owned();
-            let test_database = Database::create(file_path.as_str()).unwrap();
+            let test_database = Database::create_new(file_path).unwrap();
 
             // will track accounts and storage that need to be deleted. this is essentially the
             // "diff" between the pre state and post state.
@@ -166,8 +166,7 @@ fn run_ethereum_execution_spec_state_tests() {
             assert_eq!(
                 expected_state_root,
                 test_database.state_root(),
-                "failed test: {}",
-                test_case_name
+                "failed test: {test_case_name}"
             );
 
             tmp_dir.close().unwrap();

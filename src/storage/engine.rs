@@ -1050,21 +1050,14 @@ impl StorageEngine {
         } else if children.len() == 1 {
             // Merge branch with its only child
             let (idx, ptr) = children[0];
-            return self.merge_branch_with_only_child(
-                context,
-                slotted_page,
-                page_index,
-                node,
-                idx,
-                ptr,
-            );
+            self.merge_branch_with_only_child(context, slotted_page, page_index, node, idx, ptr)
         } else {
             // Normal branch node with multiple children
             let rlp_node = node.as_rlp_node();
-            return Ok(PointerChange::Update(Pointer::new(
+            Ok(PointerChange::Update(Pointer::new(
                 node_location(slotted_page.id(), page_index),
                 rlp_node,
-            )));
+            )))
         }
     }
 
@@ -1398,7 +1391,7 @@ impl StorageEngine {
                     // child is on different page, and we are only printing the current page
                     if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
                         let child_page_id = direct_child.location().page_id().unwrap();
-                        writeln!(buf, "{}Child on new page: {:?}", new_indent, child_page_id)?;
+                        writeln!(buf, "{new_indent}Child on new page: {child_page_id:?}")?;
                         Ok(())
                     } else {
                         self.print_page_helper(
@@ -1411,7 +1404,7 @@ impl StorageEngine {
                         )
                     }
                 } else {
-                    writeln!(buf, "{}No direct child", new_indent)?;
+                    writeln!(buf, "{new_indent}No direct child")?;
                     Ok(())
                 }
             }
@@ -1428,7 +1421,7 @@ impl StorageEngine {
                     // child is on new page, and we are only printing the current page
                     if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
                         let child_page_id = child.location().page_id().unwrap();
-                        writeln!(buf, "{}Child on new page: {:?}", new_indent, child_page_id)?;
+                        writeln!(buf, "{new_indent}Child on new page: {child_page_id:?}")?;
                         return Ok(());
                     } else {
                         self.print_page_helper(
@@ -1472,14 +1465,14 @@ impl StorageEngine {
             0 => (),
             1 => {
                 //verbose; print page ID and nodes accessed from page
-                writeln!(buf, "\nNODES ACCESSED FROM PAGE {}\n", page_id)?;
+                writeln!(buf, "\nNODES ACCESSED FROM PAGE {page_id}\n")?;
             }
             2 => {
                 //extra verbose; print page ID, nodes accessed from page, and page contents
-                writeln!(buf, "PAGE: {}\n", page_id)?;
+                writeln!(buf, "PAGE: {page_id}\n")?;
 
                 self.print_page(context, &mut buf, Some(page_id))?;
-                writeln!(buf, "\nNODES ACCESSED FROM PAGE {}:", page_id)?;
+                writeln!(buf, "\nNODES ACCESSED FROM PAGE {page_id}:")?;
             }
             _ => return Err(Error::DebugError("Invalid verbosity level".to_string())),
         }
@@ -1610,7 +1603,7 @@ impl StorageEngine {
                         )?;
                     }
                     _ => {
-                        writeln!(buf, "{}AccountLeaf: no value ", indent)?;
+                        writeln!(buf, "{indent}AccountLeaf: no value ")?;
                     }
                 };
                 Ok(())
@@ -1621,12 +1614,11 @@ impl StorageEngine {
                         let str_prefix = alloy_primitives::hex::encode(prefix.pack());
                         writeln!(
                             buf,
-                            "{}StorageLeaf: storage: {:?}, prefix: {}",
-                            indent, strg, str_prefix
+                            "{indent}StorageLeaf: storage: {strg:?}, prefix: {str_prefix}"
                         )?;
                     }
                     _ => {
-                        writeln!(buf, "{}StorageLeaf: no value", indent)?;
+                        writeln!(buf, "{indent}StorageLeaf: no value")?;
                     }
                 };
                 Ok(())
@@ -1656,7 +1648,7 @@ impl StorageEngine {
 
         self.debug_statistics_helper(context, slotted_page, 0, 1, 1, &mut stats)?;
 
-        writeln!(buf, "Page Statistics: {:?}", stats)?;
+        writeln!(buf, "Page Statistics: {stats:?}")?;
         Ok(())
     }
 
@@ -2328,7 +2320,7 @@ mod tests {
             let account = random_test_account(&mut rng);
             let mut storage = Vec::new();
             if idx % 10 == 0 {
-                for _ in 0..rng.gen_range(1..25) {
+                for _ in 0..rng.random_range(1..25) {
                     let slot = StorageKey::random_with(&mut rng);
                     storage.push((slot, StorageValue::from(rng.next_u64())));
                 }
@@ -3009,7 +3001,7 @@ mod tests {
         // Ensure there are no duplicate paths
         let mut unique_paths = std::collections::HashSet::new();
         for (path, _) in &accounts {
-            assert!(unique_paths.insert(path.clone()), "Duplicate path found: {:?}", path);
+            assert!(unique_paths.insert(path.clone()), "Duplicate path found: {path:?}");
         }
 
         // Insert all accounts
@@ -3028,8 +3020,7 @@ mod tests {
             assert_eq!(
                 retrieved_account,
                 Some(expected_account.clone()),
-                "Account mismatch for path: {:?}",
-                path
+                "Account mismatch for path: {path:?}"
             );
         }
 
@@ -3056,8 +3047,7 @@ mod tests {
             assert_eq!(
                 retrieved_account,
                 Some(expected_account.clone()),
-                "Account mismatch after split for path: {:?}",
-                path
+                "Account mismatch after split for path: {path:?}"
             );
         }
 
@@ -3126,12 +3116,12 @@ mod tests {
             let mut nibbles = [0u8; 64];
             // Generate random nibbles
             for nibble in &mut nibbles {
-                *nibble = rng.gen_range(0..16) as u8;
+                *nibble = rng.random_range(0..16) as u8;
             }
 
             let path = AddressPath::new(Nibbles::from_nibbles(nibbles));
-            let balance = rng.gen_range(0..1_000_000);
-            let nonce = rng.gen_range(0..100);
+            let balance = rng.random_range(0..1_000_000);
+            let nonce = rng.random_range(0..100);
             let account = create_test_account(balance, nonce);
             accounts.push((path, account));
         }
@@ -3200,10 +3190,10 @@ mod tests {
 
         // Prepare updates for some existing accounts
         for (i, (path, _)) in accounts.iter().enumerate() {
-            if i % 5 == 0 {
+            if i.is_multiple_of(5) {
                 // Update every 5th account
-                let new_balance = rng.gen_range(0..1_000_000);
-                let new_nonce = rng.gen_range(0..100);
+                let new_balance = rng.random_range(0..1_000_000);
+                let new_nonce = rng.random_range(0..100);
                 let new_account = create_test_account(new_balance, new_nonce);
 
                 updates.push((i, path.clone(), new_account));

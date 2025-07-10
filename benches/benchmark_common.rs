@@ -44,7 +44,7 @@ pub fn get_base_database(
         let file_name =
             std::env::var("FILE_NAME").expect("FILE_NAME must be set when using BASE_DIR");
         let main_file_name = file_name.to_string();
-        let meta_file_name = format!("{}.meta", file_name);
+        let meta_file_name = format!("{file_name}.meta");
         let file_name_path = Path::new(&base_dir).join(&main_file_name);
         let meta_file_name_path = Path::new(&base_dir).join(&meta_file_name);
 
@@ -60,7 +60,7 @@ pub fn get_base_database(
 
     let main_file_name_path = dir.path().join("triedb");
     let meta_file_name_path = dir.path().join("triedb.meta");
-    let db = Database::create(main_file_name_path.to_str().unwrap()).unwrap();
+    let db = Database::create_new(&main_file_name_path).unwrap();
 
     setup_database(&db, fallback_eoa_size, fallback_contract_size, fallback_storage_per_contract)
         .unwrap();
