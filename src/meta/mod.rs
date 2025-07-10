@@ -716,6 +716,12 @@ impl<'a> OrphanPages<'a> {
         let intersection = active_reclaimed_range.start.max(dirty_reclaimed_range.start)..
             active_reclaimed_range.end.min(dirty_reclaimed_range.end);
 
+        // Push to the beginning or the end of the dirty reclaimed range so that the pop() has a
+        // chance to grow up the reclaimed area in another direction.
+        //
+        // If push() always favours the left side (check start first), the pop() could end up
+        // growing the claimed area in area to the right, leaving all the left side orphaned. This
+        // could lead to infinite growth of the metadata file as well the data file.
         if !intersection.is_empty() {
             mixed_checks_with_else_actions!(
                 snapshot_id & 1 == 0,
@@ -775,8 +781,9 @@ impl<'a> OrphanPages<'a> {
         // high, there's no point in checking the other elements, because they will also be above
         // the threshold.
 
-        // if snapshot_id is even, check the right side first, then the left side
-        // if snapshot_id is odd, check the left side first, then the right side
+        // If snapshot_id is even, check the right side first, then the left side. If snapshot_id is
+        // odd, check the left side first, then the right side. The priority should be reversed to
+        // that of the push() method.
         mixed_checks_actions!(
             snapshot_id & 1 == 0,
             !right.is_empty(),
