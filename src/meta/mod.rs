@@ -862,6 +862,16 @@ mod tests {
     }
 
     #[test]
+    fn push_with_even_snapshot_id() {
+        todo!()
+    }
+
+    #[test]
+    fn push_with_odd_snapshot_id() {
+        todo!()
+    }
+
+    #[test]
     fn auto_increment_snapshot_id() {
         let f = tempfile::tempfile().expect("failed to open temporary file");
         let mut manager =
