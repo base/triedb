@@ -211,7 +211,7 @@ pub struct MetadataSlot {
     /// Index of the first reclaimed page inside of `orphan_pages`
     reclaimed_orphans_start: u32,
     /// Number of reclaimed pages inside of `orphan_pages`
-    reclaimed_orphans_end: u32,
+    reclaimed_orphans_size: u32,
     /// Unused data to allow this structure to be properly aligned. This padding is stored on disk
     /// to improve runtime performance
     padding: u32,
@@ -290,7 +290,7 @@ impl MetadataSlot {
     #[must_use]
     fn reclaimed_range(&self) -> Range<usize> {
         self.reclaimed_orphans_start as usize..
-            (self.reclaimed_orphans_start + self.reclaimed_orphans_end) as usize
+            (self.reclaimed_orphans_start + self.reclaimed_orphans_size) as usize
     }
 
     /// Returns the range of pages that are actually orphans (not reclaimed) in the `orphan_pages`
@@ -301,11 +301,11 @@ impl MetadataSlot {
     #[must_use]
     fn actual_orphans_ranges(&self) -> (Range<usize>, Range<usize>) {
         debug_assert!(
-            self.orphan_pages_len >= self.reclaimed_orphans_start + self.reclaimed_orphans_end
+            self.orphan_pages_len >= self.reclaimed_orphans_start + self.reclaimed_orphans_size
         );
         (
             0..(self.reclaimed_orphans_start as usize),
-            (self.reclaimed_orphans_start as usize + self.reclaimed_orphans_end as usize)..
+            (self.reclaimed_orphans_start as usize + self.reclaimed_orphans_size as usize)..
                 (self.orphan_pages_len as usize),
         )
     }
@@ -351,7 +351,7 @@ impl HashedMetadataSlot {
         // pages.
         let reclaimed_orphans_end = self
             .reclaimed_orphans_start
-            .checked_add(self.reclaimed_orphans_end)
+            .checked_add(self.reclaimed_orphans_size)
             .ok_or(CorruptedMetadataError)?;
         if self.orphan_pages_len < reclaimed_orphans_end {
             return Err(CorruptedMetadataError);
@@ -661,7 +661,7 @@ impl<'a> OrphanPages<'a> {
     #[inline]
     pub fn len(&self) -> usize {
         let m = self.manager.dirty_slot();
-        (m.orphan_pages_len as usize) - (m.reclaimed_orphans_end as usize)
+        (m.orphan_pages_len as usize) - (m.reclaimed_orphans_size as usize)
     }
 
     /// Maximum number of orphan pages that this list can contain without resizing.
@@ -729,13 +729,13 @@ impl<'a> OrphanPages<'a> {
                 {
                     list[dirty_reclaimed_range.start] = orphan;
                     dirty.reclaimed_orphans_start += 1;
-                    dirty.reclaimed_orphans_end -= 1;
+                    dirty.reclaimed_orphans_size -= 1;
                     return Ok(());
                 },
                 intersection.end == dirty_reclaimed_range.end,
                 {
                     list[dirty_reclaimed_range.end - 1] = orphan;
-                    dirty.reclaimed_orphans_end -= 1;
+                    dirty.reclaimed_orphans_size -= 1;
                     return Ok(());
                 }
             );
@@ -790,7 +790,7 @@ impl<'a> OrphanPages<'a> {
             {
                 let orphan = list[right.start];
                 if orphan.orphaned_at() <= snapshot_threshold {
-                    dirty.reclaimed_orphans_end += 1;
+                    dirty.reclaimed_orphans_size += 1;
                     return Some(orphan);
                 }
             },
@@ -799,7 +799,7 @@ impl<'a> OrphanPages<'a> {
                 let orphan = list[left.end - 1];
                 if orphan.orphaned_at() <= snapshot_threshold {
                     dirty.reclaimed_orphans_start -= 1;
-                    dirty.reclaimed_orphans_end += 1;
+                    dirty.reclaimed_orphans_size += 1;
                     return Some(orphan);
                 }
             }
