@@ -1,4 +1,5 @@
 use crate::metrics::DatabaseMetrics;
+use log::Level;
 
 /// Config lets you control certain aspects like cache parameters, log level, metrics 
 /// collection, and concurrency. It is passed in during opening of the database.
@@ -11,18 +12,9 @@ pub struct Config {
     /// The limit on number of threads in the writer's internal thread pool.
     pub max_writers: usize,
     /// The log level for the database.
-    pub log_level: LogLevel,
+    pub log_level: Level,
     /// The metrics configuration.
     pub metrics: DatabaseMetrics,
-}
-
-#[derive(Debug, Clone)]
-pub enum LogLevel {
-    Error,
-    Warn,
-    Info,
-    Debug,
-    Trace,
 }
 
 impl Config {
@@ -45,7 +37,7 @@ impl Config {
         self
     }
 
-    pub fn with_log_level(mut self, log_level: LogLevel) -> Self {
+    pub fn with_log_level(mut self, log_level: Level) -> Self {
         self.log_level = log_level;
         self
     }
@@ -64,7 +56,7 @@ impl Default for Config {
             max_concurrent_transactions: usize::MAX,
             // Currently, we expose at most 1 writer at a given time.
             max_writers: 1,
-            log_level: LogLevel::Info,
+            log_level: Level::Info,
             metrics: DatabaseMetrics::default(),
         }
     }
