@@ -6,6 +6,7 @@ use rand::prelude::*;
 use tempdir::TempDir;
 use triedb::{
     account::Account,
+    config::Config,
     path::{AddressPath, StoragePath},
     transaction::TransactionError,
     Database,
@@ -60,7 +61,7 @@ pub fn get_base_database(
 
     let main_file_name_path = dir.path().join("triedb");
     let meta_file_name_path = dir.path().join("triedb.meta");
-    let db = Database::create_new(&main_file_name_path).unwrap();
+    let db = Database::create_new(&main_file_name_path, &Config::default()).unwrap();
 
     setup_database(&db, fallback_eoa_size, fallback_contract_size, fallback_storage_per_contract)
         .unwrap();
