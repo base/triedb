@@ -2,6 +2,10 @@ use crate::metrics::DatabaseMetrics;
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use std::io::Write;
 
+pub mod metrics;
+
+pub use metrics::MetricsCollector;
+
 /// Config lets you control certain aspects like cache parameters, log level, metrics 
 /// collection, and concurrency. It is passed in during opening of the database.
 #[derive(Debug, Clone)]
@@ -16,6 +20,8 @@ pub struct Config {
     pub log_level: LevelFilter,
     /// The metrics configuration.
     pub metrics: DatabaseMetrics,
+    /// The configurable metrics collector configuration.
+    pub metrics_collector: MetricsCollector,
 }
 
 impl Config {
@@ -47,6 +53,11 @@ impl Config {
         self.metrics = metrics;
         self
     }
+
+    pub fn with_metrics_collector(mut self, metrics_collector: MetricsCollector) -> Self {
+        self.metrics_collector = metrics_collector;
+        self
+    }
 }
 
 impl Default for Config {
@@ -59,6 +70,7 @@ impl Default for Config {
             max_writers: 1,
             log_level: LevelFilter::Info,
             metrics: DatabaseMetrics::default(),
+            metrics_collector: MetricsCollector::default(),
         }
     }
 }
