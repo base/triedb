@@ -3,6 +3,7 @@ use crate::{
     node::{Node, Node::AccountLeaf, TrieValue},
     page::{Page, PageId, PageManager, SlottedPage},
     pointer::Pointer,
+    snapshot::SnapshotId,
     storage::{engine::Error, value::Value},
 };
 use alloy_trie::{nybbles, Nibbles};
@@ -496,17 +497,32 @@ impl<'a> StorageDebugger<'a> {
 
     /// Traverses the trie from the given root node page id and returns a list of all reachable
     /// PageIds.
+    ///
+    /// This method performs several consistency checks:
+    /// - Validates that child pages have snapshot IDs <= parent snapshot IDs
+    /// - Detects cycles in the trie structure to prevent infinite recursion
+    /// - Returns all reachable page IDs for further analysis
     pub fn consistency_check(
         &self,
         root_node_page_id: Option<PageId>,
         context: &TransactionContext,
     ) -> Result<HashSet<PageId>, Error> {
         let mut reachable = HashSet::new();
+        let mut visited_nodes = HashSet::new();
 
         // Start from the provided root node page id (if any)
         if let Some(root_page_id) = root_node_page_id {
             reachable.insert(root_page_id);
-            self.consistency_check_helper(context, root_page_id, 0, &mut reachable)?;
+            let root_page = self.get_page(context, root_page_id)?;
+            let root_snapshot_id = root_page.snapshot_id();
+            self.consistency_check_helper(
+                context,
+                root_page_id,
+                0,
+                root_snapshot_id,
+                &mut reachable,
+                &mut visited_nodes,
+            )?;
         }
 
         Ok(reachable)
@@ -518,12 +534,42 @@ impl<'a> StorageDebugger<'a> {
         context: &TransactionContext,
         page_id: PageId,
         cell_index: u8,
+        parent_snapshot_id: SnapshotId,
         reachable: &mut HashSet<PageId>,
+        visited_nodes: &mut HashSet<(PageId, u8)>,
     ) -> Result<(), Error> {
+        let node_key = (page_id, cell_index);
+
+        // Check for cycles to prevent infinite recursion
+        if visited_nodes.contains(&node_key) {
+            return Err(Error::DebugError(format!(
+                "Cycle detected in trie: node (page_id={}, cell_index={}) has already been visited",
+                page_id.as_u32(),
+                cell_index
+            )));
+        }
+
+        // Mark this node as visited
+        visited_nodes.insert(node_key);
+
         let page = self.get_page(context, page_id)?;
+        let current_snapshot_id = page.snapshot_id();
+
+        // Check snapshot ID consistency: child snapshot should be <= parent snapshot
+        if current_snapshot_id > parent_snapshot_id {
+            visited_nodes.remove(&node_key); // Clean up before returning error
+            return Err(Error::DebugError(format!(
+                "Snapshot ID consistency violation: page {} has snapshot ID {} which is greater than parent snapshot ID {}",
+                page_id.as_u32(),
+                current_snapshot_id,
+                parent_snapshot_id
+            )));
+        }
+
         let slotted_page = SlottedPage::try_from(page)?;
         let node: Node = slotted_page.get_value(cell_index)?;
-        match node {
+
+        let result = match node {
             Node::AccountLeaf { ref storage_root, .. } => {
                 if let Some(direct_child) = storage_root {
                     let (new_slotted_page, new_cell_index) =
@@ -535,11 +581,22 @@ impl<'a> StorageDebugger<'a> {
                             context,
                             new_slotted_page.id(),
                             new_cell_index,
+                            current_snapshot_id,
                             reachable,
-                        )?;
+                            visited_nodes,
+                        )
                     } else {
-                        self.consistency_check_helper(context, page_id, new_cell_index, reachable)?;
+                        self.consistency_check_helper(
+                            context,
+                            page_id,
+                            new_cell_index,
+                            current_snapshot_id,
+                            reachable,
+                            visited_nodes,
+                        )
                     }
+                } else {
+                    Ok(())
                 }
             }
             Node::Branch { ref children, .. } => {
@@ -552,16 +609,29 @@ impl<'a> StorageDebugger<'a> {
                             context,
                             new_slotted_page.id(),
                             new_cell_index,
+                            current_snapshot_id,
                             reachable,
+                            visited_nodes,
                         )?;
                     } else {
-                        self.consistency_check_helper(context, page_id, new_cell_index, reachable)?;
+                        self.consistency_check_helper(
+                            context,
+                            page_id,
+                            new_cell_index,
+                            current_snapshot_id,
+                            reachable,
+                            visited_nodes,
+                        )?;
                     }
                 }
+                Ok(())
             }
-            Node::StorageLeaf { .. } => {}
-        }
-        Ok(())
+            Node::StorageLeaf { .. } => Ok(()),
+        };
+
+        // Remove this node from visited set before returning (backtrack)
+        visited_nodes.remove(&node_key);
+        result
     }
 
     /// Returns all pages that are currently in the Dirty state.

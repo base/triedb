@@ -193,6 +193,12 @@ impl Database {
         self.storage_engine.debugger().debug_statistics(&context, buf).map_err(Error::EngineError)
     }
 
+    /// This check verifies:
+    /// 1. All pages are correctly classified as reachable, orphaned, or unreachable
+    /// 2. No pages are both reachable and orphaned (data integrity violation)
+    /// 3. No pages are unreachable (memory leak)
+    /// 4. Snapshot ID consistency: each child page's snapshot ID must be <= parent's snapshot ID
+    /// 5. No cycles exist in the trie structure (prevents infinite recursion)
     pub fn consistency_check(
         &self,
         mut buf: impl io::Write,
