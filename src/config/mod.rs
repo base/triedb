@@ -1,4 +1,3 @@
-use crate::metrics::DatabaseMetrics;
 use log::LevelFilter;
 
 pub mod metrics;
@@ -18,9 +17,7 @@ pub struct Config {
     pub max_writers: usize,
     /// The log level for the database.
     pub log_level: LevelFilter,
-    /// The metrics configuration.
-    pub metrics: DatabaseMetrics,
-    /// The configurable metrics collector configuration.
+    /// The configuration options for metrics collection.
     pub metrics_collector: MetricsCollector,
 }
 
@@ -49,11 +46,6 @@ impl Config {
         self
     }
 
-    pub fn with_metrics(mut self, metrics: DatabaseMetrics) -> Self {
-        self.metrics = metrics;
-        self
-    }
-
     pub fn with_metrics_collector(mut self, metrics_collector: MetricsCollector) -> Self {
         self.metrics_collector = metrics_collector;
         self
@@ -69,7 +61,6 @@ impl Default for Config {
             // Currently, we expose at most 1 writer at a given time.
             max_writers: 1,
             log_level: LevelFilter::Info,
-            metrics: DatabaseMetrics::default(),
             metrics_collector: MetricsCollector::default(),
         }
     }

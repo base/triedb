@@ -5,6 +5,7 @@ use crate::{
     page::{PageError, PageId, PageManager},
     storage::engine::{self, StorageEngine},
     transaction::{Transaction, TransactionError, TransactionManager, RO, RW},
+    metrics::DatabaseMetrics,
 };
 use alloy_primitives::B256;
 use parking_lot::Mutex;
@@ -20,6 +21,8 @@ static LOGGER: Logger = Logger;
 pub struct Database {
     pub(crate) storage_engine: StorageEngine,
     pub(crate) transaction_manager: Mutex<TransactionManager>,
+    pub(crate) metrics: DatabaseMetrics,
+    #[allow(dead_code)]
     cfg: Config,
 }
 
@@ -157,6 +160,7 @@ impl Database {
         Self {
             storage_engine,
             transaction_manager: Mutex::new(TransactionManager::new()),
+            metrics: DatabaseMetrics::default(),
             cfg: cfg.clone(),
         }
     }
@@ -232,32 +236,27 @@ impl Database {
     }
 
     pub fn update_metrics_ro(&self, context: &TransactionContext) {
-        self.cfg
-            .metrics
+        self.metrics
             .ro_transaction_pages_read
             .record(context.transaction_metrics.take_pages_read() as f64);
 
         let (cache_storage_read_hit, cache_storage_read_miss) =
             context.transaction_metrics.take_cache_storage_read();
-        self.cfg.metrics.cache_storage_read_hit.increment(cache_storage_read_hit as u64);
-        self.cfg.metrics.cache_storage_read_miss.increment(cache_storage_read_miss as u64);
+        self.metrics.cache_storage_read_hit.increment(cache_storage_read_hit as u64);
+        self.metrics.cache_storage_read_miss.increment(cache_storage_read_miss as u64);
     }
 
     pub fn update_metrics_rw(&self, context: &TransactionContext) {
-        self.cfg
-            .metrics
+        self.metrics
             .rw_transaction_pages_read
             .record(context.transaction_metrics.take_pages_read() as f64);
-        self.cfg
-            .metrics
+        self.metrics
             .rw_transaction_pages_allocated
             .record(context.transaction_metrics.take_pages_allocated() as f64);
-        self.cfg
-            .metrics
+        self.metrics
             .rw_transaction_pages_reallocated
             .record(context.transaction_metrics.take_pages_reallocated() as f64);
-        self.cfg
-            .metrics
+        self.metrics
             .rw_transaction_pages_split
             .record(context.transaction_metrics.take_pages_split() as f64);
     }
