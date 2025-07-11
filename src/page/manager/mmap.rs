@@ -1,5 +1,8 @@
 use crate::{
-    page::{Page, PageError, PageId, PageManagerOptions, PageMut, state::{PageState, RawPageState}},
+    page::{
+        state::{PageState, RawPageState},
+        Page, PageError, PageId, PageManagerOptions, PageMut,
+    },
     snapshot::SnapshotId,
 };
 use memmap2::{Advice, MmapOptions, MmapRaw};
@@ -244,7 +247,7 @@ impl PageManager {
     }
 
     /// Checks if a page is currently in the Dirty state.
-    /// 
+    ///
     /// This method allows checking if a page is being written to without
     /// the overhead of acquiring the page.
     pub fn is_dirty(&self, page_id: PageId) -> Result<bool, PageError> {
@@ -255,10 +258,10 @@ impl PageManager {
         let offset = page_id.as_offset();
         // SAFETY: We've checked bounds above
         let page_ptr = unsafe { self.mmap.as_ptr().byte_add(offset).cast_mut().cast() };
-        
+
         // SAFETY: We're just reading the state atomically, respecting the memory model
         let state = unsafe { RawPageState::from_ptr(page_ptr) };
-        
+
         Ok(matches!(state.load(), PageState::Dirty(_)))
     }
 

@@ -230,7 +230,7 @@ fn print_page(
                 println!("Page printed to {}", output_path);
             }
         }
-        Err(e) => println!("Error printing page: {:?}", e),
+        Err(e) => eprintln!("Error printing page: {:?}", e),
     }
     Ok(())
 }
@@ -292,7 +292,7 @@ fn print_statistics(
                 println!("Statistics printed to {}", output_path);
             }
         }
-        Err(e) => println!("Error printing statistics: {:?}", e),
+        Err(e) => eprintln!("Error printing statistics: {:?}", e),
     }
     Ok(())
 }
@@ -318,7 +318,7 @@ fn root_page_info(
                 println!("Info written to {}", output_path);
             }
         }
-        Err(e) => println!("Error printing root page info: {:?}", e),
+        Err(e) => eprintln!("Error printing root page info: {:?}", e),
     }
     Ok(())
 }
@@ -344,7 +344,7 @@ fn consistency_check(
                 println!("Consistency check results written to {}", output_path);
             }
         }
-        Err(e) => println!("Error during consistency check: {:?}", e),
+        Err(e) => eprintln!("Error during consistency check: {:?}", e),
     }
     Ok(())
 }

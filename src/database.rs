@@ -152,18 +152,17 @@ impl Database {
         self.storage_engine.close()
     }
 
-    pub fn print_page<W: io::Write>(self, buf: W, page_id: Option<PageId>) -> Result<(), Error> {
+    pub fn print_page(&self, buf: impl io::Write, page_id: Option<PageId>) -> Result<(), Error> {
         let context = self.storage_engine.read_context();
-        // TODO: Must use `expect()` because `storage::engine::Error` and `database::Error` are not
-        // compatible. There's probably no reason to use two different error enums here, so maybe
-        // we should unify them. Or maybe we could just rely on `std::io::Error`.
-        self.storage_engine.print_page(&context, buf, page_id).expect("write failed");
-        Ok(())
+        self.storage_engine
+            .debugger()
+            .print_page(&context, buf, page_id)
+            .map_err(Error::EngineError)
     }
 
-    pub fn root_page_info<W: io::Write>(
-        self,
-        mut buf: W,
+    pub fn root_page_info(
+        &self,
+        mut buf: impl io::Write,
         file_path: impl AsRef<Path>,
     ) -> Result<(), OpenError> {
         let db_file_path = file_path.as_ref();
@@ -178,49 +177,72 @@ impl Database {
         let root_node_page_id = active_slot.root_node_page_id();
         let orphaned_page_list = meta_manager.orphan_pages().iter().collect::<Vec<_>>();
 
-        writeln!(buf, "Root Node Page ID: {root_node_page_id:?}").expect("write failed");
+        writeln!(buf, "Root Node Page ID: {root_node_page_id:?}").map_err(OpenError::IO)?;
 
         //root subtrie pageID
-        writeln!(buf, "Total Page Count: {page_count:?}").expect("write failed");
+        writeln!(buf, "Total Page Count: {page_count:?}").map_err(OpenError::IO)?;
 
         //orphaned pages list (grouped by page)
-        writeln!(buf, "Orphaned Pages: {orphaned_page_list:?}").expect("write failed");
+        writeln!(buf, "Orphaned Pages: {orphaned_page_list:?}").map_err(OpenError::IO)?;
 
         Ok(())
     }
 
-    pub fn print_statistics<W: io::Write>(self, buf: W) -> Result<(), Error> {
+    pub fn print_statistics(&self, buf: impl io::Write) -> Result<(), Error> {
         let context = self.storage_engine.read_context();
-        self.storage_engine.debug_statistics(&context, buf).expect("write failed");
-        Ok(())
+        self.storage_engine.debugger().debug_statistics(&context, buf).map_err(Error::EngineError)
     }
 
-    pub fn consistency_check<W: io::Write>(
-        self,
-        mut buf: W,
+    pub fn consistency_check(
+        &self,
+        mut buf: impl io::Write,
         file_path: impl AsRef<Path>,
     ) -> Result<(), OpenError> {
         let db_file_path = file_path.as_ref();
 
         let mut meta_file_path = db_file_path.to_path_buf();
         meta_file_path.as_mut_os_string().push(".meta");
-        let mut meta_manager =
-            MetadataManager::open(meta_file_path).map_err(OpenError::MetadataError)?;
+        let mut meta_manager = match MetadataManager::open(&meta_file_path) {
+            Ok(manager) => manager,
+            Err(OpenMetadataError::Corrupted) => {
+                writeln!(buf, "Metadata file corruption detected: {:?}", meta_file_path)
+                    .map_err(OpenError::IO)?;
+
+                // Provide additional debugging information
+                if let Ok(file_meta) = std::fs::metadata(&meta_file_path) {
+                    writeln!(buf, "File size: {} bytes", file_meta.len()).map_err(OpenError::IO)?;
+                    if let Ok(modified) = file_meta.modified() {
+                        writeln!(buf, "Last modified: {:?}", modified).map_err(OpenError::IO)?;
+                    }
+                }
+                return Err(OpenError::MetadataError(OpenMetadataError::Corrupted));
+            }
+            Err(e) => return Err(OpenError::MetadataError(e)),
+        };
 
         let context = self.storage_engine.read_context();
         let active_slot_page_id = meta_manager.active_slot().root_node_page_id();
-        
+
         // Get all pages reachable from the committed state
-        let mut reachable_pages =
-            self.storage_engine.consistency_check(active_slot_page_id, &context)
-                .map_err(|_| OpenError::IO(io::Error::new(io::ErrorKind::Other, "Failed to check active slot")))?;
-        
+        let mut reachable_pages = self
+            .storage_engine
+            .debugger()
+            .consistency_check(active_slot_page_id, &context)
+            .map_err(|_| {
+                OpenError::IO(io::Error::other( "Failed to check active slot"))
+            })?;
+
         // Also account for dirty pages that haven't been committed yet
-        let dirty_pages = self.storage_engine.get_dirty_pages()
-            .map_err(|_| OpenError::IO(io::Error::new(io::ErrorKind::Other, "Failed to get dirty pages")))?;
+        let dirty_pages = self.storage_engine.debugger().get_dirty_pages().map_err(|_| {
+            OpenError::IO(io::Error::other( "Failed to get dirty pages"))
+        })?;
         reachable_pages.extend(&dirty_pages);
 
-        let orphaned_pages = meta_manager.orphan_pages().iter().map(|orphan| orphan.page_id()).collect::<HashSet<_>>();
+        let orphaned_pages = meta_manager
+            .orphan_pages()
+            .iter()
+            .map(|orphan| orphan.page_id())
+            .collect::<HashSet<_>>();
 
         let reachable_orphaned_pages: HashSet<PageId> =
             orphaned_pages.intersection(&reachable_pages).cloned().collect();
@@ -256,12 +278,11 @@ impl Database {
         if has_errors {
             return Err(OpenError::IO(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Database consistency check failed: inconsistencies detected"
+                "Database consistency check failed: inconsistencies detected",
             )));
         }
 
-        writeln!(buf, "Consistency check passed: database is consistent")
-            .map_err(OpenError::IO)?;
+        writeln!(buf, "Consistency check passed: database is consistent").map_err(OpenError::IO)?;
         Ok(())
     }
 

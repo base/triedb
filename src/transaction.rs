@@ -118,6 +118,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
     ) -> Result<(), TransactionError> {
         self.database
             .storage_engine
+            .debugger()
             .print_path(&self.context, address_path.to_nibbles(), output_file, verbosity_level)
             .unwrap();
         Ok(())
@@ -131,6 +132,7 @@ impl<'tx, K: TransactionKind> Transaction<'tx, K> {
     ) -> Result<(), TransactionError> {
         self.database
             .storage_engine
+            .debugger()
             .print_path(&self.context, &storage_path.full_path(), output_file, verbosity_level)
             .unwrap();
         Ok(())
