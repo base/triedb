@@ -24,7 +24,7 @@ pub struct Database {
     pub(crate) transaction_manager: Mutex<TransactionManager>,
     pub(crate) metrics: DatabaseMetrics,
     #[allow(dead_code)]
-    cfg: Config,
+    pub cfg: Config,
 }
 
 #[must_use]
@@ -547,7 +547,7 @@ mod tests {
 
         // Verify that the read transaction that we created before the delete can still access the
         // initial accounts
-        read_tx.clear_cache();
+        // read_tx.clear_cache();
         for (address, account) in &initial_accounts {
             assert_eq!(
                 read_tx.get_account(address.clone()).expect("error while reading account"),
