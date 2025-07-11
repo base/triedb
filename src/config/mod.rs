@@ -1,8 +1,8 @@
 use crate::metrics::DatabaseMetrics;
-use log::{Level, LevelFilter, Log, Metadata, Record};
-use std::io::Write;
+use log::LevelFilter;
 
 pub mod metrics;
+pub mod logger;
 
 pub use metrics::MetricsCollector;
 
@@ -72,25 +72,5 @@ impl Default for Config {
             metrics: DatabaseMetrics::default(),
             metrics_collector: MetricsCollector::default(),
         }
-    }
-}
-
-/// A configurable logger.
-#[derive(Debug)]
-pub struct Logger;
-
-impl Log for Logger {
-    fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= Level::Info
-    }
-
-    fn log(&self, record: &Record) {
-        if self.enabled(record.metadata()) {
-            println!("[{}] {} - {}", record.level(), record.target(), record.args());
-        }
-    }
-
-    fn flush(&self) {
-        std::io::stdout().flush().unwrap();
     }
 }
