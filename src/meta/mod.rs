@@ -862,16 +862,6 @@ mod tests {
     }
 
     #[test]
-    fn push_with_even_snapshot_id() {
-        todo!()
-    }
-
-    #[test]
-    fn push_with_odd_snapshot_id() {
-        todo!()
-    }
-
-    #[test]
     fn auto_increment_snapshot_id() {
         let f = tempfile::tempfile().expect("failed to open temporary file");
         let mut manager =
@@ -882,6 +872,103 @@ mod tests {
             assert_eq!(manager.active_slot().snapshot_id(), snapshot_id);
             assert_eq!(manager.dirty_slot().snapshot_id(), snapshot_id + 1);
             manager.commit().expect("commit failed");
+        }
+    }
+
+    #[test]
+    fn push_with_even_and_odd_snapshot_id() {
+        let f = tempfile::tempfile().expect("failed to open temporary file");
+        {
+            let mut manager =
+                MetadataManager::from_file(f.try_clone().expect("failed to duplicate file"))
+                    .expect("failed to initialize metadata manager");
+            let dirty = manager.dirty_slot_mut();
+            dirty.set_root_node_hash(B256::new([
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                24, 25, 26, 27, 28, 29, 30, 31, 32,
+            ]));
+            dirty.set_root_node_page_id(Some(page_id!(123)));
+            dirty.set_page_count(456);
+            dirty.set_root_node_page_id(Some(page_id!(123)));
+            dirty.set_page_count(456);
+            dirty.reclaimed_orphans_start = 5;
+            dirty.reclaimed_orphans_size = 10;
+            dirty.orphan_pages_len = 23;
+            manager
+                .orphan_pages()
+                .push(OrphanPage::new(page_id!(0xa0), 1), 1)
+                .expect("push failed");
+            manager
+                .orphan_pages()
+                .push(OrphanPage::new(page_id!(0xa1), 1), 1)
+                .expect("push failed");
+            manager
+                .orphan_pages()
+                .push(OrphanPage::new(page_id!(0xa2), 1), 1)
+                .expect("push failed");
+            manager
+                .orphan_pages()
+                .push(OrphanPage::new(page_id!(0xa3), 1), 1)
+                .expect("push failed");
+            manager.commit().expect("commit failed");
+            manager.close().expect("close failed");
+        }
+        {
+            let mut manager =
+                MetadataManager::from_file(f.try_clone().expect("failed to duplicate file"))
+                    .expect("failed to initialize metadata manager");
+            let (_, dirty, list) = manager.parts_mut();
+            assert_eq!(dirty.reclaimed_orphans_start, 5);
+            assert_eq!(dirty.reclaimed_orphans_size, 10);
+            assert_eq!(dirty.orphan_pages_len, 23 + 4);
+            // last 4 pages are inserted at the end of the orphan list since there is no
+            // intersection between the active and dirty reclaimed ranges
+            assert_eq!(list[23], OrphanPage::new(page_id!(0xa0), 1));
+            assert_eq!(list[24], OrphanPage::new(page_id!(0xa1), 1));
+            assert_eq!(list[25], OrphanPage::new(page_id!(0xa2), 1));
+            assert_eq!(list[26], OrphanPage::new(page_id!(0xa3), 1));
+            // push again with even snapshot id
+            manager
+                .orphan_pages()
+                .push(OrphanPage::new(page_id!(0xb0), 2), 2)
+                .expect("push failed");
+            manager
+                .orphan_pages()
+                .push(OrphanPage::new(page_id!(0xb1), 2), 2)
+                .expect("push failed");
+
+            // verify that the new 2 orphan pages are inserted to the beginning of the reclaimed
+            // range
+            let mut manager =
+                MetadataManager::from_file(f.try_clone().expect("failed to duplicate file"))
+                    .expect("failed to initialize metadata manager");
+            let (_, dirty, list) = manager.parts_mut();
+            assert_eq!(dirty.reclaimed_orphans_start, 5);
+            assert_eq!(dirty.reclaimed_orphans_size, 10);
+            assert_eq!(dirty.orphan_pages_len, 23 + 4);
+            assert_eq!(list[5], OrphanPage::new(page_id!(0xb0), 2));
+            assert_eq!(list[6], OrphanPage::new(page_id!(0xb1), 2));
+            // push again with odd snapshot id
+            manager
+                .orphan_pages()
+                .push(OrphanPage::new(page_id!(0xc0), 3), 3)
+                .expect("push failed");
+            manager
+                .orphan_pages()
+                .push(OrphanPage::new(page_id!(0xc1), 3), 3)
+                .expect("push failed");
+        }
+        {
+            // verify that the new 2 orphan pages are inserted to the end of the reclaimed range
+            let mut manager =
+                MetadataManager::from_file(f.try_clone().expect("failed to duplicate file"))
+                    .expect("failed to initialize metadata manager");
+            let (_, dirty, list) = manager.parts_mut();
+            assert_eq!(dirty.reclaimed_orphans_start, 5);
+            assert_eq!(dirty.reclaimed_orphans_size, 10);
+            assert_eq!(dirty.orphan_pages_len, 23 + 4);
+            assert_eq!(list[14], OrphanPage::new(page_id!(0xc0), 3));
+            assert_eq!(list[13], OrphanPage::new(page_id!(0xc1), 3));
         }
     }
 
