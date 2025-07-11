@@ -16,7 +16,7 @@ use alloy_primitives::{map::B256Map, Bytes, B256, U256};
 use alloy_rlp::{decode_exact, BytesMut};
 use alloy_trie::{nybbles::common_prefix_length, Nibbles, EMPTY_ROOT_HASH};
 
-use super::engine::{Error, StorageEngine};
+use super::{engine::{Error, StorageEngine}};
 
 /// A Merkle proof of an account and select storage slots.
 #[derive(Default, Debug)]
@@ -357,7 +357,7 @@ mod tests {
 
     #[test]
     fn test_get_nonexistent_proof() {
-        let (storage_engine, mut context) = create_test_engine(2000);
+        let (storage_engine, mut context, mut cfg) = create_test_engine(2000);
 
         // the account and storage slot are not present in the trie
         let address = address!("0x0000000000000000000000000000000000000001");
@@ -376,6 +376,7 @@ mod tests {
         // insert the account
         storage_engine
             .set_values(
+                &mut cfg,
                 &mut context,
                 vec![(path.clone().into(), Some(account.clone().into()))].as_mut(),
             )
@@ -394,7 +395,7 @@ mod tests {
 
     #[test]
     fn test_get_proof() {
-        let (storage_engine, mut context) = create_test_engine(2000);
+        let (storage_engine, mut context, mut cfg) = create_test_engine(2000);
 
         // 1. insert a single account
         let address = address!("0x0000000000000000000000000000000000000001");
@@ -403,6 +404,7 @@ mod tests {
 
         storage_engine
             .set_values(
+                &mut cfg,
                 &mut context,
                 vec![(path.clone().into(), Some(account.clone().into()))].as_mut(),
             )
@@ -426,7 +428,11 @@ mod tests {
         let account2 = create_test_account(2, 2);
 
         storage_engine
-            .set_values(&mut context, vec![(path2.clone().into(), Some(account2.into()))].as_mut())
+            .set_values(
+                &mut cfg,
+                &mut context,
+                vec![(path2.clone().into(), Some(account2.into()))].as_mut(),
+            )
             .unwrap();
 
         let proof = storage_engine.get_account_with_proof(&context, path.clone()).unwrap().unwrap();
@@ -452,6 +458,7 @@ mod tests {
 
         storage_engine
             .set_values(
+                &mut cfg,
                 &mut context,
                 vec![(storage_path.clone().into(), Some(TrieValue::from(storage_value)))].as_mut(),
             )

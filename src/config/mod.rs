@@ -1,7 +1,10 @@
 use log::LevelFilter;
+use crate::context::B512Map;
+use crate::page::PageId;
 
 pub mod metrics;
 pub mod logger;
+
 
 pub use metrics::MetricsCollector;
 
@@ -19,6 +22,7 @@ pub struct Config {
     pub log_level: LevelFilter,
     /// The configuration options for metrics collection.
     pub metrics_collector: MetricsCollector,
+    pub contract_account_loc_cache: B512Map<(PageId, u8)>,
 }
 
 impl Config {
@@ -50,6 +54,10 @@ impl Config {
         self.metrics_collector = metrics_collector;
         self
     }
+
+    pub fn clear_cache(&mut self) {
+        self.contract_account_loc_cache.clear();
+    }
 }
 
 impl Default for Config {
@@ -62,6 +70,7 @@ impl Default for Config {
             max_writers: 1,
             log_level: LevelFilter::Info,
             metrics_collector: MetricsCollector::default(),
+            contract_account_loc_cache: B512Map::with_capacity(10),
         }
     }
 }
