@@ -1785,7 +1785,7 @@ impl StorageEngine {
                 if let Some(direct_child) = storage_root {
                     let (new_slotted_page, new_cell_index) =
                         self.get_slotted_page_and_index(context, direct_child, slotted_page)?;
-                    // If child is on a new page,insert the page into the set andrecurse
+                    // If child is on a new page, insert the page into the set and recurse
                     if new_slotted_page.id() != page_id {
                         reachable.insert(new_slotted_page.id());
                         self.consistency_check_helper(
@@ -1804,6 +1804,7 @@ impl StorageEngine {
                     let (new_slotted_page, new_cell_index) =
                         self.get_slotted_page_and_index(context, child, slotted_page)?;
                     if new_slotted_page.id() != page_id {
+                        reachable.insert(new_slotted_page.id());
                         self.consistency_check_helper(
                             context,
                             new_slotted_page.id(),
@@ -1818,6 +1819,25 @@ impl StorageEngine {
             Node::StorageLeaf { .. } => {}
         }
         Ok(())
+    }
+
+    /// Returns all pages that are currently in the Dirty state.
+    /// 
+    /// This method scans all allocated pages and returns those that are
+    /// currently being written to (in Dirty state). 
+    pub fn get_dirty_pages(&self) -> Result<HashSet<PageId>, Error> {
+        let mut dirty_pages = HashSet::new();
+        let page_count = self.page_manager.size();
+        
+        for page_id_raw in 1..=page_count {
+            if let Some(page_id) = PageId::new(page_id_raw) {
+                if self.page_manager.is_dirty(page_id).map_err(Error::PageError)? {
+                    dirty_pages.insert(page_id);
+                }
+            }
+        }
+        
+        Ok(dirty_pages)
     }
 }
 

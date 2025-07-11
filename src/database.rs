@@ -209,21 +209,22 @@ impl Database {
 
         let context = self.storage_engine.read_context();
         let active_slot_page_id = meta_manager.active_slot().root_node_page_id();
-        let dirty_slot_page_id = meta_manager.dirty_slot().root_node_page_id();
-
+        
+        // Get all pages reachable from the committed state
         let mut reachable_pages =
-            self.storage_engine.consistency_check(active_slot_page_id, &context).expect("write failed");
-        let dirty_slot_pages =
-            self.storage_engine.consistency_check(dirty_slot_page_id, &context).expect("write failed");
-        reachable_pages.extend(&dirty_slot_pages);
+            self.storage_engine.consistency_check(active_slot_page_id, &context)
+                .map_err(|_| OpenError::IO(io::Error::new(io::ErrorKind::Other, "Failed to check active slot")))?;
+        
+        // Also account for dirty pages that haven't been committed yet
+        let dirty_pages = self.storage_engine.get_dirty_pages()
+            .map_err(|_| OpenError::IO(io::Error::new(io::ErrorKind::Other, "Failed to get dirty pages")))?;
+        reachable_pages.extend(&dirty_pages);
 
         let orphaned_pages = meta_manager.orphan_pages().iter().map(|orphan| orphan.page_id()).collect::<HashSet<_>>();
 
-        let reachachable_orphaned_pages: HashSet<PageId> =
+        let reachable_orphaned_pages: HashSet<PageId> =
             orphaned_pages.intersection(&reachable_pages).cloned().collect();
 
-        writeln!(buf, "Reachable Orphaned Pages: {:?}", reachachable_orphaned_pages)
-            .expect("write failed");
         let page_count = self.storage_engine.size();
 
         let all_pages: HashSet<PageId> = (1..page_count)
@@ -237,9 +238,30 @@ impl Database {
         let unreachable_pages: HashSet<PageId> =
             all_pages.difference(&reachable_or_orphaned).cloned().collect();
 
-        // Print unreachable pages
-        writeln!(buf, "Unreachable Pages: {:?}", unreachable_pages).expect("write failed");
+        // Check for errors and flag them
+        let mut has_errors = false;
 
+        if !reachable_orphaned_pages.is_empty() {
+            writeln!(buf, "ERROR: Reachable Orphaned Pages: {:?}", reachable_orphaned_pages)
+                .map_err(OpenError::IO)?;
+            has_errors = true;
+        }
+
+        if !unreachable_pages.is_empty() {
+            writeln!(buf, "ERROR: Unreachable Pages: {:?}", unreachable_pages)
+                .map_err(OpenError::IO)?;
+            has_errors = true;
+        }
+
+        if has_errors {
+            return Err(OpenError::IO(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Database consistency check failed: inconsistencies detected"
+            )));
+        }
+
+        writeln!(buf, "Consistency check passed: database is consistent")
+            .map_err(OpenError::IO)?;
         Ok(())
     }
 

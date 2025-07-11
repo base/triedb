@@ -1,5 +1,5 @@
 use crate::{
-    page::{Page, PageError, PageId, PageManagerOptions, PageMut},
+    page::{Page, PageError, PageId, PageManagerOptions, PageMut, state::{PageState, RawPageState}},
     snapshot::SnapshotId,
 };
 use memmap2::{Advice, MmapOptions, MmapRaw};
@@ -241,6 +241,25 @@ impl PageManager {
         // - All memory from the memory map is accessed through `Page` or `PageMut`, thus respecting
         //   the page state access memory model.
         unsafe { PageMut::acquire_unchecked(page_id, snapshot_id, data) }
+    }
+
+    /// Checks if a page is currently in the Dirty state.
+    /// 
+    /// This method allows checking if a page is being written to without
+    /// the overhead of acquiring the page.
+    pub fn is_dirty(&self, page_id: PageId) -> Result<bool, PageError> {
+        if page_id.as_u32() > self.size() {
+            return Err(PageError::PageNotFound(page_id));
+        }
+
+        let offset = page_id.as_offset();
+        // SAFETY: We've checked bounds above
+        let page_ptr = unsafe { self.mmap.as_ptr().byte_add(offset).cast_mut().cast() };
+        
+        // SAFETY: We're just reading the state atomically, respecting the memory model
+        let state = unsafe { RawPageState::from_ptr(page_ptr) };
+        
+        Ok(matches!(state.load(), PageState::Dirty(_)))
     }
 
     /// Syncs pages to the backing file.
