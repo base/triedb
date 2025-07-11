@@ -205,7 +205,7 @@ impl Database {
         let mut meta_manager = match MetadataManager::open(&meta_file_path) {
             Ok(manager) => manager,
             Err(OpenMetadataError::Corrupted) => {
-                writeln!(buf, "Metadata file corruption detected: {meta_file_path:?}", )
+                writeln!(buf, "Metadata file corruption detected: {meta_file_path:?}",)
                     .map_err(OpenError::IO)?;
 
                 // Provide additional debugging information
