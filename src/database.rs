@@ -150,9 +150,8 @@ impl Database {
 
     /// Set global logger to our configurable logger that will use the log level from the config.
     fn init_logger(cfg: &Config) {
-        if let Err(e) = log::set_logger(&LOGGER) {
-            eprintln!("Failed to set logger: {e:?}");
-        }
+        // Only try to set the logger if one hasn't been set yet
+        let _ = log::set_logger(&LOGGER);
         log::set_max_level(cfg.log_level);
     }
 
