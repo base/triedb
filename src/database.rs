@@ -228,14 +228,14 @@ impl Database {
             .storage_engine
             .debugger()
             .consistency_check(active_slot_page_id, &context)
-            .map_err(|_| {
-                OpenError::IO(io::Error::other( "Failed to check active slot"))
-            })?;
+            .map_err(|_| OpenError::IO(io::Error::other("Failed to check active slot")))?;
 
         // Also account for dirty pages that haven't been committed yet
-        let dirty_pages = self.storage_engine.debugger().get_dirty_pages().map_err(|_| {
-            OpenError::IO(io::Error::other( "Failed to get dirty pages"))
-        })?;
+        let dirty_pages = self
+            .storage_engine
+            .debugger()
+            .get_dirty_pages()
+            .map_err(|_| OpenError::IO(io::Error::other("Failed to get dirty pages")))?;
         reachable_pages.extend(&dirty_pages);
 
         let orphaned_pages = meta_manager
