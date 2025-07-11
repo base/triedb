@@ -205,14 +205,14 @@ impl Database {
         let mut meta_manager = match MetadataManager::open(&meta_file_path) {
             Ok(manager) => manager,
             Err(OpenMetadataError::Corrupted) => {
-                writeln!(buf, "Metadata file corruption detected: {:?}", meta_file_path)
+                writeln!(buf, "Metadata file corruption detected: {meta_file_path:?}", )
                     .map_err(OpenError::IO)?;
 
                 // Provide additional debugging information
                 if let Ok(file_meta) = std::fs::metadata(&meta_file_path) {
                     writeln!(buf, "File size: {} bytes", file_meta.len()).map_err(OpenError::IO)?;
                     if let Ok(modified) = file_meta.modified() {
-                        writeln!(buf, "Last modified: {:?}", modified).map_err(OpenError::IO)?;
+                        writeln!(buf, "Last modified: {modified:?}").map_err(OpenError::IO)?;
                     }
                 }
                 return Err(OpenError::MetadataError(OpenMetadataError::Corrupted));
@@ -264,13 +264,13 @@ impl Database {
         let mut has_errors = false;
 
         if !reachable_orphaned_pages.is_empty() {
-            writeln!(buf, "ERROR: Reachable Orphaned Pages: {:?}", reachable_orphaned_pages)
+            writeln!(buf, "ERROR: Reachable Orphaned Pages: {reachable_orphaned_pages:?}")
                 .map_err(OpenError::IO)?;
             has_errors = true;
         }
 
         if !unreachable_pages.is_empty() {
-            writeln!(buf, "ERROR: Unreachable Pages: {:?}", unreachable_pages)
+            writeln!(buf, "ERROR: Unreachable Pages: {unreachable_pages:?}")
                 .map_err(OpenError::IO)?;
             has_errors = true;
         }
