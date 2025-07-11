@@ -1,5 +1,6 @@
 use crate::metrics::DatabaseMetrics;
-use log::Level;
+use log::{Level, LevelFilter, Log, Metadata, Record};
+use std::io::Write;
 
 /// Config lets you control certain aspects like cache parameters, log level, metrics 
 /// collection, and concurrency. It is passed in during opening of the database.
@@ -12,7 +13,7 @@ pub struct Config {
     /// The limit on number of threads in the writer's internal thread pool.
     pub max_writers: usize,
     /// The log level for the database.
-    pub log_level: Level,
+    pub log_level: LevelFilter,
     /// The metrics configuration.
     pub metrics: DatabaseMetrics,
 }
@@ -37,7 +38,7 @@ impl Config {
         self
     }
 
-    pub fn with_log_level(mut self, log_level: Level) -> Self {
+    pub fn with_log_level(mut self, log_level: LevelFilter) -> Self {
         self.log_level = log_level;
         self
     }
@@ -56,8 +57,28 @@ impl Default for Config {
             max_concurrent_transactions: usize::MAX,
             // Currently, we expose at most 1 writer at a given time.
             max_writers: 1,
-            log_level: Level::Info,
+            log_level: LevelFilter::Info,
             metrics: DatabaseMetrics::default(),
         }
+    }
+}
+
+/// A configurable logger.
+#[derive(Debug)]
+pub struct Logger;
+
+impl Log for Logger {
+    fn enabled(&self, metadata: &Metadata) -> bool {
+        metadata.level() <= Level::Info
+    }
+
+    fn log(&self, record: &Record) {
+        if self.enabled(record.metadata()) {
+            println!("[{}] {} - {}", record.level(), record.target(), record.args());
+        }
+    }
+
+    fn flush(&self) {
+        std::io::stdout().flush().unwrap();
     }
 }

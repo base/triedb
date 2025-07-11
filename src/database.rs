@@ -1,5 +1,5 @@
 use crate::{
-    config::Config,
+    config::{Config, Logger},
     context::TransactionContext,
     meta::{MetadataManager, OpenMetadataError},
     page::{PageError, PageId, PageManager},
@@ -13,6 +13,8 @@ use std::{
     io,
     path::{Path, PathBuf},
 };
+
+static LOGGER: Logger = Logger;
 
 #[derive(Debug)]
 pub struct Database {
@@ -110,6 +112,9 @@ impl Database {
         opts: &DatabaseOptions,
         cfg: &Config,
     ) -> Result<Self, OpenError> {
+        // Initialize logger first
+        Self::init_logger(cfg);
+
         let db_path = db_path.as_ref();
         let meta_path = meta_path.as_ref();
 
@@ -138,6 +143,14 @@ impl Database {
             .map_err(OpenError::PageError)?;
 
         Ok(Self::new(StorageEngine::new(page_manager, meta_manager), cfg))
+    }
+
+    /// Set global logger to our configurable logger that will use the log level from the config.
+    fn init_logger(cfg: &Config) {
+        if let Err(e) = log::set_logger(&LOGGER) {
+            eprintln!("Failed to set logger: {e:?}");
+        }
+        log::set_max_level(cfg.log_level);
     }
 
     pub fn new(storage_engine: StorageEngine, cfg: &Config) -> Self {
