@@ -150,7 +150,7 @@ impl Database {
 
     /// Set global logger to our configurable logger that will use the log level from the config.
     fn init_logger(cfg: &Config) {
-        // Only try to set the logger if one hasn't been set yet
+        // Only try to set the logger if one hasn't been set yet to avoid erroring
         let _ = log::set_logger(&LOGGER);
         log::set_max_level(cfg.log_level);
     }
@@ -235,6 +235,9 @@ impl Database {
     }
 
     pub fn update_metrics_ro(&self, context: &TransactionContext) {
+        if !self.cfg.metrics_collector.database_metrics {
+            return;
+        }
         self.metrics
             .ro_transaction_pages_read
             .record(context.transaction_metrics.take_pages_read() as f64);
@@ -246,6 +249,9 @@ impl Database {
     }
 
     pub fn update_metrics_rw(&self, context: &TransactionContext) {
+        if !self.cfg.metrics_collector.database_metrics {
+            return;
+        }
         self.metrics
             .rw_transaction_pages_read
             .record(context.transaction_metrics.take_pages_read() as f64);
