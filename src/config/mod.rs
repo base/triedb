@@ -1,12 +1,14 @@
 use log::LevelFilter;
 use crate::context::B512Map;
 use crate::page::PageId;
+use crate::snapshot::SnapshotId;
 
 pub mod metrics;
 pub mod logger;
-
+pub mod cache;
 
 pub use metrics::MetricsCollector;
+pub use cache::CacheManager;
 
 /// Config lets you control certain aspects like cache parameters, log level, metrics 
 /// collection, and concurrency. It is passed in during opening of the database.
@@ -22,7 +24,8 @@ pub struct Config {
     pub log_level: LevelFilter,
     /// The configuration options for metrics collection.
     pub metrics_collector: MetricsCollector,
-    pub contract_account_loc_cache: B512Map<(PageId, u8)>,
+    /// The central cache manager for account-location mapping organized by snapshot ID.
+    cache_manager: CacheManager,
 }
 
 impl Config {
@@ -30,6 +33,7 @@ impl Config {
         Self::default()
     }
 
+    // Setters
     pub fn with_max_lru_size(mut self, max_lru_size: usize) -> Self {
         self.max_lru_size = max_lru_size;
         self
@@ -55,8 +59,20 @@ impl Config {
         self
     }
 
-    pub fn clear_cache(&mut self) {
-        self.contract_account_loc_cache.clear();
+    /// Commit a writer transaction's cache as the new baseline
+    pub fn save_cache(&mut self, snapshot_id: SnapshotId) {
+        self.cache_manager.save_cache(snapshot_id);
+    }
+
+    /// Clear a specific snapshot's cache
+    pub fn clear_cache(&mut self, snapshot_id: SnapshotId) {
+        self.cache_manager.clear_cache(snapshot_id);
+    }
+
+    // Getters
+    /// Get a cache for the given snapshot ID
+    pub fn get_cache(&mut self, snapshot_id: SnapshotId) -> &mut B512Map<(PageId, u8)> {
+        self.cache_manager.get_cache(snapshot_id)
     }
 }
 
@@ -70,7 +86,7 @@ impl Default for Config {
             max_writers: 1,
             log_level: LevelFilter::Info,
             metrics_collector: MetricsCollector::default(),
-            contract_account_loc_cache: B512Map::with_capacity(10),
+            cache_manager: CacheManager::default(),
         }
     }
 }

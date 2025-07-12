@@ -23,8 +23,7 @@ pub struct Database {
     pub(crate) storage_engine: StorageEngine,
     pub(crate) transaction_manager: Mutex<TransactionManager>,
     pub(crate) metrics: DatabaseMetrics,
-    #[allow(dead_code)]
-    pub cfg: Config,
+    pub cfg: Mutex<Config>,
 }
 
 #[must_use]
@@ -168,7 +167,7 @@ impl Database {
             storage_engine,
             transaction_manager: Mutex::new(TransactionManager::new()),
             metrics: DatabaseMetrics::default(),
-            cfg: cfg.clone(),
+            cfg: Mutex::new(cfg.clone()),
         }
     }
 
@@ -236,7 +235,7 @@ impl Database {
     }
 
     pub fn update_metrics_ro(&self, context: &TransactionContext) {
-        if !self.cfg.metrics_collector.database_metrics {
+        if !self.cfg.lock().metrics_collector.database_metrics {
             return;
         }
         self.metrics
@@ -250,7 +249,7 @@ impl Database {
     }
 
     pub fn update_metrics_rw(&self, context: &TransactionContext) {
-        if !self.cfg.metrics_collector.database_metrics {
+        if !self.cfg.lock().metrics_collector.database_metrics {
             return;
         }
         self.metrics
@@ -547,7 +546,7 @@ mod tests {
 
         // Verify that the read transaction that we created before the delete can still access the
         // initial accounts
-        // read_tx.clear_cache();
+        read_tx.clear_cache();
         for (address, account) in &initial_accounts {
             assert_eq!(
                 read_tx.get_account(address.clone()).expect("error while reading account"),
