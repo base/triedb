@@ -1,6 +1,6 @@
 use log::LevelFilter;
 use crate::context::B512Map;
-use crate::page::PageId;
+use crate::page::{Page, PageId};
 use crate::snapshot::SnapshotId;
 
 pub mod metrics;
@@ -14,6 +14,8 @@ pub use cache::CacheManager;
 /// collection, and concurrency. It is passed in during opening of the database.
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// The maximum number of pages that can be allocated.
+    pub max_pages: u32,
     /// The limit on total number of concurrent transactions.
     pub max_concurrent_transactions: usize,
     /// The limit on number of threads in the writer's internal thread pool.
@@ -32,8 +34,11 @@ impl Config {
     }
 
     // Setters
-    pub fn with_cache_manager(mut self, cache_manager: CacheManager) -> Self {
-        self.cache_manager = cache_manager;
+    /// Sets the maximum number of pages that can be allocated to this file.
+    ///
+    /// The default is [`PageId::MAX`].
+    pub fn with_max_pages(mut self, max_pages: u32) -> Self {
+        self.max_pages = max_pages;
         self
     }
 
@@ -57,6 +62,11 @@ impl Config {
         self
     }
 
+    pub fn with_cache_manager(mut self, cache_manager: CacheManager) -> Self {
+        self.cache_manager = cache_manager;
+        self
+    }    
+
     /// Commit a writer transaction's cache as the new baseline
     pub fn save_cache(&mut self, snapshot_id: SnapshotId) {
         self.cache_manager.save_cache(snapshot_id);
@@ -77,6 +87,13 @@ impl Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            max_pages: if cfg!(not(test)) {
+                Page::MAX_COUNT
+            } else {
+                // Because tests run in parallel, it's easy to exhaust the address space, so use a more
+                // conservative limit
+                Page::MAX_COUNT / 1024
+            },
             // This would default to an unlimited number (always at most 1 writer)
             max_concurrent_transactions: usize::MAX,
             // Currently, we expose at most 1 writer at a given time.

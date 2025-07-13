@@ -11,13 +11,13 @@ use crate::{context::B512Map, page::PageId, snapshot::SnapshotId};
 /// this (or a copy of it) for new readers and writers.
 #[derive(Debug, Clone)]
 pub struct CacheManager {
-    /// Cache by snapshotID with LRU eviction
-    caches: LruCache<SnapshotId, B512Map<(PageId, u8)>>,
-    /// The latest committed cache (used for new readers/writers)
-    latest_committed_cache: Option<B512Map<(PageId, u8)>>,
     /// The maximum size of [`caches`]. Once we start reusing the cache, it could grow infinitely, 
     /// so we would need to cap its size as an LRU cache instead of a simple HashMap
     pub max_lru_size: usize,
+    /// Cache by snapshotID with LRU eviction
+    caches: LruCache<SnapshotId, B512Map<(PageId, u8)>>,
+    /// The latest committed cache (used for new readers/writers)
+    latest_cache: Option<B512Map<(PageId, u8)>>,
 }
 
 impl CacheManager {
@@ -39,7 +39,7 @@ impl CacheManager {
         }
         
         // Create new cache, starting from latest committed cache if available
-        let new_cache = if let Some(ref committed_cache) = self.latest_committed_cache {
+        let new_cache = if let Some(ref committed_cache) = self.latest_cache {
             committed_cache.clone()
         } else {
             B512Map::with_capacity(10)
@@ -52,7 +52,7 @@ impl CacheManager {
     /// Save a writer transaction's cache and use this for new readers/writers
     pub fn save_cache(&mut self, snapshot_id: SnapshotId) {
         if let Some(cache) = self.caches.get(&snapshot_id) {
-            self.latest_committed_cache = Some(cache.clone());
+            self.latest_cache = Some(cache.clone());
         }
     }
 
@@ -67,9 +67,9 @@ impl CacheManager {
 impl Default for CacheManager {
     fn default() -> Self {
         Self {
-            caches: LruCache::new(NonZeroUsize::new(100).unwrap()),
-            latest_committed_cache: None,
             max_lru_size: 100,
+            caches: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            latest_cache: None,
         }
     }
 }
@@ -84,7 +84,7 @@ mod tests {
     fn test_cache_manager_creation() {
         let cache_manager = CacheManager::new();
         assert!(cache_manager.caches.is_empty());
-        assert!(cache_manager.latest_committed_cache.is_none());
+        assert!(cache_manager.latest_cache.is_none());
     }
 
     #[test]
@@ -135,14 +135,14 @@ mod tests {
         }
         
         // Initially no committed cache
-        assert!(cache_manager.latest_committed_cache.is_none());
+        assert!(cache_manager.latest_cache.is_none());
         
         // Commit the cache
         cache_manager.save_cache(snapshot_id);
         
         // Should now have committed cache
-        assert!(cache_manager.latest_committed_cache.is_some());
-        let committed_cache = cache_manager.latest_committed_cache.as_ref().unwrap();
+        assert!(cache_manager.latest_cache.is_some());
+        let committed_cache = cache_manager.latest_cache.as_ref().unwrap();
         assert_eq!(committed_cache.get(nibbles), Some(cache_entry));
     }
 

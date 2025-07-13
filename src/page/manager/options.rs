@@ -1,4 +1,4 @@
-use crate::page::{Page, PageError, PageManager};
+use crate::{config::Config, page::{PageError, PageManager}};
 use std::{
     fs::{File, OpenOptions},
     path::Path,
@@ -8,7 +8,6 @@ use std::{
 pub struct PageManagerOptions {
     pub(super) open_options: OpenOptions,
     pub(super) page_count: u32,
-    pub(super) max_pages: u32,
 }
 
 impl PageManagerOptions {
@@ -16,15 +15,7 @@ impl PageManagerOptions {
         let mut open_options = File::options();
         open_options.read(true).write(true).create(true).truncate(false);
 
-        let max_pages = if cfg!(not(test)) {
-            Page::MAX_COUNT
-        } else {
-            // Because tests run in parallel, it's easy to exhaust the address space, so use a more
-            // conservative limit
-            Page::MAX_COUNT / 1024
-        };
-
-        Self { open_options, page_count: 0, max_pages }
+        Self { open_options, page_count: 0 }
     }
 
     /// Sets the option to create a new file, or open it if it already exists.
@@ -53,14 +44,6 @@ impl PageManagerOptions {
         self
     }
 
-    /// Sets the maximum number of pages that can be allocated to this file.
-    ///
-    /// The default is [`PageId::MAX`].
-    pub fn max_pages(&mut self, max_pages: u32) -> &mut Self {
-        self.max_pages = max_pages;
-        self
-    }
-
     /// Causes the file length to be set to 0 after opening it.
     ///
     /// Note that if `wipe(true)` is set, then setting [`page_count()`](Self::page_count) with any
@@ -71,22 +54,22 @@ impl PageManagerOptions {
     }
 
     /// Opens the file at `path` with the options specified by `self`.
-    pub fn open(&self, path: impl AsRef<Path>) -> Result<PageManager, PageError> {
-        PageManager::open_with_options(self, path)
+    pub fn open(&self, cfg: &Config, path: impl AsRef<Path>) -> Result<PageManager, PageError> {
+        PageManager::open_with_options(self, cfg, path)
     }
 
     /// Wraps the given `file` with the options specified by `self`.
     ///
     /// If `.wrap()` is called, `.create()` and `.create_new()` are ignored.
-    pub fn wrap(&self, file: File) -> Result<PageManager, PageError> {
-        PageManager::from_file_with_options(self, file)
+    pub fn wrap(&self, cfg: &Config, file: File) -> Result<PageManager, PageError> {
+        PageManager::from_file_with_options(self, cfg, file)
     }
 
     /// Opens a temporary file with the options specified by `self`.
     #[cfg(test)]
-    pub fn open_temp_file(&self) -> Result<PageManager, PageError> {
+    pub fn open_temp_file(&self, cfg: &Config) -> Result<PageManager, PageError> {
         let file = tempfile::tempfile().map_err(PageError::IO)?;
-        self.wrap(file)
+        self.wrap(cfg, file)
     }
 }
 
