@@ -13,11 +13,9 @@ use crate::{context::B512Map, page::PageId, snapshot::SnapshotId};
 pub struct CacheManager {
     /// The maximum size of [`caches`]. Once we start reusing the cache, it could grow infinitely, 
     /// so we would need to cap its size as an LRU cache instead of a simple HashMap
-    pub max_lru_size: usize,
+    pub max_size: usize,
     /// Cache by snapshotID with LRU eviction
     caches: LruCache<SnapshotId, B512Map<(PageId, u8)>>,
-    /// The latest committed cache (used for new readers/writers)
-    latest_cache: Option<B512Map<(PageId, u8)>>,
 }
 
 impl CacheManager {
@@ -25,41 +23,39 @@ impl CacheManager {
         Self::default()
     }
 
-    pub fn with_max_lru_size(&mut self, max_lru_size: usize) -> &mut Self {
-        self.max_lru_size = max_lru_size;
+    pub fn with_max_size(&mut self, max_size: usize) -> &mut Self {
+        self.max_size = max_size;
         self
     }
 
     /// Get/add a per-transaction cache for current snapshotID
-    /// It uses the latest committed cache if available
+    /// It uses the most recently used cache if available
     pub fn get_cache(&mut self, snapshot_id: SnapshotId) -> &mut B512Map<(PageId, u8)> {
-        // If cache already exists for this snapshot, return it
-        if self.caches.contains(&snapshot_id) {
-            return self.caches.get_mut(&snapshot_id).unwrap();
-        }
-        
-        // Create new cache, starting from latest committed cache if available
-        let new_cache = if let Some(ref committed_cache) = self.latest_cache {
-            committed_cache.clone()
+        // The snapshot doesn't exist but we have a copy of the most recent cache
+        // so use this for the current reader/writer
+        let cache = if let Some(recent_snapshot) = self.caches.iter().last().map(|(key, _)| key) {
+            self.caches.peek(recent_snapshot).unwrap().clone()
         } else {
+            // If this is the first time, use default 
             B512Map::with_capacity(10)
         };
         
-        self.caches.put(snapshot_id, new_cache);
+        self.caches.put(snapshot_id, cache);
         self.caches.get_mut(&snapshot_id).unwrap()
     }
 
-    /// Save a writer transaction's cache and use this for new readers/writers
+    /// Save a writer transaction's cache by promoting it to most recently used
     pub fn save_cache(&mut self, snapshot_id: SnapshotId) {
-        if let Some(cache) = self.caches.get(&snapshot_id) {
-            self.latest_cache = Some(cache.clone());
+        if self.caches.contains(&snapshot_id) {
+            self.caches.promote(&snapshot_id);
         }
     }
 
-    /// Clear a specific snapshot's cache
+    /// Clear a specific snapshot's cache and remove it from the LRU cache
     pub fn clear_cache(&mut self, snapshot_id: SnapshotId) {
         if let Some(cache) = self.caches.get_mut(&snapshot_id) {
             cache.clear();
+            self.caches.pop(&snapshot_id);
         }
     }
 }
@@ -67,9 +63,8 @@ impl CacheManager {
 impl Default for CacheManager {
     fn default() -> Self {
         Self {
-            max_lru_size: 100,
+            max_size: 100,
             caches: LruCache::new(NonZeroUsize::new(100).unwrap()),
-            latest_cache: None,
         }
     }
 }
@@ -84,7 +79,6 @@ mod tests {
     fn test_cache_manager_creation() {
         let cache_manager = CacheManager::new();
         assert!(cache_manager.caches.is_empty());
-        assert!(cache_manager.latest_cache.is_none());
     }
 
     #[test]
@@ -134,16 +128,14 @@ mod tests {
             cache.insert(nibbles, cache_entry);
         }
         
-        // Initially no committed cache
-        assert!(cache_manager.latest_cache.is_none());
-        
-        // Commit the cache
+        // Save and promote it to most recently used
         cache_manager.save_cache(snapshot_id);
         
-        // Should now have committed cache
-        assert!(cache_manager.latest_cache.is_some());
-        let committed_cache = cache_manager.latest_cache.as_ref().unwrap();
-        assert_eq!(committed_cache.get(nibbles), Some(cache_entry));
+        // Even though this is operating on a different snapshot,
+        // we can use the most recent copy and go from there
+        let new_snapshot_id = 2;
+        let new_cache = cache_manager.get_cache(new_snapshot_id);
+        assert_eq!(new_cache.get(nibbles), Some(cache_entry));
     }
 
     #[test]
