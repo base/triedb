@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use lru::LruCache;
+use std::num::NonZeroUsize;
 
 use crate::{context::B512Map, page::PageId, snapshot::SnapshotId};
 
@@ -10,10 +11,13 @@ use crate::{context::B512Map, page::PageId, snapshot::SnapshotId};
 /// this (or a copy of it) for new readers and writers.
 #[derive(Debug, Clone)]
 pub struct CacheManager {
-    /// Cache by snapshotID
-    snapshot_caches: HashMap<SnapshotId, B512Map<(PageId, u8)>>,
+    /// Cache by snapshotID with LRU eviction
+    caches: LruCache<SnapshotId, B512Map<(PageId, u8)>>,
     /// The latest committed cache (used for new readers/writers)
     latest_committed_cache: Option<B512Map<(PageId, u8)>>,
+    /// The maximum size of [`caches`]. Once we start reusing the cache, it could grow infinitely, 
+    /// so we would need to cap its size as an LRU cache instead of a simple HashMap
+    pub max_lru_size: usize,
 }
 
 impl CacheManager {
@@ -21,12 +25,17 @@ impl CacheManager {
         Self::default()
     }
 
+    pub fn with_max_lru_size(&mut self, max_lru_size: usize) -> &mut Self {
+        self.max_lru_size = max_lru_size;
+        self
+    }
+
     /// Get/add a per-transaction cache for current snapshotID
     /// It uses the latest committed cache if available
     pub fn get_cache(&mut self, snapshot_id: SnapshotId) -> &mut B512Map<(PageId, u8)> {
         // If cache already exists for this snapshot, return it
-        if self.snapshot_caches.contains_key(&snapshot_id) {
-            return self.snapshot_caches.get_mut(&snapshot_id).unwrap();
+        if self.caches.contains(&snapshot_id) {
+            return self.caches.get_mut(&snapshot_id).unwrap();
         }
         
         // Create new cache, starting from latest committed cache if available
@@ -36,20 +45,20 @@ impl CacheManager {
             B512Map::with_capacity(10)
         };
         
-        self.snapshot_caches.insert(snapshot_id, new_cache);
-        self.snapshot_caches.get_mut(&snapshot_id).unwrap()
+        self.caches.put(snapshot_id, new_cache);
+        self.caches.get_mut(&snapshot_id).unwrap()
     }
 
     /// Save a writer transaction's cache and use this for new readers/writers
     pub fn save_cache(&mut self, snapshot_id: SnapshotId) {
-        if let Some(cache) = self.snapshot_caches.get(&snapshot_id) {
+        if let Some(cache) = self.caches.get(&snapshot_id) {
             self.latest_committed_cache = Some(cache.clone());
         }
     }
 
     /// Clear a specific snapshot's cache
     pub fn clear_cache(&mut self, snapshot_id: SnapshotId) {
-        if let Some(cache) = self.snapshot_caches.get_mut(&snapshot_id) {
+        if let Some(cache) = self.caches.get_mut(&snapshot_id) {
             cache.clear();
         }
     }
@@ -58,8 +67,9 @@ impl CacheManager {
 impl Default for CacheManager {
     fn default() -> Self {
         Self {
-            snapshot_caches: HashMap::new(),
+            caches: LruCache::new(NonZeroUsize::new(100).unwrap()),
             latest_committed_cache: None,
+            max_lru_size: 100,
         }
     }
 }
@@ -73,7 +83,7 @@ mod tests {
     #[test]
     fn test_cache_manager_creation() {
         let cache_manager = CacheManager::new();
-        assert!(cache_manager.snapshot_caches.is_empty());
+        assert!(cache_manager.caches.is_empty());
         assert!(cache_manager.latest_committed_cache.is_none());
     }
 
@@ -84,7 +94,7 @@ mod tests {
         
         let _ = cache_manager.get_cache(snapshot_id);
         // Verify the cache was stored
-        assert!(cache_manager.snapshot_caches.contains_key(&snapshot_id));
+        assert!(cache_manager.caches.contains(&snapshot_id));
     }
 
     #[test]
@@ -169,7 +179,7 @@ mod tests {
         cache_manager.clear_cache(snapshot_id);
         
         // Should still be empty
-        assert!(cache_manager.snapshot_caches.is_empty());
+        assert!(cache_manager.caches.is_empty());
     }
 }
 
