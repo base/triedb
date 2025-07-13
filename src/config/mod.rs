@@ -14,8 +14,6 @@ pub use cache::CacheManager;
 /// collection, and concurrency. It is passed in during opening of the database.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// The maximum size of the LRU cache for per-transaction mapping.
-    pub max_lru_size: usize,
     /// The limit on total number of concurrent transactions.
     pub max_concurrent_transactions: usize,
     /// The limit on number of threads in the writer's internal thread pool.
@@ -34,8 +32,8 @@ impl Config {
     }
 
     // Setters
-    pub fn with_max_lru_size(mut self, max_lru_size: usize) -> Self {
-        self.max_lru_size = max_lru_size;
+    pub fn with_cache_manager(mut self, cache_manager: CacheManager) -> Self {
+        self.cache_manager = cache_manager;
         self
     }
 
@@ -79,8 +77,7 @@ impl Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            max_lru_size: 1024, // TODO: not sure what the default should be
-            // There is always at most 1 writer.
+            // This would default to an unlimited number (always at most 1 writer)
             max_concurrent_transactions: usize::MAX,
             // Currently, we expose at most 1 writer at a given time.
             max_writers: 1,
