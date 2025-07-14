@@ -91,7 +91,7 @@ impl DatabaseOptions {
     }
 
     /// Opens the database file at the given path.
-    pub fn open(&self, db_path: impl AsRef<Path>, cfg: &Config) -> Result<Database, OpenError> {
+    pub fn open(&self, db_path: impl AsRef<Path>) -> Result<Database, OpenError> {
         let db_path = db_path.as_ref();
         let meta_path = self.meta_path.clone().unwrap_or_else(|| {
             let mut meta_path = db_path.to_path_buf();
@@ -99,17 +99,17 @@ impl DatabaseOptions {
             meta_path
         });
 
-        Database::open_with_options(db_path, meta_path, self, cfg)
+        Database::open_with_options(db_path, meta_path, self)
     }
 }
 
 impl Database {
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self, OpenError> {
-        Self::options().open(db_path, &Config::default())
+        Self::options().open(db_path)
     }
 
     pub fn create_new(db_path: impl AsRef<Path>) -> Result<Self, OpenError> {
-        Self::options().create_new(true).open(db_path, &Config::default())
+        Self::options().create_new(true).open(db_path)
     }
 
     pub fn options() -> DatabaseOptions {
@@ -120,10 +120,9 @@ impl Database {
         db_path: impl AsRef<Path>,
         meta_path: impl AsRef<Path>,
         opts: &DatabaseOptions,
-        cfg: &Config,
     ) -> Result<Self, OpenError> {
         // Initialize logger first
-        Self::init_logger(cfg);
+        Self::init_logger(&opts.cfg);
 
         let db_path = db_path.as_ref();
         let meta_path = meta_path.as_ref();
@@ -152,7 +151,7 @@ impl Database {
             .open(db_path)
             .map_err(OpenError::PageError)?;
 
-        Ok(Self::new(StorageEngine::new(page_manager, meta_manager), cfg))
+        Ok(Self::new(StorageEngine::new(page_manager, meta_manager), &opts.cfg))
     }
 
     /// Set global logger to our configurable logger that will use the log level from the config.
@@ -304,7 +303,7 @@ mod tests {
 
         // Try to open a non-existing database
         Database::options()
-            .open(&db_path, &Config::default())
+            .open(&db_path)
             .expect_err("opening a non-existing database should have failed");
         assert!(!db_path.exists());
         assert!(!auto_meta_path.exists());
@@ -312,7 +311,7 @@ mod tests {
         // Open with create(true)
         Database::options()
             .create(true)
-            .open(&db_path, &Config::default())
+            .open(&db_path)
             .expect("database creation should have succeeded");
         assert!(db_path.exists());
         assert!(auto_meta_path.exists());
@@ -320,7 +319,7 @@ mod tests {
         // Open again with create_new(true)
         Database::options()
             .create_new(true)
-            .open(&db_path, &Config::default())
+            .open(&db_path)
             .expect_err("database creation should have failed");
         assert!(db_path.exists());
         assert!(auto_meta_path.exists());
@@ -330,7 +329,7 @@ mod tests {
         fs::remove_file(&auto_meta_path).expect("metadata file removal failed");
         Database::options()
             .create_new(true)
-            .open(&db_path, &Config::default())
+            .open(&db_path)
             .expect("database creation should have succeeded");
         assert!(db_path.exists());
         assert!(auto_meta_path.exists());
@@ -341,7 +340,7 @@ mod tests {
         Database::options()
             .create(true)
             .meta_path(&custom_meta_path)
-            .open(&db_path, &Config::default())
+            .open(&db_path)
             .expect("database creation should have succeeded");
         assert!(db_path.exists());
         assert!(custom_meta_path.exists());
