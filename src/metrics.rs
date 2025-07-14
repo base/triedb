@@ -4,7 +4,7 @@ use std::cell::Cell;
 
 #[derive(Metrics, Clone)]
 #[metrics(scope = "triedb")]
-pub struct DatabaseMetrics {
+pub(crate) struct DatabaseMetrics {
     /// The number of pages read by a read-only transaction
     #[metrics(describe = "The number of pages read by a read-only transaction")]
     pub(crate) ro_transaction_pages_read: Histogram,

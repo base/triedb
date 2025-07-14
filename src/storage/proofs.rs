@@ -16,7 +16,7 @@ use alloy_primitives::{map::B256Map, Bytes, B256, U256};
 use alloy_rlp::{decode_exact, BytesMut};
 use alloy_trie::{nybbles::common_prefix_length, Nibbles, EMPTY_ROOT_HASH};
 
-use super::{engine::{Error, StorageEngine}};
+use super::engine::{Error, StorageEngine};
 
 /// A Merkle proof of an account and select storage slots.
 #[derive(Default, Debug)]

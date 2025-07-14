@@ -2,10 +2,10 @@ use crate::{
     config::{Config, logger::Logger},
     context::TransactionContext,
     meta::{MetadataManager, OpenMetadataError},
+    metrics::DatabaseMetrics,
     page::{PageError, PageId, PageManager},
     storage::engine::{self, StorageEngine},
     transaction::{Transaction, TransactionError, TransactionManager, RO, RW},
-    metrics::DatabaseMetrics,
 };
 use alloy_primitives::B256;
 use parking_lot::Mutex;
@@ -21,7 +21,7 @@ static LOGGER: Logger = Logger;
 pub struct Database {
     pub(crate) storage_engine: StorageEngine,
     pub(crate) transaction_manager: Mutex<TransactionManager>,
-    pub(crate) metrics: DatabaseMetrics,
+    metrics: DatabaseMetrics,
     pub cfg: Mutex<Config>,
 }
 
@@ -226,8 +226,7 @@ impl Database {
     pub fn begin_ro(&self) -> Result<Transaction<'_, RO>, TransactionError> {
         let context = self.storage_engine.read_context();
         self.transaction_manager.lock().begin_ro(context.snapshot_id);
-        
-        // Initialize transaction cache with latest committed cache
+
         self.cfg.lock().get_cache(context.snapshot_id);
         
         Ok(Transaction::new(context, self))
