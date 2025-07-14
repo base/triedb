@@ -141,7 +141,7 @@ impl Database {
             .create_new(opts.create_new)
             .wipe(opts.wipe)
             .page_count(page_count)
-            .open(cfg, db_path)
+            .open(db_path)
             .map_err(OpenError::PageError)?;
 
         Ok(Self::new(StorageEngine::new(page_manager, meta_manager), cfg))

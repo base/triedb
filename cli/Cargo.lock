@@ -82,7 +82,7 @@ version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "983d99aa81f586cef9dae38443245e585840fcf0fc58b09aee0b1f27aed1d500"
 dependencies = [
- "alloy-primitives",
+ "alloy-primitives 0.8.25",
  "alloy-rlp",
  "arbitrary",
  "arrayvec",
@@ -433,8 +433,8 @@ checksum = "f46ad14479a25103f283c0f10005961cf086d8dc42205bb44c46ac563475dca6"
 name = "cli"
 version = "0.1.0"
 dependencies = [
- "alloy-primitives",
- "alloy-trie",
+ "alloy-primitives 0.8.25",
+ "alloy-trie 0.7.9",
  "clap",
  "hex",
  "triedb",
@@ -779,6 +779,8 @@ version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf151400ff0baff5465007dd2f3e717f3fe502074ca563069ce3a6629d07b289"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash",
 ]
 
@@ -1697,11 +1699,13 @@ dependencies = [
 name = "triedb"
 version = "0.1.0"
 dependencies = [
- "alloy-primitives",
+ "alloy-primitives 1.2.1",
  "alloy-rlp",
- "alloy-trie",
+ "alloy-trie 0.8.1",
  "arrayvec",
  "fxhash",
+ "log",
+ "lru",
  "memmap2",
  "metrics",
  "metrics-derive",
