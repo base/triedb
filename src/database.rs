@@ -1,5 +1,5 @@
 use crate::{
-    config::{Config, logger::Logger},
+    config::{logger::Logger, Config},
     context::TransactionContext,
     meta::{MetadataManager, OpenMetadataError},
     metrics::DatabaseMetrics,

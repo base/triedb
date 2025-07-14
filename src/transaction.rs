@@ -64,8 +64,11 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
         &mut self,
         address_path: AddressPath,
     ) -> Result<Option<Account>, TransactionError> {
-        let account =
-            self.database.storage_engine.get_account(&mut self.database.cfg.lock(), &mut self.context, address_path).unwrap();
+        let account = self
+            .database
+            .storage_engine
+            .get_account(&mut self.database.cfg.lock(), &mut self.context, address_path)
+            .unwrap();
         self.database.update_metrics_ro(&self.context);
         Ok(account)
     }
@@ -74,8 +77,11 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
         &mut self,
         storage_path: StoragePath,
     ) -> Result<Option<StorageValue>, TransactionError> {
-        let storage_slot =
-            self.database.storage_engine.get_storage(&mut self.database.cfg.lock(), &mut self.context, storage_path).unwrap();
+        let storage_slot = self
+            .database
+            .storage_engine
+            .get_storage(&mut self.database.cfg.lock(), &mut self.context, storage_path)
+            .unwrap();
         self.database.update_metrics_ro(&self.context);
         Ok(storage_slot)
     }
@@ -164,13 +170,17 @@ impl<DB: Deref<Target = Database>> Transaction<DB, RW> {
             self.pending_changes.drain().collect::<Vec<(Nibbles, Option<TrieValue>)>>();
 
         if !changes.is_empty() {
-            self.database.storage_engine.set_values(&mut self.database.cfg.lock(), &mut self.context, changes.as_mut()).unwrap();
+            self.database
+                .storage_engine
+                .set_values(&mut self.database.cfg.lock(), &mut self.context, changes.as_mut())
+                .unwrap();
         }
 
         let mut transaction_manager = self.database.transaction_manager.lock();
         self.database.storage_engine.commit(&self.context).unwrap();
 
-        // When a writer transaction is committed, we should save its cache and use this (or a copy of it) for new readers and writers
+        // When a writer transaction is committed, we should save its cache and use this (or a copy
+        // of it) for new readers and writers
         self.database.cfg.lock().save_cache(self.context.snapshot_id);
 
         self.database.update_metrics_rw(&self.context);

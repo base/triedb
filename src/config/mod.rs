@@ -1,16 +1,18 @@
+use crate::{
+    context::B512Map,
+    page::{Page, PageId},
+    snapshot::SnapshotId,
+};
 use log::LevelFilter;
-use crate::context::B512Map;
-use crate::page::{Page, PageId};
-use crate::snapshot::SnapshotId;
 
-pub mod metrics;
-pub mod logger;
 pub mod cache;
+pub mod logger;
+pub mod metrics;
 
-pub use metrics::MetricsCollector;
 pub use cache::CacheManager;
+pub use metrics::MetricsCollector;
 
-/// Config lets you control certain aspects like cache parameters, log level, metrics 
+/// Config lets you control certain aspects like cache parameters, log level, metrics
 /// collection, and concurrency. It is passed in during opening of the database.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -65,7 +67,7 @@ impl Config {
     pub fn with_cache_manager(mut self, cache_manager: CacheManager) -> Self {
         self.cache_manager = cache_manager;
         self
-    }    
+    }
 
     /// Commit a writer transaction's cache as the new baseline
     pub fn save_cache(&mut self, snapshot_id: SnapshotId) {
@@ -90,8 +92,8 @@ impl Default for Config {
             max_pages: if cfg!(not(test)) {
                 Page::MAX_COUNT
             } else {
-                // Because tests run in parallel, it's easy to exhaust the address space, so use a more
-                // conservative limit
+                // Because tests run in parallel, it's easy to exhaust the address space, so use a
+                // more conservative limit
                 Page::MAX_COUNT / 1024
             },
             // This would default to an unlimited number (always at most 1 writer)

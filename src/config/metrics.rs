@@ -26,7 +26,7 @@ impl MetricsCollector {
     }
 
     pub fn with_database_metrics(mut self, database_metrics: bool) -> Self {
-        self.database_metrics = database_metrics;   
+        self.database_metrics = database_metrics;
         self
     }
 

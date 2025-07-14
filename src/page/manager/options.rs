@@ -1,4 +1,7 @@
-use crate::{config::Config, page::{PageError, PageManager}};
+use crate::{
+    config::Config,
+    page::{PageError, PageManager},
+};
 use std::{
     fs::{File, OpenOptions},
     path::Path,
