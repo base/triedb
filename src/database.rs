@@ -1,5 +1,5 @@
 use crate::{
-    config::{Config, logger::Logger},
+    config::{logger::Logger, Config},
     context::TransactionContext,
     meta::{MetadataManager, OpenMetadataError},
     metrics::DatabaseMetrics,
@@ -216,10 +216,10 @@ impl Database {
         if min_snapshot_id > 0 {
             self.storage_engine.unlock(min_snapshot_id - 1);
         }
-        
+
         // Initialize transaction cache with latest committed cache
         self.cfg.lock().get_cache(context.snapshot_id);
-        
+
         Ok(Transaction::new(context, self))
     }
 
@@ -228,7 +228,7 @@ impl Database {
         self.transaction_manager.lock().begin_ro(context.snapshot_id);
 
         self.cfg.lock().get_cache(context.snapshot_id);
-        
+
         Ok(Transaction::new(context, self))
     }
 

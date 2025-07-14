@@ -24,8 +24,8 @@ use std::{fs, io, path::Path, time::Duration};
 use tempdir::TempDir;
 use triedb::{
     account::Account,
-    path::{AddressPath, StoragePath},
     config::Config,
+    path::{AddressPath, StoragePath},
     Database,
 };
 

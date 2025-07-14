@@ -13,8 +13,7 @@ use tempdir::TempDir;
 use triedb::{
     account::Account,
     path::{AddressPath, StoragePath},
-    Database,
-    Config,
+    Config, Database,
 };
 use walkdir::WalkDir;
 

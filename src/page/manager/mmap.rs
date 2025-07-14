@@ -345,7 +345,8 @@ mod tests {
         let snapshot = 123;
 
         let f = tempfile::tempfile().expect("temporary file creation failed");
-        let m = PageManager::from_file(&Config::default(), f.try_clone().unwrap()).expect("mmap creation failed");
+        let m = PageManager::from_file(&Config::default(), f.try_clone().unwrap())
+            .expect("mmap creation failed");
 
         fn len(f: &File) -> usize {
             f.metadata().expect("fetching file metadata failed").len().try_into().unwrap()
@@ -391,7 +392,8 @@ mod tests {
         let snapshot = 123;
 
         let f = tempfile::tempfile().expect("temporary file creation failed");
-        let m = PageManager::from_file(&Config::default(), f.try_clone().unwrap()).expect("mmap creation failed");
+        let m = PageManager::from_file(&Config::default(), f.try_clone().unwrap())
+            .expect("mmap creation failed");
 
         fn len(f: &File) -> usize {
             f.metadata().expect("fetching file metadata failed").len().try_into().unwrap()
