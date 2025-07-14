@@ -96,12 +96,12 @@ impl DatabaseOptions {
 }
 
 impl Database {
-    pub fn open(db_path: impl AsRef<Path>, cfg: &Config) -> Result<Self, OpenError> {
-        Self::options().open(db_path, cfg)
+    pub fn open(db_path: impl AsRef<Path>) -> Result<Self, OpenError> {
+        Self::options().open(db_path, &Config::default())
     }
 
-    pub fn create_new(db_path: impl AsRef<Path>, cfg: &Config) -> Result<Self, OpenError> {
-        Self::options().create_new(true).open(db_path, cfg)
+    pub fn create_new(db_path: impl AsRef<Path>) -> Result<Self, OpenError> {
+        Self::options().create_new(true).open(db_path, &Config::default())
     }
 
     pub fn options() -> DatabaseOptions {
@@ -339,7 +339,7 @@ mod tests {
     fn test_set_get_account() {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
-        let db = Database::create_new(file_path, &Config::default()).unwrap();
+        let db = Database::create_new(file_path).unwrap();
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
 
@@ -380,10 +380,10 @@ mod tests {
         // create the database on disk. currently this will create a database with 0 pages
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
-        let _db = Database::create_new(&file_path, &Config::default()).unwrap();
+        let _db = Database::create_new(&file_path).unwrap();
 
         // WHEN: the database is opened
-        let db = Database::open(&file_path, &Config::default()).unwrap();
+        let db = Database::open(&file_path).unwrap();
 
         // THEN: the size of the database should be 0
         assert_eq!(db.size(), 0);
@@ -396,7 +396,7 @@ mod tests {
     fn test_data_persistence() {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
-        let db = Database::create_new(&file_path, &Config::default()).unwrap();
+        let db = Database::create_new(&file_path).unwrap();
 
         let address1 = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
@@ -407,7 +407,7 @@ mod tests {
         tx.commit().unwrap();
         db.close().unwrap();
 
-        let db = Database::open(&file_path, &Config::default()).unwrap();
+        let db = Database::open(&file_path).unwrap();
         let mut tx = db.begin_ro().unwrap();
         let account = tx.get_account(AddressPath::for_address(address1)).unwrap().unwrap();
         assert_eq!(account, account1);
@@ -422,7 +422,7 @@ mod tests {
         tx.commit().unwrap();
         db.close().unwrap();
 
-        let db = Database::open(&file_path, &Config::default()).unwrap();
+        let db = Database::open(&file_path).unwrap();
         let mut tx = db.begin_ro().unwrap();
 
         let account = tx.get_account(AddressPath::for_address(address1)).unwrap().unwrap();
@@ -459,7 +459,7 @@ mod tests {
         // Create a new database and verify it has no pages
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
-        let db = Database::create_new(file_path, &Config::default()).unwrap();
+        let db = Database::create_new(file_path).unwrap();
         assert_eq!(db.storage_engine.page_manager.size(), 0);
 
         // Add 1000 accounts

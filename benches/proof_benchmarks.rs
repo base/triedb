@@ -29,7 +29,7 @@ fn bench_account_get_proof(c: &mut Criterion) {
         b.iter_with_setup(
             || {
                 let db_path = base_dir.file_name_path.clone();
-                Database::open(db_path, &Config::default()).unwrap()
+                Database::open(db_path).unwrap()
             },
             |db| {
                 let tx = db.begin_ro().unwrap();
@@ -67,7 +67,7 @@ fn bench_storage_get_proof(c: &mut Criterion) {
         b.iter_with_setup(
             || {
                 let db_path = base_dir.file_name_path.clone();
-                Database::open(db_path, &Config::default()).unwrap()
+                Database::open(db_path).unwrap()
             },
             |db| {
                 let tx = db.begin_ro().unwrap();
