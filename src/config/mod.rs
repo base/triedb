@@ -31,10 +31,6 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     // Setters
     /// Sets the maximum number of pages that can be allocated to this file.
     ///
@@ -89,13 +85,8 @@ impl Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            max_pages: if cfg!(not(test)) {
-                Page::MAX_COUNT
-            } else {
-                // Because tests run in parallel, it's easy to exhaust the address space, so use a
-                // more conservative limit
-                Page::MAX_COUNT / 1024
-            },
+            // Let user outside of database to set this
+            max_pages: Page::MAX_COUNT,
             // This would default to an unlimited number (always at most 1 writer)
             max_concurrent_transactions: usize::MAX,
             // Currently, we expose at most 1 writer at a given time.

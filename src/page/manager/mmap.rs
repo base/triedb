@@ -1,5 +1,4 @@
 use crate::{
-    config::Config,
     page::{Page, PageError, PageId, PageManagerOptions, PageMut},
     snapshot::SnapshotId,
 };
@@ -26,31 +25,29 @@ impl PageManager {
         PageManagerOptions::new()
     }
 
-    pub fn open(cfg: &Config, path: impl AsRef<Path>) -> Result<Self, PageError> {
-        Self::options().open(cfg, path)
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, PageError> {
+        Self::options().open(path)
     }
 
-    pub fn from_file(cfg: &Config, file: File) -> Result<Self, PageError> {
-        Self::options().wrap(cfg, file)
+    pub fn from_file(file: File) -> Result<Self, PageError> {
+        Self::options().wrap(file)
     }
 
     #[cfg(test)]
-    pub fn open_temp_file(cfg: &Config) -> Result<Self, PageError> {
-        Self::options().open_temp_file(cfg)
+    pub fn open_temp_file() -> Result<Self, PageError> {
+        Self::options().open_temp_file()
     }
 
     pub(super) fn open_with_options(
         opts: &PageManagerOptions,
-        cfg: &Config,
         path: impl AsRef<Path>,
     ) -> Result<Self, PageError> {
         let file = opts.open_options.open(path).map_err(PageError::IO)?;
-        Self::from_file_with_options(opts, cfg, file)
+        Self::from_file_with_options(opts, file)
     }
 
     pub(super) fn from_file_with_options(
         opts: &PageManagerOptions,
-        cfg: &Config,
         file: File,
     ) -> Result<Self, PageError> {
         // Allocate a memory map as large as possible, so that remapping will never be needed. If
@@ -78,7 +75,7 @@ impl PageManager {
         //
         // Note that even if the memory map has a certain size, reading/writing to it still
         // requires the backing file to be large enough; failure to do so will result in a SIGBUS.
-        let mmap_len = (cfg.max_pages as usize) * Page::SIZE;
+        let mmap_len = (opts.max_pages as usize) * Page::SIZE;
 
         // SAFETY: we assume that we have full ownership of the file, even though in practice
         // there's no way to guarantee it
@@ -270,12 +267,13 @@ impl Drop for PageManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::page::page_id;
+    use crate::{config::Config, page::page_id};
 
     #[test]
     fn test_allocate_get() {
+        // Let user outside of database to set this
         let cfg = Config::default().with_max_pages(10);
-        let manager = PageManager::options().open_temp_file(&cfg).unwrap();
+        let manager = PageManager::options().max_pages(cfg.max_pages).open_temp_file().unwrap();
 
         for i in 1..=10 {
             let i = PageId::new(i).unwrap();
@@ -300,7 +298,7 @@ mod tests {
 
     #[test]
     fn test_allocate_get_mut() {
-        let manager = PageManager::open_temp_file(&Config::default()).unwrap();
+        let manager = PageManager::open_temp_file().unwrap();
 
         let mut page = manager.allocate(42).unwrap();
         assert_eq!(page.id(), page_id!(1));
@@ -345,8 +343,7 @@ mod tests {
         let snapshot = 123;
 
         let f = tempfile::tempfile().expect("temporary file creation failed");
-        let m = PageManager::from_file(&Config::default(), f.try_clone().unwrap())
-            .expect("mmap creation failed");
+        let m = PageManager::from_file(f.try_clone().unwrap()).expect("mmap creation failed");
 
         fn len(f: &File) -> usize {
             f.metadata().expect("fetching file metadata failed").len().try_into().unwrap()
@@ -392,8 +389,7 @@ mod tests {
         let snapshot = 123;
 
         let f = tempfile::tempfile().expect("temporary file creation failed");
-        let m = PageManager::from_file(&Config::default(), f.try_clone().unwrap())
-            .expect("mmap creation failed");
+        let m = PageManager::from_file(f.try_clone().unwrap()).expect("mmap creation failed");
 
         fn len(f: &File) -> usize {
             f.metadata().expect("fetching file metadata failed").len().try_into().unwrap()
