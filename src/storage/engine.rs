@@ -3004,7 +3004,7 @@ mod tests {
         // Find all pages in the trie and split them recursively
         let mut pages_to_split = vec![context.root_node_page_id.unwrap()];
         while let Some(page_id) = pages_to_split.pop() {
-            let page_result = storage_engine.get_mut_page(&mut context, page_id);
+            let page_result = storage_engine.get_mut_page(&context, page_id);
             if matches!(page_result, Err(Error::PageError(PageError::PageNotFound(_)))) {
                 break;
             }
@@ -3137,7 +3137,7 @@ mod tests {
             let page_id = page_ids[i];
 
             // Try to get and split the page
-            if let Ok(page) = storage_engine.get_mut_page(&mut context, page_id) {
+            if let Ok(page) = storage_engine.get_mut_page(&context, page_id) {
                 if let Ok(mut slotted_page) = SlottedPageMut::try_from(page) {
                     // Force a split
                     let _ = storage_engine.split_page(&mut context, &mut slotted_page);

@@ -32,12 +32,13 @@ impl CacheManager {
     pub fn get_cache(&mut self, snapshot_id: SnapshotId) -> &mut B512Map<(PageId, u8)> {
         // The snapshot doesn't exist but we have a copy of the most recent cache
         // so use this for the current reader/writer
-        let cache = if let Some(recent_snapshot) = self.caches.iter().last().map(|(key, _)| key) {
-            self.caches.peek(recent_snapshot).unwrap().clone()
-        } else {
-            // If this is the first time, use default
-            B512Map::with_capacity(10)
-        };
+        let cache =
+            if let Some(recent_snapshot) = self.caches.iter().next_back().map(|(key, _)| key) {
+                self.caches.peek(recent_snapshot).unwrap().clone()
+            } else {
+                // If this is the first time, use default
+                B512Map::with_capacity(10)
+            };
 
         self.caches.put(snapshot_id, cache);
         self.caches.get_mut(&snapshot_id).unwrap()
