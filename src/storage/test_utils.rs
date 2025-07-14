@@ -9,15 +9,15 @@ use crate::{
     storage::engine::StorageEngine, PageManager,
 };
 
-pub(crate) fn create_test_engine(max_pages: u32) -> (StorageEngine, TransactionContext, Config) {
+pub(crate) fn create_test_engine(max_pages: u32) -> (StorageEngine, TransactionContext) {
     let meta_manager =
         MetadataManager::from_file(tempfile::tempfile().expect("failed to create temporary file"))
             .expect("failed to open metadata file");
     let cfg = Config::default().with_max_pages(max_pages);
-    let page_manager = PageManager::options().max_pages(cfg.max_pages).open_temp_file().unwrap();
+    let page_manager = PageManager::options().max_pages(cfg.max_pages()).open_temp_file().unwrap();
     let storage_engine = StorageEngine::new(page_manager, meta_manager);
     let context = storage_engine.write_context();
-    (storage_engine, context, cfg)
+    (storage_engine, context)
 }
 
 pub(crate) fn random_test_account(rng: &mut StdRng) -> Account {

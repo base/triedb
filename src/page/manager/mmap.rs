@@ -273,7 +273,7 @@ mod tests {
     fn test_allocate_get() {
         // Let user outside of database to set this
         let cfg = Config::default().with_max_pages(10);
-        let manager = PageManager::options().max_pages(cfg.max_pages).open_temp_file().unwrap();
+        let manager = PageManager::options().max_pages(cfg.max_pages()).open_temp_file().unwrap();
 
         for i in 1..=10 {
             let i = PageId::new(i).unwrap();

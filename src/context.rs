@@ -59,6 +59,7 @@ pub struct TransactionContext {
     pub(crate) root_node_page_id: Option<PageId>,
     pub(crate) page_count: u32,
     pub(crate) transaction_metrics: TransactionMetrics,
+    pub(crate) contract_account_loc_cache: B512Map<(PageId, u8)>,
 }
 
 impl TransactionContext {
@@ -70,6 +71,7 @@ impl TransactionContext {
             root_node_page_id: meta.root_node_page_id(),
             page_count: meta.page_count(),
             transaction_metrics: Default::default(),
+            contract_account_loc_cache: B512Map::with_capacity(10),
         }
     }
 
@@ -79,6 +81,10 @@ impl TransactionContext {
         meta.set_root_node_hash(self.root_node_hash);
         meta.set_root_node_page_id(self.root_node_page_id);
         meta.set_page_count(self.page_count);
+    }
+
+    pub fn clear_cache(&mut self) {
+        self.contract_account_loc_cache.clear();
     }
 }
 

@@ -22,7 +22,6 @@ pub struct Database {
     pub(crate) storage_engine: StorageEngine,
     pub(crate) transaction_manager: Mutex<TransactionManager>,
     metrics: DatabaseMetrics,
-    pub cfg: Mutex<Config>,
 }
 
 #[must_use]
@@ -150,22 +149,21 @@ impl Database {
             .open(db_path)
             .map_err(OpenError::PageError)?;
 
-        Ok(Self::new(StorageEngine::new(page_manager, meta_manager), &opts.cfg))
+        Ok(Self::new(StorageEngine::new(page_manager, meta_manager)))
     }
 
     /// Set global logger to our configurable logger that will use the log level from the config.
     fn init_logger(cfg: &Config) {
         // Only try to set the logger if one hasn't been set yet to avoid erroring
         let _ = log::set_logger(&LOGGER);
-        log::set_max_level(cfg.log_level);
+        log::set_max_level(cfg.log_level());
     }
 
-    pub fn new(storage_engine: StorageEngine, cfg: &Config) -> Self {
+    pub fn new(storage_engine: StorageEngine) -> Self {
         Self {
             storage_engine,
             transaction_manager: Mutex::new(TransactionManager::new()),
             metrics: DatabaseMetrics::default(),
-            cfg: Mutex::new(cfg.clone()),
         }
     }
 
@@ -222,19 +220,12 @@ impl Database {
         if min_snapshot_id > 0 {
             self.storage_engine.unlock(min_snapshot_id - 1);
         }
-
-        // Initialize transaction cache with latest committed cache
-        self.cfg.lock().get_cache(context.snapshot_id);
-
         Ok(Transaction::new(context, self))
     }
 
     pub fn begin_ro(&self) -> Result<Transaction<'_, RO>, TransactionError> {
         let context = self.storage_engine.read_context();
         self.transaction_manager.lock().begin_ro(context.snapshot_id);
-
-        self.cfg.lock().get_cache(context.snapshot_id);
-
         Ok(Transaction::new(context, self))
     }
 
@@ -247,9 +238,6 @@ impl Database {
     }
 
     pub fn update_metrics_ro(&self, context: &TransactionContext) {
-        if !self.cfg.lock().metrics_collector.database_metrics {
-            return;
-        }
         self.metrics
             .ro_transaction_pages_read
             .record(context.transaction_metrics.take_pages_read() as f64);
@@ -261,9 +249,6 @@ impl Database {
     }
 
     pub fn update_metrics_rw(&self, context: &TransactionContext) {
-        if !self.cfg.lock().metrics_collector.database_metrics {
-            return;
-        }
         self.metrics
             .rw_transaction_pages_read
             .record(context.transaction_metrics.take_pages_read() as f64);
