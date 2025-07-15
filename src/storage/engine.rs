@@ -4031,17 +4031,17 @@ mod tests {
                 1..100
             )
         ) {
-            let (storage_engine, mut context, ) = create_test_engine(10_000);
+            let (storage_engine, mut context) = create_test_engine(10_000);
 
             for (address, account) in &accounts {
                 storage_engine
-                    .set_values( &mut context, vec![(AddressPath::for_address(*address).into(), Some(account.clone().into()))].as_mut())
+                    .set_values(&mut context, vec![(AddressPath::for_address(*address).into(), Some(account.clone().into()))].as_mut())
                     .unwrap();
             }
 
             for (address, account) in accounts {
                 let read_account = storage_engine
-                    .get_account( &mut context, AddressPath::for_address(address))
+                    .get_account(&mut context, AddressPath::for_address(address))
                     .unwrap();
                 assert_eq!(read_account, Some(Account::new(account.nonce, account.balance, EMPTY_ROOT_HASH, account.code_hash)));
             }
@@ -4057,7 +4057,7 @@ mod tests {
                 1..100
             ),
         ) {
-            let (storage_engine, mut context, ) = create_test_engine(10_000);
+            let (storage_engine, mut context) = create_test_engine(10_000);
 
             let mut changes = vec![];
             for (address, account, storage) in &accounts {
@@ -4068,12 +4068,12 @@ mod tests {
                 }
             }
             storage_engine
-                .set_values( &mut context, changes.as_mut())
+                .set_values(&mut context, changes.as_mut())
                 .unwrap();
 
             for (address, account, storage) in accounts {
                 let read_account = storage_engine
-                    .get_account( &mut context, AddressPath::for_address(address))
+                    .get_account(&mut context, AddressPath::for_address(address))
                     .unwrap();
                 let read_account = read_account.unwrap();
                 assert_eq!(read_account.nonce, account.nonce);
@@ -4082,7 +4082,7 @@ mod tests {
 
                 for (key, value) in storage {
                     let read_storage = storage_engine
-                        .get_storage( &mut context, StoragePath::for_address_and_slot(address, key))
+                        .get_storage(&mut context, StoragePath::for_address_and_slot(address, key))
                         .unwrap();
                     assert_eq!(read_storage, Some(value));
                 }
@@ -4096,7 +4096,7 @@ mod tests {
                 1..100
             ),
         ) {
-            let (storage_engine, mut context, ) = create_test_engine(10_000);
+            let (storage_engine, mut context) = create_test_engine(10_000);
 
             let mut revision = 0;
             loop {
@@ -4110,7 +4110,7 @@ mod tests {
                     break;
                 }
                 storage_engine
-                    .set_values( &mut context, changes.as_mut())
+                    .set_values(&mut context, changes.as_mut())
                     .unwrap();
                 revision += 1;
             }
@@ -4118,7 +4118,7 @@ mod tests {
             for (address, revisions) in &account_revisions {
                 let last_revision = revisions.last().unwrap();
                 let read_account = storage_engine
-                    .get_account( &mut context, AddressPath::for_address(*address))
+                    .get_account(&mut context, AddressPath::for_address(*address))
                     .unwrap();
                 let read_account = read_account.unwrap();
                 assert_eq!(read_account.nonce, last_revision.nonce);
