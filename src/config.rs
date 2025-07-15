@@ -1,10 +1,10 @@
+use std::os::unix::net::SocketAddr;
+
 use crate::page::Page;
 use log::LevelFilter;
 
-pub mod logger;
-
-/// Config lets you control certain aspects like cache parameters, log level, metrics
-/// collection, and concurrency. It is passed in during opening of the database.
+/// Config lets you control certain aspects like log level, metrics
+/// address, and concurrency. It is passed in during opening of the database.
 #[derive(Debug, Clone)]
 pub struct Config {
     /// The maximum number of pages that can be allocated.
@@ -15,6 +15,8 @@ pub struct Config {
     max_writers: usize,
     /// The log level for the database.
     log_level: LevelFilter,
+    /// The metrics address to export to.
+    metrics_address: Option<SocketAddr>,
 }
 
 impl Config {
@@ -42,6 +44,11 @@ impl Config {
         self
     }
 
+    pub fn with_metrics_address(mut self, metrics_address: SocketAddr) -> Self {
+        self.metrics_address = Some(metrics_address);
+        self
+    }
+
     // Getters
     pub const fn max_pages(&self) -> u32 {
         self.max_pages
@@ -58,6 +65,10 @@ impl Config {
     pub const fn log_level(&self) -> LevelFilter {
         self.log_level
     }
+
+    pub fn metrics_address(&self) -> Option<SocketAddr> {
+        self.metrics_address.clone()
+    }
 }
 
 impl Default for Config {
@@ -70,6 +81,7 @@ impl Default for Config {
             // Currently, we expose at most 1 writer at a given time.
             max_writers: 1,
             log_level: LevelFilter::Info,
+            metrics_address: None,
         }
     }
 }
