@@ -23,6 +23,7 @@ pub mod pointer;
 pub mod snapshot;
 pub mod storage;
 pub mod transaction;
+pub mod cache;
 
 pub use database::Database;
 pub use page::PageManager;
