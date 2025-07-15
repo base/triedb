@@ -9,6 +9,8 @@ use log::LevelFilter;
 pub struct Config {
     /// The maximum number of pages that can be allocated.
     max_pages: u32,
+    /// The maximum number of entries for a single snapshot cache.
+    max_cache_size: usize,
     /// The limit on total number of concurrent transactions.
     max_concurrent_transactions: usize,
     /// The limit on number of threads in the writer's internal thread pool.
@@ -21,11 +23,13 @@ pub struct Config {
 
 impl Config {
     // Setters
-    /// Sets the maximum number of pages that can be allocated to this file.
-    ///
-    /// The default is [`PageId::MAX`].
     pub fn with_max_pages(mut self, max_pages: u32) -> Self {
         self.max_pages = max_pages;
+        self
+    }
+
+    pub fn with_max_cache_size(mut self, max_cache_size: usize) -> Self {
+        self.max_cache_size = max_cache_size;
         self
     }
 
@@ -76,6 +80,7 @@ impl Default for Config {
         Self {
             // Let user outside of database to set this
             max_pages: Page::MAX_COUNT,
+            max_cache_size: 10,
             // This would default to an unlimited number (always at most 1 writer)
             max_concurrent_transactions: usize::MAX,
             // Currently, we expose at most 1 writer at a given time.
