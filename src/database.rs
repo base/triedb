@@ -1,6 +1,7 @@
 use crate::{
-    config::{logger::Logger, Config},
+    config::Config,
     context::TransactionContext,
+    logger::Logger,
     meta::{MetadataManager, OpenMetadataError},
     metrics::DatabaseMetrics,
     page::{PageError, PageId, PageManager},

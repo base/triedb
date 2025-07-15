@@ -14,6 +14,7 @@ pub mod config;
 pub mod context;
 pub mod database;
 pub mod location;
+pub mod logger;
 pub mod meta;
 pub mod metrics;
 pub mod node;
