@@ -1,5 +1,4 @@
 use crate::{
-    config::Config,
     context::TransactionContext,
     meta::{MetadataManager, OpenMetadataError},
     metrics::DatabaseMetrics,

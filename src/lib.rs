@@ -10,7 +10,6 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod account;
-pub mod config;
 pub mod context;
 pub mod database;
 pub mod executor;
@@ -25,6 +24,5 @@ pub mod snapshot;
 pub mod storage;
 pub mod transaction;
 
-pub use config::Config;
 pub use database::Database;
 pub use page::PageManager;
