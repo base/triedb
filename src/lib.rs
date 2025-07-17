@@ -10,6 +10,7 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod account;
+pub mod cache;
 pub mod context;
 pub mod database;
 pub mod executor;
