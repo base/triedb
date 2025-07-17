@@ -1,5 +1,4 @@
 use crate::{
-    config::Config,
     context::TransactionContext,
     meta::{MetadataManager, OpenMetadataError},
     metrics::DatabaseMetrics,
@@ -29,7 +28,7 @@ pub struct DatabaseOptions {
     create_new: bool,
     wipe: bool,
     meta_path: Option<PathBuf>,
-    cfg: Config,
+    max_pages: u32,
 }
 
 #[derive(Debug)]
@@ -80,9 +79,9 @@ impl DatabaseOptions {
         self
     }
 
-    /// Sets the config for the database.
-    pub fn cfg(&mut self, cfg: Config) -> &mut Self {
-        self.cfg = cfg;
+    /// Sets the maximum number of pages that can be allocated.
+    pub fn max_pages(&mut self, max_pages: u32) -> &mut Self {
+        self.max_pages = max_pages;
         self
     }
 

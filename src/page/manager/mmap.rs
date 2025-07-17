@@ -271,7 +271,6 @@ mod tests {
 
     #[test]
     fn test_allocate_get() {
-        // Let user outside of database to set this
         let manager = PageManager::options().max_pages(10).open_temp_file().unwrap();
 
         for i in 1..=10 {
