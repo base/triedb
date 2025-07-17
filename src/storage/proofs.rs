@@ -328,7 +328,7 @@ mod tests {
     use alloy_trie::{proof::verify_proof, TrieAccount, KECCAK_EMPTY};
 
     use super::*;
-    use crate::storage::test_utils::{create_test_account, create_test_cache, create_test_engine};
+    use crate::storage::test_utils::{create_test_account, create_test_engine};
 
     fn verify_account_proof(proof: &AccountProof, root: B256) {
         let expected = Some(encode(TrieAccount {
@@ -358,7 +358,6 @@ mod tests {
     #[test]
     fn test_get_nonexistent_proof() {
         let (storage_engine, mut context) = create_test_engine(2000);
-        let cache = create_test_cache();
 
         // the account and storage slot are not present in the trie
         let address = address!("0x0000000000000000000000000000000000000001");
@@ -378,7 +377,6 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
-                &cache,
                 vec![(path.clone().into(), Some(account.clone().into()))].as_mut(),
             )
             .unwrap();
@@ -397,7 +395,6 @@ mod tests {
     #[test]
     fn test_get_proof() {
         let (storage_engine, mut context) = create_test_engine(2000);
-        let cache = create_test_cache();
 
         // 1. insert a single account
         let address = address!("0x0000000000000000000000000000000000000001");
@@ -407,7 +404,6 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
-                &cache,
                 vec![(path.clone().into(), Some(account.clone().into()))].as_mut(),
             )
             .unwrap();
@@ -430,11 +426,7 @@ mod tests {
         let account2 = create_test_account(2, 2);
 
         storage_engine
-            .set_values(
-                &mut context,
-                &cache,
-                vec![(path2.clone().into(), Some(account2.into()))].as_mut(),
-            )
+            .set_values(&mut context, vec![(path2.clone().into(), Some(account2.into()))].as_mut())
             .unwrap();
 
         let proof = storage_engine.get_account_with_proof(&context, path.clone()).unwrap().unwrap();
@@ -461,7 +453,6 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
-                &cache,
                 vec![(storage_path.clone().into(), Some(TrieValue::from(storage_value)))].as_mut(),
             )
             .unwrap();

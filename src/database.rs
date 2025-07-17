@@ -19,7 +19,6 @@ use std::{
 pub struct Database {
     pub(crate) storage_engine: StorageEngine,
     pub(crate) transaction_manager: Mutex<TransactionManager>,
-    pub(crate) contract_account_loc_cache: CacheManager,
     metrics: DatabaseMetrics,
 }
 
@@ -152,7 +151,6 @@ impl Database {
         Self {
             storage_engine,
             transaction_manager: Mutex::new(TransactionManager::new()),
-            contract_account_loc_cache: CacheManager::new(NonZeroUsize::new(1000).unwrap()),
             metrics: DatabaseMetrics::default(),
         }
     }
