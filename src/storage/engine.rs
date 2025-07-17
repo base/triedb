@@ -1,5 +1,6 @@
 use crate::{
     account::Account,
+    cache::CacheManager,
     context::TransactionContext,
     location::Location,
     meta::{MetadataManager, OrphanPage},
@@ -134,6 +135,7 @@ impl StorageEngine {
     pub fn get_account(
         &self,
         context: &mut TransactionContext,
+        cache: &CacheManager,
         address_path: AddressPath,
     ) -> Result<Option<Account>, Error> {
         match context.root_node_page_id {
@@ -143,7 +145,7 @@ impl StorageEngine {
                 let slotted_page = SlottedPage::try_from(page)?;
                 let path: Nibbles = address_path.into();
 
-                match self.get_value_from_page(context, &path, 0, slotted_page, 0)? {
+                match self.get_value_from_page(context, cache, &path, 0, slotted_page, 0)? {
                     Some(TrieValue::Account(account)) => Ok(Some(account)),
                     _ => Ok(None),
                 }
@@ -156,6 +158,7 @@ impl StorageEngine {
     pub fn get_storage(
         &self,
         context: &mut TransactionContext,
+        cache: &CacheManager,
         storage_path: StoragePath,
     ) -> Result<Option<StorageValue>, Error> {
         let root_node_page_id = match context.root_node_page_id {
@@ -167,9 +170,11 @@ impl StorageEngine {
 
         // check the cache
         let nibbles = storage_path.get_address().to_nibbles();
-        let cache_location = context.contract_account_loc_cache.get(nibbles);
+        let cache_reader = cache.read();
+        let cache_location = cache_reader.get(context.snapshot_id, nibbles.clone());
         let (slotted_page, page_index, path_offset) = match cache_location {
             Some((page_id, page_index)) => {
+                let (page_id, page_index) = (*page_id, *page_index);
                 context.transaction_metrics.inc_cache_storage_read_hit();
 
                 let path_offset = storage_path.get_slot_offset();
@@ -201,9 +206,11 @@ impl StorageEngine {
                 (slotted_page, 0, 0)
             }
         };
+        drop(cache_reader); // Release the cache reader
 
         match self.get_value_from_page(
             context,
+            cache,
             &original_path,
             path_offset,
             slotted_page,
@@ -219,6 +226,7 @@ impl StorageEngine {
     fn get_value_from_page(
         &self,
         context: &mut TransactionContext,
+        cache: &CacheManager,
         original_path_slice: &[u8],
         path_offset: usize,
         slotted_page: SlottedPage<'_>,
@@ -241,9 +249,13 @@ impl StorageEngine {
                     original_path_slice.len() == ADDRESS_PATH_LENGTH
                 {
                     let original_path = Nibbles::from_nibbles_unchecked(original_path_slice);
-                    context
-                        .contract_account_loc_cache
-                        .insert(&original_path, (slotted_page.id(), page_index));
+                    let mut cache_writer = cache.write();
+                    cache_writer.insert(
+                        context.snapshot_id,
+                        original_path,
+                        (slotted_page.id(), page_index),
+                    );
+                    cache_writer.commit();
                 }
             }
 
@@ -267,6 +279,7 @@ impl StorageEngine {
                 if child_location.cell_index().is_some() {
                     self.get_value_from_page(
                         context,
+                        cache,
                         original_path_slice,
                         new_path_offset,
                         slotted_page,
@@ -278,6 +291,7 @@ impl StorageEngine {
                     let child_slotted_page = SlottedPage::try_from(child_page)?;
                     self.get_value_from_page(
                         context,
+                        cache,
                         original_path_slice,
                         new_path_offset,
                         child_slotted_page,
@@ -292,6 +306,7 @@ impl StorageEngine {
     pub fn set_values(
         &self,
         context: &mut TransactionContext,
+        cache: &CacheManager,
         mut changes: &mut [(Nibbles, Option<TrieValue>)],
     ) -> Result<(), Error> {
         changes.sort_by(|a, b| a.0.cmp(&b.0));
@@ -311,12 +326,14 @@ impl StorageEngine {
             changes = remaining_changes;
         }
         // invalidate the cache
+        let mut cache_writer = cache.write();
         changes.iter().for_each(|(path, _)| {
             if path.len() == STORAGE_PATH_LENGTH {
                 let address_path = AddressPath::new(path.slice(0..ADDRESS_PATH_LENGTH));
-                context.contract_account_loc_cache.remove(address_path.to_nibbles());
+                cache_writer.remove(context.snapshot_id, address_path.to_nibbles().clone());
             }
         });
+        cache_writer.commit();
 
         let pointer_change =
             self.set_values_in_page(context, changes, 0, context.root_node_page_id.unwrap())?;
@@ -1961,7 +1978,8 @@ mod tests {
         storage::{
             engine::PageError,
             test_utils::{
-                assert_metrics, create_test_account, create_test_engine, random_test_account,
+                assert_metrics, create_test_account, create_test_cache, create_test_engine,
+                random_test_account,
             },
         },
     };
@@ -2069,12 +2087,14 @@ mod tests {
     #[test]
     fn test_set_get_account() {
         let (storage_engine, mut context) = create_test_engine(300);
+        let cache = create_test_cache();
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(AddressPath::for_address(address).into(), Some(account.clone().into()))]
                     .as_mut(),
             )
@@ -2099,12 +2119,14 @@ mod tests {
         for (address, account) in &test_cases {
             let path = AddressPath::for_address(*address);
 
-            let read_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
+            let read_account =
+                storage_engine.get_account(&mut context, &cache, path.clone()).unwrap();
             assert_eq!(read_account, None);
 
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     vec![(path.into(), Some(account.clone().into()))].as_mut(),
                 )
                 .unwrap();
@@ -2113,7 +2135,7 @@ mod tests {
         // Verify all accounts exist after insertion
         for (address, account) in test_cases {
             let read_account = storage_engine
-                .get_account(&mut context, AddressPath::for_address(address))
+                .get_account(&mut context, &cache, AddressPath::for_address(address))
                 .unwrap();
             assert_eq!(read_account, Some(account));
         }
@@ -2122,6 +2144,7 @@ mod tests {
     #[test]
     fn test_simple_trie_state_root_1() {
         let (storage_engine, mut context) = create_test_engine(300);
+        let cache = create_test_cache();
 
         let address1 = address!("0x8e64566b5eb8f595f7eb2b8d302f2e5613cb8bae");
         let account1 = create_test_account(1_000_000_000_000_000_000u64, 0);
@@ -2134,6 +2157,7 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![
                     (path1.into(), Some(account1.clone().into())),
                     (path2.into(), Some(account2.clone().into())),
@@ -2152,6 +2176,7 @@ mod tests {
     #[test]
     fn test_simple_trie_state_root_2() {
         let (storage_engine, mut context) = create_test_engine(300);
+        let cache = create_test_cache();
 
         let address1 = address!("0x000f3df6d732807ef1319fb7b8bb8522d0beac02");
         let account1 = Account::new(1, U256::from(0), EMPTY_ROOT_HASH, keccak256(hex!("0x3373fffffffffffffffffffffffffffffffffffffffe14604d57602036146024575f5ffd5b5f35801560495762001fff810690815414603c575f5ffd5b62001fff01545f5260205ff35b5f5ffd5b62001fff42064281555f359062001fff015500")));
@@ -2169,6 +2194,7 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![
                     (path1.into(), Some(account1.into())),
                     (path2.into(), Some(account2.into())),
@@ -2229,7 +2255,7 @@ mod tests {
             Some(TrieValue::Account(account3_updated)),
         ));
 
-        storage_engine.set_values(&mut context, changes.as_mut()).unwrap();
+        storage_engine.set_values(&mut context, &cache, changes.as_mut()).unwrap();
         assert_metrics(&context, 2, 1, 0, 0);
 
         assert_eq!(
@@ -2258,6 +2284,7 @@ mod tests {
         }
 
         let (storage_engine, mut context) = create_test_engine(30000);
+        let cache = create_test_cache();
 
         // insert accounts and storage in random order
         accounts.shuffle(&mut rng);
@@ -2275,7 +2302,7 @@ mod tests {
                 ));
             }
         }
-        storage_engine.set_values(&mut context, &mut changes).unwrap();
+        storage_engine.set_values(&mut context, &cache, &mut changes).unwrap();
 
         // commit the changes
         storage_engine.commit(&context).unwrap();
@@ -2287,14 +2314,18 @@ mod tests {
         // check that all of the values are correct
         for (address, account, storage) in accounts.clone() {
             let read_account = storage_engine
-                .get_account(&mut context, AddressPath::for_address(address))
+                .get_account(&mut context, &cache, AddressPath::for_address(address))
                 .unwrap()
                 .unwrap();
             assert_eq!(read_account.balance, account.balance);
 
             for (slot, value) in storage {
                 let read_value = storage_engine
-                    .get_storage(&mut context, StoragePath::for_address_and_slot(address, slot))
+                    .get_storage(
+                        &mut context,
+                        &cache,
+                        StoragePath::for_address_and_slot(address, slot),
+                    )
                     .unwrap();
                 assert_eq!(read_value, Some(value));
             }
@@ -2303,6 +2334,7 @@ mod tests {
         }
 
         let (storage_engine, mut context) = create_test_engine(30000);
+        let cache = create_test_cache();
 
         // insert accounts in a different random order, but only after inserting different values
         // first
@@ -2311,6 +2343,7 @@ mod tests {
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     vec![(
                         AddressPath::for_address(address).into(),
                         Some(random_test_account(&mut rng).into()),
@@ -2324,6 +2357,7 @@ mod tests {
                 storage_engine
                     .set_values(
                         &mut context,
+                        &cache,
                         vec![(
                             StoragePath::for_address_and_slot(address, slot).into(),
                             Some(StorageValue::from(rng.next_u64()).into()),
@@ -2339,6 +2373,7 @@ mod tests {
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     vec![(AddressPath::for_address(address).into(), Some(account.into()))].as_mut(),
                 )
                 .unwrap();
@@ -2348,6 +2383,7 @@ mod tests {
                 storage_engine
                     .set_values(
                         &mut context,
+                        &cache,
                         vec![(
                             StoragePath::for_address_and_slot(address, slot).into(),
                             Some(value.into()),
@@ -2364,7 +2400,7 @@ mod tests {
         // check that all of the values are correct
         for (address, account, storage) in accounts.clone() {
             let read_account = storage_engine
-                .get_account(&mut context, AddressPath::for_address(address))
+                .get_account(&mut context, &cache, AddressPath::for_address(address))
                 .unwrap()
                 .unwrap();
             assert_eq!(read_account.balance, account.balance);
@@ -2372,7 +2408,11 @@ mod tests {
             assert_eq!(read_account.storage_root, expected_account_storage_roots[&address]);
             for (slot, value) in storage {
                 let read_value = storage_engine
-                    .get_storage(&mut context, StoragePath::for_address_and_slot(address, slot))
+                    .get_storage(
+                        &mut context,
+                        &cache,
+                        StoragePath::for_address_and_slot(address, slot),
+                    )
                     .unwrap();
                 assert_eq!(read_value, Some(value));
             }
@@ -2385,6 +2425,7 @@ mod tests {
     #[test]
     fn test_set_get_account_common_prefix() {
         let (storage_engine, mut context) = create_test_engine(300);
+        let cache = create_test_cache();
 
         let test_accounts = vec![
             (hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001"), create_test_account(100, 1)),
@@ -2400,6 +2441,7 @@ mod tests {
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     vec![(path.into(), Some(account.clone().into()))].as_mut(),
                 )
                 .unwrap();
@@ -2408,7 +2450,7 @@ mod tests {
         // Verify all accounts exist
         for (nibbles, account) in test_accounts {
             let path = AddressPath::new(Nibbles::from_nibbles(nibbles));
-            let read_account = storage_engine.get_account(&mut context, path).unwrap();
+            let read_account = storage_engine.get_account(&mut context, &cache, path).unwrap();
             assert_eq!(read_account, Some(account));
         }
     }
@@ -2416,6 +2458,7 @@ mod tests {
     #[test]
     fn test_split_page() {
         let (storage_engine, mut context) = create_test_engine(300);
+        let cache = create_test_cache();
 
         let test_accounts = vec![
             (hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001"), create_test_account(100, 1)),
@@ -2431,6 +2474,7 @@ mod tests {
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     vec![(path.into(), Some(account.clone().into()))].as_mut(),
                 )
                 .unwrap();
@@ -2445,7 +2489,7 @@ mod tests {
         // Verify all accounts still exist after split
         for (nibbles, account) in test_accounts {
             let path = AddressPath::new(Nibbles::from_nibbles(nibbles));
-            let read_account = storage_engine.get_account(&mut context, path).unwrap();
+            let read_account = storage_engine.get_account(&mut context, &cache, path).unwrap();
             assert_eq!(read_account, Some(account));
         }
     }
@@ -2453,6 +2497,7 @@ mod tests {
     #[test]
     fn test_insert_get_1000_accounts() {
         let (storage_engine, mut context) = create_test_engine(5000);
+        let cache = create_test_cache();
 
         for i in 0..1000 {
             let path = address_path_for_idx(i);
@@ -2460,6 +2505,7 @@ mod tests {
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     vec![(path.clone().into(), Some(account.clone().into()))].as_mut(),
                 )
                 .unwrap();
@@ -2467,7 +2513,7 @@ mod tests {
 
         for i in 0..1000 {
             let path = address_path_for_idx(i);
-            let account = storage_engine.get_account(&mut context, path.clone()).unwrap();
+            let account = storage_engine.get_account(&mut context, &cache, path.clone()).unwrap();
             assert_eq!(account, Some(create_test_account(i, i)));
         }
     }
@@ -2476,6 +2522,7 @@ mod tests {
     #[should_panic]
     fn test_set_storage_slot_with_no_account_panics() {
         let (storage_engine, mut context) = create_test_engine(300);
+        let cache = create_test_cache();
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
 
         let storage_key =
@@ -2490,6 +2537,7 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(storage_path.into(), Some(storage_value.into()))].as_mut(),
             )
             .unwrap();
@@ -2498,6 +2546,7 @@ mod tests {
     #[test]
     fn test_get_account_storage_cache() {
         let (storage_engine, mut context) = create_test_engine(300);
+        let cache = create_test_cache();
         {
             // An account with no storage should not be cached
             let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96555");
@@ -2507,14 +2556,19 @@ mod tests {
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     vec![(address_path.clone().into(), Some(account.clone().into()))].as_mut(),
                 )
                 .unwrap();
 
-            let read_account =
-                storage_engine.get_account(&mut context, address_path.clone()).unwrap().unwrap();
+            let read_account = storage_engine
+                .get_account(&mut context, &cache, address_path.clone())
+                .unwrap()
+                .unwrap();
             assert_eq!(read_account, account);
-            let cached_location = context.contract_account_loc_cache.get(address_path.to_nibbles());
+            let cache_reader = cache.read();
+            let cached_location =
+                cache_reader.get(context.snapshot_id, address_path.to_nibbles().clone());
             assert!(cached_location.is_none());
         }
         {
@@ -2526,6 +2580,7 @@ mod tests {
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     vec![(address_path.clone().into(), Some(account.clone().into()))].as_mut(),
                 )
                 .unwrap();
@@ -2551,6 +2606,7 @@ mod tests {
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     test_cases
                         .iter()
                         .map(|(key, value)| {
@@ -2564,7 +2620,7 @@ mod tests {
                 .unwrap();
 
             let read_account = storage_engine
-                .get_account(&mut context, AddressPath::for_address(address))
+                .get_account(&mut context, &cache, AddressPath::for_address(address))
                 .unwrap()
                 .unwrap();
             assert_eq!(read_account.balance, account.balance);
@@ -2572,16 +2628,17 @@ mod tests {
             assert_ne!(read_account.storage_root, EMPTY_ROOT_HASH);
 
             // the account should be cached
+            let cache_reader = cache.read();
             let account_cache_location =
-                context.contract_account_loc_cache.get(address_path.to_nibbles()).unwrap();
-            assert_eq!(account_cache_location.0, 1);
+                cache_reader.get(context.snapshot_id, address_path.to_nibbles().clone()).unwrap();
+            assert_eq!(account_cache_location.0, PageId::new(1).unwrap());
             assert_eq!(account_cache_location.1, 2); // 0 is the branch page, 1 is the first EOA
                                                      // account, 2 is the this contract account
 
             // getting the storage slot should hit the cache
             let storage_path = StoragePath::for_address_and_slot(address, test_cases[0].0);
             let read_storage_slot =
-                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, &cache, storage_path.clone()).unwrap();
             assert_eq!(
                 read_storage_slot,
                 Some(StorageValue::from_be_slice(
@@ -2600,6 +2657,7 @@ mod tests {
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     vec![(address_path.clone().into(), Some(account.clone().into()))].as_mut(),
                 )
                 .unwrap();
@@ -2617,6 +2675,7 @@ mod tests {
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     test_cases
                         .iter()
                         .map(|(key, value)| {
@@ -2630,7 +2689,7 @@ mod tests {
                 .unwrap();
 
             storage_engine
-                .get_account(&mut context, AddressPath::for_address(address))
+                .get_account(&mut context, &cache, AddressPath::for_address(address))
                 .unwrap()
                 .unwrap();
 
@@ -2647,6 +2706,7 @@ mod tests {
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     test_cases
                         .iter()
                         .map(|(key, value)| {
@@ -2660,8 +2720,9 @@ mod tests {
                 .unwrap();
 
             // the cache should be invalidated
+            let cache_reader = cache.read();
             let account_cache_location =
-                context.contract_account_loc_cache.get(address_path.to_nibbles());
+                cache_reader.get(context.snapshot_id, address_path.to_nibbles().clone());
             assert!(account_cache_location.is_none());
         }
     }
@@ -2669,12 +2730,14 @@ mod tests {
     #[test]
     fn test_set_get_account_storage_slots() {
         let (storage_engine, mut context) = create_test_engine(300);
+        let cache = create_test_cache();
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(AddressPath::for_address(address).into(), Some(account.clone().into()))]
                     .as_mut(),
             )
@@ -2708,12 +2771,13 @@ mod tests {
         for (storage_key, _) in &test_cases {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
             let read_storage_slot =
-                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, &cache, storage_path.clone()).unwrap();
             assert_eq!(read_storage_slot, None);
         }
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 test_cases
                     .iter()
                     .map(|(key, value)| {
@@ -2729,7 +2793,8 @@ mod tests {
         // Verify all storage slots exist after insertion
         for (storage_key, storage_value) in &test_cases {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
-            let read_storage_slot = storage_engine.get_storage(&mut context, storage_path).unwrap();
+            let read_storage_slot =
+                storage_engine.get_storage(&mut context, &cache, storage_path).unwrap();
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
             assert_eq!(read_storage_slot, Some(storage_value));
         }
@@ -2738,12 +2803,14 @@ mod tests {
     #[test]
     fn test_set_get_account_storage_roots() {
         let (storage_engine, mut context) = create_test_engine(300);
+        let cache = create_test_cache();
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(AddressPath::for_address(address).into(), Some(account.clone().into()))]
                     .as_mut(),
             )
@@ -2778,7 +2845,7 @@ mod tests {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
             let read_storage_slot =
-                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, &cache, storage_path.clone()).unwrap();
             assert_eq!(read_storage_slot, None);
 
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
@@ -2786,6 +2853,7 @@ mod tests {
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     vec![(storage_path.into(), Some(storage_value.into()))].as_mut(),
                 )
                 .unwrap();
@@ -2798,7 +2866,7 @@ mod tests {
         }));
 
         let account = storage_engine
-            .get_account(&mut context, AddressPath::for_address(address))
+            .get_account(&mut context, &cache, AddressPath::for_address(address))
             .unwrap()
             .unwrap();
 
@@ -2808,6 +2876,7 @@ mod tests {
     #[test]
     fn test_set_get_many_accounts_storage_roots() {
         let (storage_engine, mut context) = create_test_engine(2000);
+        let cache = create_test_cache();
 
         for i in 0..100 {
             let address =
@@ -2817,6 +2886,7 @@ mod tests {
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     vec![(path.into(), Some(account.clone().into()))].as_mut(),
                 )
                 .unwrap();
@@ -2835,6 +2905,7 @@ mod tests {
                 storage_engine
                     .set_values(
                         &mut context,
+                        &cache,
                         vec![(storage_path.clone().into(), Some(storage_slot_value.into()))]
                             .as_mut(),
                     )
@@ -2849,7 +2920,7 @@ mod tests {
             let expected_root = storage_root_unsorted(keys_values.into_iter());
 
             // check the storage root of the account
-            let account = storage_engine.get_account(&mut context, path).unwrap().unwrap();
+            let account = storage_engine.get_account(&mut context, &cache, path).unwrap().unwrap();
 
             assert_eq!(account.storage_root, expected_root);
         }
@@ -2859,6 +2930,7 @@ mod tests {
     fn test_split_page_stress() {
         // Create a storage engine with limited pages to force splits
         let (storage_engine, mut context) = create_test_engine(5000);
+        let cache = create_test_cache();
 
         // Create a large number of accounts with different patterns to stress the trie
 
@@ -2938,6 +3010,7 @@ mod tests {
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     vec![(path.clone().into(), Some(account.clone().into()))].as_mut(),
                 )
                 .unwrap();
@@ -2945,7 +3018,8 @@ mod tests {
 
         // Verify all accounts exist with correct values
         for (path, expected_account) in &accounts {
-            let retrieved_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
+            let retrieved_account =
+                storage_engine.get_account(&mut context, &cache, path.clone()).unwrap();
             assert_eq!(
                 retrieved_account,
                 Some(expected_account.clone()),
@@ -2972,7 +3046,8 @@ mod tests {
 
         // Verify all accounts still exist with correct values after splits
         for (path, expected_account) in &accounts {
-            let retrieved_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
+            let retrieved_account =
+                storage_engine.get_account(&mut context, &cache, path.clone()).unwrap();
             assert_eq!(
                 retrieved_account,
                 Some(expected_account.clone()),
@@ -3002,6 +3077,7 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 additional_accounts
                     .iter()
                     .map(|(path, account)| (path.clone().into(), Some(account.clone().into())))
@@ -3012,7 +3088,8 @@ mod tests {
 
         // Verify all original accounts still exist
         for (path, expected_account) in &accounts {
-            let retrieved_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
+            let retrieved_account =
+                storage_engine.get_account(&mut context, &cache, path.clone()).unwrap();
             assert_eq!(
                 retrieved_account,
                 Some(expected_account.clone()),
@@ -3022,7 +3099,8 @@ mod tests {
 
         // Verify all new accounts exist
         for (path, expected_account) in &additional_accounts {
-            let retrieved_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
+            let retrieved_account =
+                storage_engine.get_account(&mut context, &cache, path.clone()).unwrap();
             assert_eq!(retrieved_account, Some(expected_account.clone()), "New account not found");
         }
         // Verify the pages split metric
@@ -3035,6 +3113,7 @@ mod tests {
 
         // Create a storage engine
         let (storage_engine, mut context) = create_test_engine(2000);
+        let cache = create_test_cache();
 
         // Use a seeded RNG for reproducibility
         let mut rng = StdRng::seed_from_u64(42);
@@ -3059,6 +3138,7 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 accounts
                     .clone()
                     .into_iter()
@@ -3070,7 +3150,8 @@ mod tests {
 
         // Verify all accounts exist with correct values
         for (path, expected_account) in &accounts {
-            let retrieved_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
+            let retrieved_account =
+                storage_engine.get_account(&mut context, &cache, path.clone()).unwrap();
             assert_eq!(retrieved_account, Some(expected_account.clone()));
         }
 
@@ -3106,7 +3187,8 @@ mod tests {
 
         // Verify all accounts still exist with correct values after splits
         for (path, expected_account) in &accounts {
-            let retrieved_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
+            let retrieved_account =
+                storage_engine.get_account(&mut context, &cache, path.clone()).unwrap();
             assert_eq!(
                 retrieved_account,
                 Some(expected_account.clone()),
@@ -3135,6 +3217,7 @@ mod tests {
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     vec![(path.clone().into(), Some(new_account.clone().into()))].as_mut(),
                 )
                 .unwrap();
@@ -3145,7 +3228,8 @@ mod tests {
 
         // Verify all accounts have correct values after updates
         for (path, expected_account) in &accounts {
-            let retrieved_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
+            let retrieved_account =
+                storage_engine.get_account(&mut context, &cache, path.clone()).unwrap();
             assert_eq!(
                 retrieved_account,
                 Some(expected_account.clone()),
@@ -3157,12 +3241,14 @@ mod tests {
     #[test]
     fn test_delete_account() {
         let (storage_engine, mut context) = create_test_engine(300);
+        let cache = create_test_cache();
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(AddressPath::for_address(address).into(), Some(account.clone().into()))]
                     .as_mut(),
             )
@@ -3170,8 +3256,9 @@ mod tests {
         assert_metrics(&context, 0, 1, 0, 0);
 
         // Check that the account exists
-        let read_account =
-            storage_engine.get_account(&mut context, AddressPath::for_address(address)).unwrap();
+        let read_account = storage_engine
+            .get_account(&mut context, &cache, AddressPath::for_address(address))
+            .unwrap();
         assert_eq!(read_account, Some(account.clone()));
 
         // Reset the context metrics
@@ -3179,26 +3266,30 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(AddressPath::for_address(address).into(), None)].as_mut(),
             )
             .unwrap();
         assert_metrics(&context, 1, 0, 0, 0);
 
         // Verify the account is deleted
-        let read_account =
-            storage_engine.get_account(&mut context, AddressPath::for_address(address)).unwrap();
+        let read_account = storage_engine
+            .get_account(&mut context, &cache, AddressPath::for_address(address))
+            .unwrap();
         assert_eq!(read_account, None);
     }
 
     #[test]
     fn test_delete_accounts() {
         let (storage_engine, mut context) = create_test_engine(300);
+        let cache = create_test_cache();
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(AddressPath::for_address(address).into(), Some(account.clone().into()))]
                     .as_mut(),
             )
@@ -3222,12 +3313,14 @@ mod tests {
         for (address, account) in &test_cases {
             let path = AddressPath::for_address(*address);
 
-            let read_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
+            let read_account =
+                storage_engine.get_account(&mut context, &cache, path.clone()).unwrap();
             assert_eq!(read_account, None);
 
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     vec![(path.into(), Some(account.clone().into()))].as_mut(),
                 )
                 .unwrap();
@@ -3236,7 +3329,7 @@ mod tests {
         // Verify all accounts exist after insertion
         for (address, account) in &test_cases {
             let read_account = storage_engine
-                .get_account(&mut context, AddressPath::for_address(*address))
+                .get_account(&mut context, &cache, AddressPath::for_address(*address))
                 .unwrap();
             assert_eq!(read_account, Some(account.clone()));
         }
@@ -3246,6 +3339,7 @@ mod tests {
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     vec![(AddressPath::for_address(*address).into(), None)].as_mut(),
                 )
                 .unwrap();
@@ -3254,7 +3348,7 @@ mod tests {
         // Verify that the accounts don't exist anymore
         for (address, _) in &test_cases {
             let read_account = storage_engine
-                .get_account(&mut context, AddressPath::for_address(*address))
+                .get_account(&mut context, &cache, AddressPath::for_address(*address))
                 .unwrap();
             assert_eq!(read_account, None);
         }
@@ -3263,12 +3357,14 @@ mod tests {
     #[test]
     fn test_some_delete_accounts() {
         let (storage_engine, mut context) = create_test_engine(300);
+        let cache = create_test_cache();
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(AddressPath::for_address(address).into(), Some(account.clone().into()))]
                     .as_mut(),
             )
@@ -3292,12 +3388,14 @@ mod tests {
         for (address, account) in &test_cases {
             let path = AddressPath::for_address(*address);
 
-            let read_account = storage_engine.get_account(&mut context, path.clone()).unwrap();
+            let read_account =
+                storage_engine.get_account(&mut context, &cache, path.clone()).unwrap();
             assert_eq!(read_account, None);
 
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     vec![(path.into(), Some(account.clone().into()))].as_mut(),
                 )
                 .unwrap();
@@ -3306,7 +3404,7 @@ mod tests {
         // Verify all accounts exist after insertion
         for (address, account) in &test_cases {
             let read_account = storage_engine
-                .get_account(&mut context, AddressPath::for_address(*address))
+                .get_account(&mut context, &cache, AddressPath::for_address(*address))
                 .unwrap();
             assert_eq!(read_account, Some(account.clone()));
         }
@@ -3316,6 +3414,7 @@ mod tests {
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     vec![(AddressPath::for_address(*address).into(), None)].as_mut(),
                 )
                 .unwrap();
@@ -3324,7 +3423,7 @@ mod tests {
         // Verify that the accounts don't exist anymore
         for (address, _) in &test_cases[0..2] {
             let read_account = storage_engine
-                .get_account(&mut context, AddressPath::for_address(*address))
+                .get_account(&mut context, &cache, AddressPath::for_address(*address))
                 .unwrap();
             assert_eq!(read_account, None);
         }
@@ -3332,7 +3431,7 @@ mod tests {
         // Verify that the non-deleted accounts still exist
         for (address, account) in &test_cases[2..] {
             let read_account = storage_engine
-                .get_account(&mut context, AddressPath::for_address(*address))
+                .get_account(&mut context, &cache, AddressPath::for_address(*address))
                 .unwrap();
             assert_eq!(read_account, Some(account.clone()));
         }
@@ -3341,12 +3440,14 @@ mod tests {
     #[test]
     fn test_delete_storage() {
         let (storage_engine, mut context) = create_test_engine(300);
+        let cache = create_test_cache();
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(AddressPath::for_address(address).into(), Some(account.clone().into()))]
                     .as_mut(),
             )
@@ -3381,7 +3482,7 @@ mod tests {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
             let read_storage_slot =
-                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, &cache, storage_path.clone()).unwrap();
             assert_eq!(read_storage_slot, None);
 
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
@@ -3389,6 +3490,7 @@ mod tests {
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     vec![(storage_path.into(), Some(storage_value.into()))].as_mut(),
                 )
                 .unwrap();
@@ -3401,7 +3503,7 @@ mod tests {
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             let read_storage_slot =
-                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, &cache, storage_path.clone()).unwrap();
             assert_eq!(read_storage_slot, Some(storage_value));
         }
 
@@ -3415,7 +3517,7 @@ mod tests {
             .collect();
         let expected_root = storage_root_unhashed(keys_values.clone());
         let account = storage_engine
-            .get_account(&mut context, AddressPath::for_address(address))
+            .get_account(&mut context, &cache, AddressPath::for_address(address))
             .unwrap()
             .unwrap();
 
@@ -3426,11 +3528,15 @@ mod tests {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
             storage_engine
-                .set_values(&mut context, vec![(storage_path.clone().into(), None)].as_mut())
+                .set_values(
+                    &mut context,
+                    &cache,
+                    vec![(storage_path.clone().into(), None)].as_mut(),
+                )
                 .unwrap();
 
             let read_storage_slot =
-                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, &cache, storage_path.clone()).unwrap();
 
             assert_eq!(read_storage_slot, None);
 
@@ -3438,7 +3544,7 @@ mod tests {
             keys_values.remove(0);
             let expected_root = storage_root_unhashed(keys_values.clone());
             let account = storage_engine
-                .get_account(&mut context, AddressPath::for_address(address))
+                .get_account(&mut context, &cache, AddressPath::for_address(address))
                 .unwrap()
                 .unwrap();
 
@@ -3449,12 +3555,14 @@ mod tests {
     #[test]
     fn test_delete_account_also_deletes_storage() {
         let (storage_engine, mut context) = create_test_engine(300);
+        let cache = create_test_cache();
 
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account = create_test_account(100, 1);
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(AddressPath::for_address(address).into(), Some(account.clone().into()))]
                     .as_mut(),
             )
@@ -3489,7 +3597,7 @@ mod tests {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
             let read_storage_slot =
-                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, &cache, storage_path.clone()).unwrap();
             assert_eq!(read_storage_slot, None);
 
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
@@ -3497,6 +3605,7 @@ mod tests {
             storage_engine
                 .set_values(
                     &mut context,
+                    &cache,
                     vec![(storage_path.into(), Some(storage_value.into()))].as_mut(),
                 )
                 .unwrap();
@@ -3509,7 +3618,7 @@ mod tests {
             let storage_value = StorageValue::from_be_slice(storage_value.as_slice());
 
             let read_storage_slot =
-                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, &cache, storage_path.clone()).unwrap();
             assert_eq!(read_storage_slot, Some(storage_value));
         }
 
@@ -3517,20 +3626,23 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(AddressPath::for_address(address).into(), None)].as_mut(),
             )
             .unwrap();
 
         // Verify the account no longer exists
-        let res =
-            storage_engine.get_account(&mut context, AddressPath::for_address(address)).unwrap();
+        let res = storage_engine
+            .get_account(&mut context, &cache, AddressPath::for_address(address))
+            .unwrap();
         assert_eq!(res, None);
 
         // Verify all the storage slots don't exist
         for (storage_key, _) in &test_cases {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
-            let res = storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
+            let res =
+                storage_engine.get_storage(&mut context, &cache, storage_path.clone()).unwrap();
             assert_eq!(res, None);
         }
 
@@ -3538,6 +3650,7 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(AddressPath::for_address(address).into(), Some(account.clone().into()))]
                     .as_mut(),
             )
@@ -3548,7 +3661,7 @@ mod tests {
             let storage_path = StoragePath::for_address_and_slot(address, *storage_key);
 
             let read_storage =
-                storage_engine.get_storage(&mut context, storage_path.clone()).unwrap();
+                storage_engine.get_storage(&mut context, &cache, storage_path.clone()).unwrap();
             assert_eq!(read_storage, None);
         }
     }
@@ -3556,6 +3669,7 @@ mod tests {
     #[test]
     fn test_delete_single_child_branch_on_same_page() {
         let (storage_engine, mut context) = create_test_engine(300);
+        let cache = create_test_cache();
 
         // GIVEN: a branch node with 2 children, where all the children live on the same page
         let mut account_1_nibbles = [0u8; 64];
@@ -3568,6 +3682,7 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(
                     AddressPath::new(Nibbles::from_nibbles(account_1_nibbles)).into(),
                     Some(account1.clone().into()),
@@ -3580,6 +3695,7 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(
                     AddressPath::new(Nibbles::from_nibbles(account_2_nibbles)).into(),
                     Some(account2.clone().into()),
@@ -3598,6 +3714,7 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(AddressPath::new(Nibbles::from_nibbles(account_1_nibbles)).into(), None)]
                     .as_mut(),
             )
@@ -3607,12 +3724,20 @@ mod tests {
         //
         // first verify the deleted account is gone and the remaining account exists
         let read_account1 = storage_engine
-            .get_account(&mut context, AddressPath::new(Nibbles::from_nibbles(account_1_nibbles)))
+            .get_account(
+                &mut context,
+                &cache,
+                AddressPath::new(Nibbles::from_nibbles(account_1_nibbles)),
+            )
             .unwrap();
         assert_eq!(read_account1, None);
 
         let read_account2 = storage_engine
-            .get_account(&mut context, AddressPath::new(Nibbles::from_nibbles(account_2_nibbles)))
+            .get_account(
+                &mut context,
+                &cache,
+                AddressPath::new(Nibbles::from_nibbles(account_2_nibbles)),
+            )
             .unwrap();
         assert_eq!(read_account2, Some(account2));
 
@@ -3626,6 +3751,7 @@ mod tests {
     #[test]
     fn test_delete_single_child_non_root_branch_on_different_pages() {
         let (storage_engine, mut context) = create_test_engine(300);
+        let cache = create_test_cache();
 
         // GIVEN: a non-root branch node with 2 children where both children are on a different
         // pages
@@ -3641,6 +3767,7 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(
                     AddressPath::new(Nibbles::from_nibbles(account_1_nibbles)).into(),
                     Some(account1.clone().into()),
@@ -3653,6 +3780,7 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(
                     AddressPath::new(Nibbles::from_nibbles(account_2_nibbles)).into(),
                     Some(account2.clone().into()),
@@ -3741,18 +3869,22 @@ mod tests {
         let child_1_nibbles = Nibbles::from_nibbles(child_1_full_path);
         let child_2_nibbles = Nibbles::from_nibbles(child_2_full_path);
         let read_account1 = storage_engine
-            .get_account(&mut context, AddressPath::new(child_1_nibbles.clone()))
+            .get_account(&mut context, &cache, AddressPath::new(child_1_nibbles.clone()))
             .unwrap();
         assert_eq!(read_account1, Some(test_account.clone()));
         let read_account2 = storage_engine
-            .get_account(&mut context, AddressPath::new(child_2_nibbles.clone()))
+            .get_account(&mut context, &cache, AddressPath::new(child_2_nibbles.clone()))
             .unwrap();
         assert_eq!(read_account2, Some(test_account.clone()));
 
         // WHEN: child 1 is deleted
         let child_1_path = Nibbles::from_nibbles(child_1_full_path);
         storage_engine
-            .set_values(&mut context, vec![(AddressPath::new(child_1_path).into(), None)].as_mut())
+            .set_values(
+                &mut context,
+                &cache,
+                vec![(AddressPath::new(child_1_path).into(), None)].as_mut(),
+            )
             .unwrap();
 
         // THEN: the branch node should be deleted and the root node should go to child 2 leaf at
@@ -3769,17 +3901,20 @@ mod tests {
         assert_eq!(child_2_node.prefix().clone(), Nibbles::from_nibbles(&child_2_full_path[1..]));
 
         // test that we can get child 2 and not child 1
-        let read_account2 =
-            storage_engine.get_account(&mut context, AddressPath::new(child_2_nibbles)).unwrap();
+        let read_account2 = storage_engine
+            .get_account(&mut context, &cache, AddressPath::new(child_2_nibbles))
+            .unwrap();
         assert_eq!(read_account2, Some(test_account.clone()));
-        let read_account1 =
-            storage_engine.get_account(&mut context, AddressPath::new(child_1_nibbles)).unwrap();
+        let read_account1 = storage_engine
+            .get_account(&mut context, &cache, AddressPath::new(child_1_nibbles))
+            .unwrap();
         assert_eq!(read_account1, None);
     }
 
     #[test]
     fn test_delete_single_child_root_branch_on_different_pages() {
         let (storage_engine, mut context) = create_test_engine(300);
+        let cache = create_test_cache();
 
         // GIVEN: a root branch node with 2 children where both children are on a different page
         //
@@ -3851,11 +3986,11 @@ mod tests {
         let child_1_nibbles = Nibbles::from_nibbles(child_1_full_path);
         let child_2_nibbles = Nibbles::from_nibbles(child_2_full_path);
         let read_account1 = storage_engine
-            .get_account(&mut context, AddressPath::new(child_1_nibbles.clone()))
+            .get_account(&mut context, &cache, AddressPath::new(child_1_nibbles.clone()))
             .unwrap();
         assert_eq!(read_account1, Some(test_account.clone()));
         let read_account2 = storage_engine
-            .get_account(&mut context, AddressPath::new(child_2_nibbles.clone()))
+            .get_account(&mut context, &cache, AddressPath::new(child_2_nibbles.clone()))
             .unwrap();
         assert_eq!(read_account2, Some(test_account.clone()));
 
@@ -3863,6 +3998,7 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(AddressPath::new(child_1_nibbles.clone()).into(), None)].as_mut(),
             )
             .unwrap();
@@ -3880,17 +4016,20 @@ mod tests {
         assert_eq!(root_node.prefix().clone(), child_2_nibbles);
 
         // test that we can get child 2 and not child 1
-        let read_account2 =
-            storage_engine.get_account(&mut context, AddressPath::new(child_2_nibbles)).unwrap();
+        let read_account2 = storage_engine
+            .get_account(&mut context, &cache, AddressPath::new(child_2_nibbles))
+            .unwrap();
         assert_eq!(read_account2, Some(test_account.clone()));
-        let read_account1 =
-            storage_engine.get_account(&mut context, AddressPath::new(child_1_nibbles)).unwrap();
+        let read_account1 = storage_engine
+            .get_account(&mut context, &cache, AddressPath::new(child_1_nibbles))
+            .unwrap();
         assert_eq!(read_account1, None);
     }
 
     #[test]
     fn test_delete_non_existent_value_doesnt_change_trie_structure() {
         let (storage_engine, mut context) = create_test_engine(300);
+        let cache = create_test_cache();
 
         // GIVEN: a trie with a single account
         let address_nibbles = Nibbles::unpack(hex!(
@@ -3900,6 +4039,7 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(AddressPath::new(address_nibbles).into(), Some(account.clone().into()))]
                     .as_mut(),
             )
@@ -3916,6 +4056,7 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(AddressPath::new(address_nibbles).into(), None)].as_mut(),
             )
             .unwrap();
@@ -3933,6 +4074,7 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(AddressPath::for_address(address).into(), Some(account.clone().into()))]
                     .as_mut(),
             )
@@ -3949,6 +4091,7 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(AddressPath::for_address(address).into(), None)].as_mut(),
             )
             .unwrap();
@@ -3963,6 +4106,7 @@ mod tests {
     #[test]
     fn test_leaf_update_and_non_existent_delete_works() {
         let (storage_engine, mut context) = create_test_engine(300);
+        let cache = create_test_cache();
 
         // GIVEN: a trie with a single account
         let address_nibbles_original_account = Nibbles::unpack(hex!(
@@ -3972,6 +4116,7 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![(
                     AddressPath::new(address_nibbles_original_account.clone()).into(),
                     Some(account.clone().into()),
@@ -3989,6 +4134,7 @@ mod tests {
         storage_engine
             .set_values(
                 &mut context,
+                &cache,
                 vec![
                     (
                         AddressPath::new(address_nibbles_original_account.clone()).into(),
@@ -4002,7 +4148,7 @@ mod tests {
 
         // THEN: the updated account should be updated
         let account_in_database = storage_engine
-            .get_account(&mut context, AddressPath::new(address_nibbles_original_account))
+            .get_account(&mut context, &cache, AddressPath::new(address_nibbles_original_account))
             .unwrap()
             .unwrap();
         assert_eq!(account_in_database, updated_account);
@@ -4029,16 +4175,17 @@ mod tests {
             )
         ) {
             let (storage_engine, mut context) = create_test_engine(10_000);
+            let cache = create_test_cache();
 
             for (address, account) in &accounts {
                 storage_engine
-                    .set_values(&mut context, vec![(AddressPath::for_address(*address).into(), Some(account.clone().into()))].as_mut())
+                    .set_values(&mut context, &cache, vec![(AddressPath::for_address(*address).into(), Some(account.clone().into()))].as_mut())
                     .unwrap();
             }
 
             for (address, account) in accounts {
                 let read_account = storage_engine
-                    .get_account(&mut context, AddressPath::for_address(address))
+                    .get_account(&mut context, &cache, AddressPath::for_address(address))
                     .unwrap();
                 assert_eq!(read_account, Some(Account::new(account.nonce, account.balance, EMPTY_ROOT_HASH, account.code_hash)));
             }
@@ -4055,6 +4202,7 @@ mod tests {
             ),
         ) {
             let (storage_engine, mut context) = create_test_engine(10_000);
+            let cache = create_test_cache();
 
             let mut changes = vec![];
             for (address, account, storage) in &accounts {
@@ -4065,12 +4213,12 @@ mod tests {
                 }
             }
             storage_engine
-                .set_values(&mut context, changes.as_mut())
+                .set_values(&mut context, &cache, changes.as_mut())
                 .unwrap();
 
             for (address, account, storage) in accounts {
                 let read_account = storage_engine
-                    .get_account(&mut context, AddressPath::for_address(address))
+                    .get_account(&mut context, &cache, AddressPath::for_address(address))
                     .unwrap();
                 let read_account = read_account.unwrap();
                 assert_eq!(read_account.nonce, account.nonce);
@@ -4079,7 +4227,7 @@ mod tests {
 
                 for (key, value) in storage {
                     let read_storage = storage_engine
-                        .get_storage(&mut context, StoragePath::for_address_and_slot(address, key))
+                        .get_storage(&mut context, &cache, StoragePath::for_address_and_slot(address, key))
                         .unwrap();
                     assert_eq!(read_storage, Some(value));
                 }
@@ -4094,6 +4242,7 @@ mod tests {
             ),
         ) {
             let (storage_engine, mut context) = create_test_engine(10_000);
+            let cache = create_test_cache();
 
             let mut revision = 0;
             loop {
@@ -4107,7 +4256,7 @@ mod tests {
                     break;
                 }
                 storage_engine
-                    .set_values(&mut context, changes.as_mut())
+                    .set_values(&mut context, &cache, changes.as_mut())
                     .unwrap();
                 revision += 1;
             }
@@ -4115,7 +4264,7 @@ mod tests {
             for (address, revisions) in &account_revisions {
                 let last_revision = revisions.last().unwrap();
                 let read_account = storage_engine
-                    .get_account(&mut context, AddressPath::for_address(*address))
+                    .get_account(&mut context, &cache, AddressPath::for_address(*address))
                     .unwrap();
                 let read_account = read_account.unwrap();
                 assert_eq!(read_account.nonce, last_revision.nonce);

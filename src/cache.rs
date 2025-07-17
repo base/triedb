@@ -41,8 +41,12 @@ impl CacheManager {
             let guard = self.cache.read().unwrap();
             (*guard).clone()
         }; // Read lock is released here
-        
-        Writer { cache: Arc::clone(&self.cache), changes: cloned_data, max_cache_size: self.max_cache_size }
+
+        Writer {
+            cache: Arc::clone(&self.cache),
+            changes: cloned_data,
+            max_cache_size: self.max_cache_size,
+        }
     }
 }
 

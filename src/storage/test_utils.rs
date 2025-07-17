@@ -9,6 +9,13 @@ use crate::{
     storage::engine::StorageEngine, PageManager,
 };
 
+use crate::cache::CacheManager;
+use std::num::NonZeroUsize;
+
+pub(crate) fn create_test_cache() -> CacheManager {
+    CacheManager::new(NonZeroUsize::new(100).unwrap())
+}
+
 pub(crate) fn create_test_engine(max_pages: u32) -> (StorageEngine, TransactionContext) {
     let meta_manager =
         MetadataManager::from_file(tempfile::tempfile().expect("failed to create temporary file"))

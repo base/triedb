@@ -19,6 +19,7 @@ use std::{
 pub struct Database {
     pub(crate) storage_engine: StorageEngine,
     pub(crate) transaction_manager: Mutex<TransactionManager>,
+    pub(crate) contract_account_loc_cache: CacheManager,
     metrics: DatabaseMetrics,
 }
 
@@ -151,6 +152,7 @@ impl Database {
         Self {
             storage_engine,
             transaction_manager: Mutex::new(TransactionManager::new()),
+            contract_account_loc_cache: CacheManager::new(NonZeroUsize::new(1000).unwrap()),
             metrics: DatabaseMetrics::default(),
         }
     }
@@ -524,7 +526,6 @@ mod tests {
 
         // Verify that the read transaction that we created before the delete can still access the
         // initial accounts
-        read_tx.clear_cache();
         for (address, account) in &initial_accounts {
             assert_eq!(
                 read_tx.get_account(address.clone()).expect("error while reading account"),
