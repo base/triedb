@@ -391,10 +391,7 @@ impl<DB: Deref<Target = Database>> Cursor<DB> {
             }
         }
 
-        let key_ref = self.key_stack.last().unwrap();
-        let node_ref = self.node_stack.last().unwrap();
-        let hash_ref = *self.hash_stack.last().unwrap();
-        Ok(Some((key_ref, node_ref, hash_ref)))
+        Ok(self.current())
     }
 
     fn initialize_storage_stacks(&mut self) -> Result<(), CursorError> {

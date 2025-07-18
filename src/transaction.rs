@@ -140,7 +140,7 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
     pub fn debug_storage(
         &self,
         output_file: Box<dyn std::io::Write>,
-        storage_path: StoragePath,
+        storage_path: &StoragePath,
         verbosity_level: u8,
     ) -> Result<(), TransactionError> {
         self.database
