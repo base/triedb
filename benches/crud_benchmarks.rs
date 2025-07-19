@@ -18,10 +18,9 @@ mod benchmark_common;
 
 use alloy_primitives::{StorageKey, StorageValue, U256};
 use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
-// use benchmark_common::{generate_random_address, BATCH_SIZE};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::prelude::*;
-use std::{fs, io, path::Path};
+use std::{fs, io, path::Path, time::Duration};
 use tempdir::TempDir;
 use triedb::{
     account::Account,
@@ -66,6 +65,7 @@ fn bench_account_reads(c: &mut Criterion) {
         (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+    group.measurement_time(Duration::from_secs(30));
     group.bench_function(BenchmarkId::new("eoa_reads", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {
@@ -100,6 +100,7 @@ fn bench_account_inserts(c: &mut Criterion) {
         (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+    group.measurement_time(Duration::from_secs(30));
     group.bench_function(BenchmarkId::new("eoa_inserts", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {
@@ -137,6 +138,7 @@ fn bench_account_inserts_loop(c: &mut Criterion) {
         (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+    group.measurement_time(Duration::from_secs(30));
     group.bench_function(BenchmarkId::new("eoa_inserts_loop", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {
@@ -184,6 +186,7 @@ fn bench_account_updates(c: &mut Criterion) {
         (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+    group.measurement_time(Duration::from_secs(30));
     group.bench_function(BenchmarkId::new("eoa_updates", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {
@@ -220,6 +223,7 @@ fn bench_account_deletes(c: &mut Criterion) {
         (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+    group.measurement_time(Duration::from_secs(30));
     group.bench_function(BenchmarkId::new("eoa_deletes", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {
@@ -290,6 +294,7 @@ fn bench_mixed_operations(c: &mut Criterion) {
     }
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+    group.measurement_time(Duration::from_secs(30));
     group.bench_function(BenchmarkId::new("mixed_operations", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {
@@ -301,7 +306,7 @@ fn bench_mixed_operations(c: &mut Criterion) {
             |db| {
                 let mut tx = db.begin_rw().unwrap();
                 for i in 0..BATCH_SIZE {
-                    let op = eoa_rng.gen_range(0..=7);
+                    let op = eoa_rng.random_range(0..=7);
                     match op {
                         0 => {
                             // Read
@@ -390,6 +395,7 @@ fn bench_storage_reads(c: &mut Criterion) {
     let storage_paths_values = generate_storage_paths_values(&addresses, total_storage_per_address);
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+    group.measurement_time(Duration::from_secs(30));
     group.bench_function(BenchmarkId::new("storage_reads", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {
@@ -427,6 +433,7 @@ fn bench_storage_inserts(c: &mut Criterion) {
     let storage_paths_values = generate_storage_paths_values(&addresses, total_storage_per_address);
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+    group.measurement_time(Duration::from_secs(30));
     group.bench_function(BenchmarkId::new("storage_inserts", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {
@@ -470,6 +477,7 @@ fn bench_storage_updates(c: &mut Criterion) {
     let storage_paths_values = generate_storage_paths_values(&addresses, total_storage_per_address);
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+    group.measurement_time(Duration::from_secs(30));
     group.bench_function(BenchmarkId::new("storage_updates", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {
@@ -508,6 +516,7 @@ fn bench_storage_deletes(c: &mut Criterion) {
     let storage_paths_values = generate_storage_paths_values(&addresses, total_storage_per_address);
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+    group.measurement_time(Duration::from_secs(30));
     group.bench_function(BenchmarkId::new("storage_deletes", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {

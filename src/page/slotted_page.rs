@@ -73,7 +73,7 @@ impl SlottedPage<'_> {
     }
 
     // Returns the cell pointer at the given index.
-    fn get_cell_pointer(&self, index: u8) -> Result<CellPointer, PageError> {
+    fn get_cell_pointer(&self, index: u8) -> Result<CellPointer<'_>, PageError> {
         if index >= self.num_cells() {
             return Err(PageError::InvalidCellPointer);
         }
@@ -88,7 +88,7 @@ impl SlottedPage<'_> {
         self.page.contents()[0]
     }
 
-    fn cell_pointers_iter(&self) -> impl Iterator<Item = CellPointer> {
+    fn cell_pointers_iter(&self) -> impl Iterator<Item = CellPointer<'_>> {
         self.page.contents()[1..=CELL_POINTER_SIZE * self.num_cells() as usize]
             .chunks(CELL_POINTER_SIZE)
             .map(|chunk| chunk.try_into().unwrap())
@@ -262,7 +262,11 @@ impl<'a> SlottedPageMut<'a> {
 
     // Allocates a cell pointer at the given index with the given length and returns the cell
     // pointer.
-    fn allocate_cell_pointer(&mut self, index: u8, length: u16) -> Result<CellPointer, PageError> {
+    fn allocate_cell_pointer(
+        &mut self,
+        index: u8,
+        length: u16,
+    ) -> Result<CellPointer<'_>, PageError> {
         match self.find_available_slot(index, length)? {
             Some(offset) => {
                 let num_cells = self.num_cells();
@@ -415,7 +419,7 @@ impl<'a> SlottedPageMut<'a> {
         index: u8,
         offset: u16,
         length: u16,
-    ) -> Result<CellPointer, PageError> {
+    ) -> Result<CellPointer<'_>, PageError> {
         let start_index = get_content_index(index);
         let end_index = start_index + CELL_POINTER_SIZE;
         let data = &mut self.page.contents_mut()[start_index..end_index];
