@@ -4,7 +4,7 @@ use crate::{
     location::Location,
     meta::{MetadataManager, OrphanPage},
     node::{
-        Node,
+        InMemoryNode, Node,
         Node::{AccountLeaf, Branch},
         NodeError, TrieValue,
     },
@@ -18,6 +18,7 @@ use crate::{
     storage::{debug::DebugPage, value::Value},
 };
 use alloy_primitives::StorageValue;
+use alloy_rlp::encode_fixed_size;
 use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
 use parking_lot::Mutex;
 use std::{
@@ -44,6 +45,17 @@ enum PointerChange {
     None,
     Update(Pointer),
     Delete,
+}
+
+/// How the database should treat hashes in provided intermediate nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashVerificationMode {
+    /// Ignore provided hashes, always recompute.
+    Ignore,
+    /// Check provided hashes, use if correct, recompute if not.
+    Check,
+    /// Trust provided hashes without checking (unsafe!).
+    UnsafeTrust,
 }
 
 impl StorageEngine {
@@ -1748,6 +1760,333 @@ impl StorageEngine {
                 stats.depth_of_trie_in_pages.update_stats(page_depth);
                 stats.depth_of_trie_in_nodes.update_stats(node_depth);
                 Ok(())
+            }
+        }
+    }
+
+    /// Builds an in-memory trie from a list of (Nibbles, Option<TrieValue>), returning the root
+    /// node.
+    pub fn build_in_memory_trie(
+        changes: &mut [(Nibbles, Option<TrieValue>)],
+    ) -> Option<InMemoryNode> {
+        if changes.is_empty() {
+            return None;
+        }
+        changes.sort_by(|a, b| a.0.cmp(&b.0));
+        Self::build_in_memory_trie_rec(changes, 0)
+    }
+
+    fn build_in_memory_trie_rec(
+        changes: &[(Nibbles, Option<TrieValue>)],
+        path_offset: usize,
+    ) -> Option<InMemoryNode> {
+        use crate::node::InMemoryChild;
+        if changes.is_empty() {
+            return None;
+        }
+
+        // Find the shortest common prefix among all changes at this offset
+        let first_path = &changes[0].0[path_offset..];
+        let last_path = &changes[changes.len() - 1].0[path_offset..];
+        let mut common_prefix_len = 0;
+        let min_len = first_path.len().min(last_path.len());
+        while common_prefix_len < min_len &&
+            first_path[common_prefix_len] == last_path[common_prefix_len]
+        {
+            common_prefix_len += 1;
+        }
+
+        // Pick the first change
+        let (first_change_path, first_change_value) = &changes[0];
+        let path = first_change_path.slice(path_offset..);
+        let value = first_change_value.as_ref();
+
+        if common_prefix_len < path.len() {
+            // Partition changes by the next nibble
+            let mut children: [Option<InMemoryChild>; 16] = Default::default();
+            let mut i = 0;
+            while i < changes.len() {
+                let nibble = changes[i].0[path_offset + common_prefix_len];
+                let start = i;
+                while i < changes.len() && changes[i].0[path_offset + common_prefix_len] == nibble {
+                    i += 1;
+                }
+                children[nibble as usize] = Self::build_in_memory_trie_rec(
+                    &changes[start..i],
+                    path_offset + common_prefix_len + 1,
+                )
+                .map(|node| InMemoryChild { node: Some(Box::new(node)), hash: None });
+            }
+            let prefix = first_change_path.slice(path_offset..path_offset + common_prefix_len);
+            return Some(InMemoryNode::Branch { prefix, children });
+        }
+
+        if path.len() == common_prefix_len {
+            let prefix = first_change_path.slice(path_offset..path_offset + common_prefix_len);
+            // Account or Storage
+            if let Some(TrieValue::Account(account)) = value {
+                // Find storage children
+                let mut storage_children = vec![];
+                let mut i = 1;
+                while i < changes.len() && changes[i].0.starts_with(first_change_path) {
+                    storage_children.push((changes[i].0.clone(), changes[i].1.clone()));
+                    i += 1;
+                }
+                let storage_root = if !storage_children.is_empty() {
+                    Self::build_in_memory_trie_rec(
+                        &storage_children,
+                        path_offset + common_prefix_len,
+                    )
+                    .map(|node| InMemoryChild { node: Some(Box::new(node)), hash: None })
+                } else {
+                    None
+                };
+                return Some(InMemoryNode::AccountLeaf {
+                    prefix,
+                    nonce_rlp: encode_fixed_size(&account.nonce),
+                    balance_rlp: encode_fixed_size(&account.balance),
+                    code_hash: account.code_hash,
+                    storage_root,
+                });
+            } else if let Some(TrieValue::Storage(value)) = value {
+                return Some(InMemoryNode::StorageLeaf {
+                    prefix,
+                    value_rlp: encode_fixed_size(value),
+                });
+            } else {
+                // None value means deletion, skip
+                return None;
+            }
+        }
+
+        None
+    }
+
+    /// Merges an in-memory subtrie into the on-disk trie at the given path.
+    // KALEY TODO mode: Hash verification mode
+    pub fn set_subtrie(
+        &mut self,
+        context: &mut TransactionContext,
+        path: &Nibbles,
+        subtrie: InMemoryNode,
+        mode: HashVerificationMode,
+    ) -> Result<(), Error> {
+        // Traverse to the merge point (parent of the insertion point)
+        let (page_id, page_index, _path_offset) = self.traverse_to_merge_point(context, path)?;
+
+        // Load the on-disk node at the merge point
+        let on_disk_node: Node = {
+            let slotted_page = SlottedPageMut::try_from(self.get_mut_page(context, page_id)?)?;
+            slotted_page.get_value(page_index)?
+        };
+
+        // Merge the subtrie
+        let merged_node = self.merge_in_memory_with_disk(context, &on_disk_node, &subtrie, mode)?;
+
+        // Write the merged node back to disk
+        let mut slotted_page = SlottedPageMut::try_from(self.get_mut_page(context, page_id)?)?;
+        slotted_page.set_value(page_index, &merged_node)?;
+
+        Ok(())
+    }
+
+    fn merge_in_memory_with_disk(
+        &mut self,
+        context: &mut TransactionContext,
+        on_disk: &Node,
+        in_mem: &InMemoryNode,
+        _mode: HashVerificationMode,
+    ) -> Result<Node, Error> {
+        use crate::node::InMemoryNode;
+        match (on_disk, in_mem) {
+            // Both are branches with the same prefix: merge children
+            (
+                Node::Branch { prefix: d_prefix, children: d_children },
+                InMemoryNode::Branch { prefix: m_prefix, children: m_children },
+            ) if d_prefix == m_prefix => {
+                let mut new_children: [Option<Pointer>; 16] = std::array::from_fn(|_| None);
+                for i in 0..16 {
+                    match (&d_children[i], &m_children[i]) {
+                        (Some(d_ptr), Some(m_child)) => {
+                            // Recursively merge
+                            let d_node = self.load_node_from_disk(context, d_ptr)?;
+                            let merged = self.merge_in_memory_with_disk(
+                                context,
+                                &d_node,
+                                m_child.node.as_ref().unwrap(),
+                                _mode,
+                            )?;
+                            // Write the merged node to disk and get a pointer
+                            let ptr = self.write_node_to_disk(
+                                context,
+                                &self.node_to_in_memory_node(&merged)?,
+                            )?;
+                            new_children[i] = Some(ptr);
+                        }
+                        (None, Some(m_child)) => {
+                            // Only in-memory: insert
+                            let ptr =
+                                self.write_node_to_disk(context, m_child.node.as_ref().unwrap())?;
+                            new_children[i] = Some(ptr);
+                        }
+                        (Some(d_ptr), None) => {
+                            // Only on-disk: keep
+                            new_children[i] = Some(d_ptr.clone());
+                        }
+                        (None, None) => {}
+                    }
+                }
+                Ok(Node::Branch { prefix: d_prefix.clone(), children: new_children })
+            }
+            // In-memory is a leaf or replaces the on-disk node
+            (_, m_node) => {
+                // Write the in-memory node to disk, replacing the on-disk node
+                self.in_memory_to_disk_node(context, m_node)
+            }
+        }
+    }
+
+    /// Converts a Node to an InMemoryNode for writing to disk. Necessary for merging an in-memory
+    /// trie with an on-disk trie
+    fn node_to_in_memory_node(&self, node: &Node) -> Result<InMemoryNode, Error> {
+        match node {
+            Node::AccountLeaf { prefix, nonce_rlp, balance_rlp, code_hash, .. } => {
+                Ok(InMemoryNode::AccountLeaf {
+                    prefix: prefix.clone(),
+                    nonce_rlp: nonce_rlp.clone(),
+                    balance_rlp: balance_rlp.clone(),
+                    code_hash: *code_hash,
+                    storage_root: None,
+                })
+            }
+            Node::StorageLeaf { prefix, value_rlp } => Ok(InMemoryNode::StorageLeaf {
+                prefix: prefix.clone(),
+                value_rlp: value_rlp.clone(),
+            }),
+            Node::Branch { prefix, .. } => {
+                Ok(InMemoryNode::Branch { prefix: prefix.clone(), children: Default::default() })
+            }
+        }
+    }
+
+    /// Traverses the on-disk trie to the parent of the merge point for the given path.
+    /// Returns the page id, page index, and path offset.
+    fn traverse_to_merge_point(
+        &mut self,
+        context: &TransactionContext,
+        path: &Nibbles,
+    ) -> Result<(PageId, u8, usize), Error> {
+        let mut page_id = context.root_node_page_id.ok_or(Error::InvalidSnapshotId)?;
+        let mut slotted_page = SlottedPageMut::try_from(self.get_mut_page(context, page_id)?)?;
+        let mut page_index = 0;
+        let mut path_offset = 0;
+
+        loop {
+            let node: Node = slotted_page.get_value(page_index)?;
+            let prefix = node.prefix();
+            let common = nybbles::common_prefix_length(&path[path_offset..], prefix);
+
+            if common < prefix.len() || path_offset + common == path.len() {
+                // We've reached the parent of the merge point
+                return Ok((page_id, page_index, path_offset));
+            }
+
+            // Descend to the child
+            let next_nibble = path[path_offset + common];
+            let child_ptr = match node {
+                Node::AccountLeaf { ref storage_root, .. } => storage_root.as_ref(),
+                Node::Branch { ref children, .. } => children[next_nibble as usize].as_ref(),
+                _ => None,
+            };
+            if let Some(child_ptr) = child_ptr {
+                if let Some(child_page_id) = child_ptr.location().page_id() {
+                    page_id = child_page_id;
+                    slotted_page = SlottedPageMut::try_from(self.get_mut_page(context, page_id)?)?;
+                    page_index = 0;
+                } else {
+                    page_index = child_ptr.location().cell_index().unwrap();
+                }
+                path_offset += common + 1;
+            } else {
+                // No child exists, so this is the parent
+                return Ok((page_id, page_index, path_offset + common));
+            }
+        }
+    }
+
+    /// Loads a node from disk
+    fn load_node_from_disk(
+        &self,
+        context: &TransactionContext,
+        ptr: &Pointer,
+    ) -> Result<Node, Error> {
+        let page_id = ptr.location().page_id().unwrap();
+        let page = self.get_page(context, page_id)?;
+        let slotted_page = SlottedPage::try_from(page)?;
+        let cell_index = ptr.location().cell_index().unwrap_or(0);
+        let node: Node = slotted_page.get_value(cell_index)?;
+        Ok(node)
+    }
+
+    /// Writes an in-memory node to disk
+    fn write_node_to_disk(
+        &mut self,
+        context: &mut TransactionContext,
+        node: &InMemoryNode,
+    ) -> Result<Pointer, Error> {
+        let page = self.allocate_page(context)?;
+        let mut slotted_page = SlottedPageMut::try_from(page)?;
+        let disk_node = self.in_memory_to_disk_node(context, node)?;
+        let idx = slotted_page.insert_value(&disk_node)?;
+        let rlp_node = disk_node.as_rlp_node();
+        Ok(Pointer::new(Location::for_cell(idx), rlp_node))
+    }
+
+    /// Converts an InMemoryNode to an on-disk Node, recursively writing children
+    fn in_memory_to_disk_node(
+        &mut self,
+        context: &mut TransactionContext,
+        node: &InMemoryNode,
+    ) -> Result<Node, Error> {
+        use crate::node::InMemoryNode;
+        match node {
+            InMemoryNode::AccountLeaf {
+                prefix,
+                nonce_rlp,
+                balance_rlp,
+                code_hash,
+                storage_root,
+            } => {
+                let storage_root_ptr = if let Some(child) = storage_root {
+                    if let Some(child_node) = &child.node {
+                        Some(self.write_node_to_disk(context, child_node)?)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                Ok(Node::AccountLeaf {
+                    prefix: prefix.clone(),
+                    nonce_rlp: nonce_rlp.clone(),
+                    balance_rlp: balance_rlp.clone(),
+                    code_hash: *code_hash,
+                    storage_root: storage_root_ptr,
+                })
+            }
+            InMemoryNode::StorageLeaf { prefix, value_rlp } => {
+                Ok(Node::StorageLeaf { prefix: prefix.clone(), value_rlp: value_rlp.clone() })
+            }
+            InMemoryNode::Branch { prefix, children } => {
+                let mut disk_children: [Option<Pointer>; 16] = Default::default();
+                for (i, child) in children.iter().enumerate() {
+                    if let Some(child) = child {
+                        if let Some(child_node) = &child.node {
+                            disk_children[i] = Some(self.write_node_to_disk(context, child_node)?);
+                        }
+                    }
+                }
+                Ok(Node::Branch { prefix: prefix.clone(), children: disk_children })
             }
         }
     }
@@ -4142,6 +4481,134 @@ mod tests {
             let shortest_from_full_iteration = changes.iter().map(|(path, _)| nybbles::common_prefix_length(path, node.prefix())).min().unwrap();
 
             assert_eq!(shortest_common_prefix_length, shortest_from_full_iteration);
+        }
+    }
+}
+
+#[cfg(test)]
+mod in_memory_trie_tests {
+    use super::*;
+    use crate::node::{InMemoryNode, TrieValue};
+    use alloy_primitives::{B256, U256};
+    use alloy_trie::Nibbles;
+
+    #[test]
+    fn test_empty_trie() {
+        let mut changes: Vec<(Nibbles, Option<TrieValue>)> = vec![];
+        let root = StorageEngine::build_in_memory_trie(&mut changes);
+        assert!(root.is_none());
+    }
+
+    #[test]
+    fn test_single_account_leaf() {
+        let nibbles = Nibbles::from_nibbles([0x01, 0x02, 0x03]);
+        let account = crate::account::Account::new(1, U256::from(100), B256::ZERO, B256::ZERO);
+        let mut changes = vec![(nibbles.clone(), Some(TrieValue::Account(account.clone())))];
+        let root = StorageEngine::build_in_memory_trie(&mut changes).unwrap();
+        match root {
+            InMemoryNode::AccountLeaf {
+                prefix,
+                nonce_rlp,
+                balance_rlp,
+                code_hash,
+                storage_root,
+            } => {
+                assert_eq!(prefix, nibbles);
+                assert_eq!(nonce_rlp, encode_fixed_size(&account.nonce));
+                assert_eq!(balance_rlp, encode_fixed_size(&account.balance));
+                assert_eq!(code_hash, account.code_hash);
+                assert!(storage_root.is_none());
+            }
+            _ => panic!("Expected AccountLeaf"),
+        }
+    }
+
+    #[test]
+    fn test_single_storage_leaf() {
+        let nibbles = Nibbles::from_nibbles([0x0a, 0x0b, 0x0c]);
+        let value = U256::from(42);
+        let mut changes = vec![(nibbles.clone(), Some(TrieValue::Storage(value)))];
+        let root = StorageEngine::build_in_memory_trie(&mut changes).unwrap();
+        match root {
+            InMemoryNode::StorageLeaf { prefix, value_rlp } => {
+                assert_eq!(prefix, nibbles);
+                assert_eq!(value_rlp, encode_fixed_size(&value));
+            }
+            _ => panic!("Expected StorageLeaf"),
+        }
+    }
+
+    #[test]
+    fn test_account_with_storage() {
+        let account_nibbles = Nibbles::from_nibbles([0x01, 0x02, 0x03]);
+        let storage_nibbles = Nibbles::from_nibbles([0x01, 0x02, 0x03, 0x04]);
+        let account = crate::account::Account::new(1, U256::from(100), B256::ZERO, B256::ZERO);
+        let storage_value = U256::from(99);
+        let mut changes = vec![
+            (account_nibbles.clone(), Some(TrieValue::Account(account.clone()))),
+            (storage_nibbles.clone(), Some(TrieValue::Storage(storage_value))),
+        ];
+        let root = StorageEngine::build_in_memory_trie(&mut changes).unwrap();
+        match root {
+            InMemoryNode::AccountLeaf { prefix, storage_root: Some(child), .. } => {
+                assert_eq!(prefix, account_nibbles);
+                match &child.node {
+                    Some(boxed_storage) => match **boxed_storage {
+                        InMemoryNode::StorageLeaf { ref prefix, ref value_rlp } => {
+                            assert_eq!(*prefix, Nibbles::from_nibbles([0x04]));
+                            assert_eq!(*value_rlp, encode_fixed_size(&storage_value));
+                        }
+                        _ => panic!("Expected StorageLeaf as storage_root"),
+                    },
+                    None => panic!("Expected node in InMemoryChild for storage_root"),
+                }
+            }
+            _ => panic!("Expected AccountLeaf with storage_root"),
+        }
+    }
+
+    #[test]
+    fn test_branch_node() {
+        let n1 = Nibbles::from_nibbles([0x01, 0x02, 0x03]);
+        let n2 = Nibbles::from_nibbles([0x01, 0x02, 0x04]);
+        let account1 = crate::account::Account::new(1, U256::from(100), B256::ZERO, B256::ZERO);
+        let account2 = crate::account::Account::new(2, U256::from(200), B256::ZERO, B256::ZERO);
+        let mut changes = vec![
+            (n1.clone(), Some(TrieValue::Account(account1.clone()))),
+            (n2.clone(), Some(TrieValue::Account(account2.clone()))),
+        ];
+        let root = StorageEngine::build_in_memory_trie(&mut changes).unwrap();
+        match root {
+            InMemoryNode::Branch { prefix, children } => {
+                assert_eq!(prefix, Nibbles::from_nibbles([0x01, 0x02]));
+                // child at index 3
+                match &children[3] {
+                    Some(child) => match &child.node {
+                        Some(boxed_node) => match **boxed_node {
+                            InMemoryNode::AccountLeaf { prefix: ref p, .. } => {
+                                assert_eq!(*p, Nibbles::new())
+                            }
+                            _ => panic!("Expected AccountLeaf at child 3"),
+                        },
+                        None => panic!("Expected node in InMemoryChild at child 3"),
+                    },
+                    None => panic!("Expected child at index 3"),
+                }
+                // child at index 4
+                match &children[4] {
+                    Some(child) => match &child.node {
+                        Some(boxed_node) => match **boxed_node {
+                            InMemoryNode::AccountLeaf { prefix: ref p, .. } => {
+                                assert_eq!(*p, Nibbles::new())
+                            }
+                            _ => panic!("Expected AccountLeaf at child 4"),
+                        },
+                        None => panic!("Expected node in InMemoryChild at child 4"),
+                    },
+                    None => panic!("Expected child at index 4"),
+                }
+            }
+            _ => panic!("Expected Branch node"),
         }
     }
 }

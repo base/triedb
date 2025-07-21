@@ -53,6 +53,32 @@ pub enum Node {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InMemoryChild {
+    pub node: Option<Box<InMemoryNode>>,
+    pub hash: Option<B256>,
+}
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InMemoryNode {
+    AccountLeaf {
+        prefix: Nibbles,
+        nonce_rlp: ArrayVec<u8, 9>,
+        balance_rlp: ArrayVec<u8, 33>,
+        code_hash: B256,
+        storage_root: Option<InMemoryChild>,
+    },
+    StorageLeaf {
+        prefix: Nibbles,
+        value_rlp: ArrayVec<u8, 33>,
+    },
+    Branch {
+        prefix: Nibbles,
+        children: [Option<InMemoryChild>; 16],
+    },
+}
+
 #[derive(Debug)]
 pub enum NodeError {
     ChildrenUnsupported,
