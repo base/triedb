@@ -7,8 +7,8 @@ edition = "2021"
 triedb = { path = ".." }
 clap = { version = "4.4", features = ["derive"] }
 hex = "0.4"
-alloy-trie = { version = "0.7.6", features = ["arbitrary", "ethereum"] }
-alloy-primitives = { version = "0.8.21", features = ["arbitrary", "rand"] }
+alloy-trie = { version = "0.8.1", features = ["arbitrary", "ethereum"] }
+alloy-primitives = { version = "1.2.1", features = ["arbitrary", "rand"] }
 
 [[bin]]
 name = "cli"
