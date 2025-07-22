@@ -452,23 +452,7 @@ impl<DB: Deref<Target = Database>> Cursor<DB> {
             }
 
             let child_pointer = child.as_ref().unwrap();
-            let child_hash = child_pointer.rlp().as_hash().unwrap_or_else(|| {
-                // If not a hash reference, compute hash from the node itself
-                let child_page_id = if child_pointer.location().page_id().is_some() {
-                    child_pointer.location().page_id().unwrap()
-                } else {
-                    *self.page_id_stack.last().unwrap()
-                };
-                let child_slotted_page = self.transaction.get_slotted_page(child_page_id).unwrap();
-                let child_node: Node = if child_pointer.location().cell_index().is_some() {
-                    child_slotted_page
-                        .get_value(child_pointer.location().cell_index().unwrap())
-                        .unwrap()
-                } else {
-                    child_slotted_page.get_value(0).unwrap()
-                };
-                child_node.to_rlp_node().as_hash().unwrap()
-            });
+            let child_hash = child_pointer.rlp().as_hash().unwrap_or_default();
             self.load_child_node_into_stack(
                 child_pointer.location(),
                 parent_key.clone(),

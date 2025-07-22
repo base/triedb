@@ -100,10 +100,10 @@ impl Value for Pointer {
         let rlp = if flags & HASH_FLAG == HASH_FLAG {
             RlpNode::word_rlp(&B256::from_slice(&arr[5..37]))
         } else {
-            // Because the RLP string must be 1-32 bytes, we can safely use the first byte to determine
-            // the length. If the first byte is less than 0x80, then this byte is the actual
-            // encoded value. Otherwise, the length is first_rlp_byte - 0x80, and the remaining
-            // bytes are the encoded U256 value.
+            // Because the RLP string must be 1-32 bytes, we can safely use the first byte to
+            // determine the length. If the first byte is less than 0x80, then this byte
+            // is the actual encoded value. Otherwise, the length is first_rlp_byte -
+            // 0x80, and the remaining bytes are the encoded U256 value.
             let first_rlp_byte = arr[5];
             if first_rlp_byte < 0x80 {
                 RlpNode::from_raw(&[first_rlp_byte]).unwrap()
@@ -117,7 +117,11 @@ impl Value for Pointer {
                 return Err(value::Error::InvalidEncoding);
             }
         };
-        Ok(Pointer::new_with_flags(Location::from(u32::from_be_bytes(arr[..4].try_into().unwrap())), flags, rlp))
+        Ok(Pointer::new_with_flags(
+            Location::from(u32::from_be_bytes(arr[..4].try_into().unwrap())),
+            flags,
+            rlp,
+        ))
     }
 }
 
@@ -138,11 +142,7 @@ impl From<&Pointer> for [u8; 37] {
 
         // Determine flags and content
         let rlp = pointer.rlp();
-        let content = if rlp.is_hash() {
-            &rlp[1..]
-        } else {
-            rlp.as_ref()
-        };
+        let content = if rlp.is_hash() { &rlp[1..] } else { rlp.as_ref() };
 
         data[4] = pointer.flags;
         let content_len = content.len().min(33);
@@ -201,7 +201,7 @@ mod tests {
         expected.extend(b"hello world");
         expected.extend([0; 20]);
         assert_eq!(bytes, expected);
- 
+
         // Hex encoding of ["abc", 12345]
         let short_leaf_rlp = RlpNode::from_rlp(&hex!("c783616263823039"));
         let pointer = Pointer::new_leaf(Location::for_cell(1), short_leaf_rlp);
@@ -238,7 +238,8 @@ mod tests {
         assert_eq!(pointer.location(), Location::for_cell(1));
         assert_eq!(pointer.rlp(), &RlpNode::from_rlp(&encode("hello world")));
 
-        let mut short_leaf_rlp_bytes = vec![0, 0, 0, 1, 0, 0xc7, 0x83, 0x61, 0x62, 0x63, 0x82, 0x30, 0x39];
+        let mut short_leaf_rlp_bytes =
+            vec![0, 0, 0, 1, 0, 0xc7, 0x83, 0x61, 0x62, 0x63, 0x82, 0x30, 0x39];
         short_leaf_rlp_bytes.extend([0; 24]);
         let pointer = Pointer::from_bytes(&short_leaf_rlp_bytes).unwrap();
         assert_eq!(pointer.location(), Location::for_cell(1));

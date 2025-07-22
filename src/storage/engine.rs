@@ -355,14 +355,7 @@ impl StorageEngine {
             );
 
             match result {
-                // This case means the root node was deleted so orphan this page.
-                // TODO: this page could actually be reallocated in the same transaction,
-                // but this would require adding the page_id to a pending buffer. It would
-                // still be orphaned if unused by the end of the transaction.
-                Ok(PointerChange::Delete) => {
-                    self.orphan_page(context, page_id)?;
-                    return Ok(PointerChange::Delete);
-                }
+                Ok(PointerChange::Delete) => return Ok(PointerChange::Delete),
                 Ok(PointerChange::None) => return Ok(PointerChange::None),
                 Ok(PointerChange::Update(pointer)) => return Ok(PointerChange::Update(pointer)),
                 // In the case of a page split, re-attempt the operation from scratch. This ensures
@@ -600,9 +593,9 @@ impl StorageEngine {
             if node.has_children() {
                 // Delete the entire subtrie (e.g., for an AccountLeaf, delete all storage)
                 self.delete_subtrie(context, slotted_page, page_index)?;
+            } else {
+                slotted_page.delete_value(page_index)?;
             }
-
-            slotted_page.delete_value(page_index)?;
 
             assert_eq!(
                 changes.len(),
@@ -1051,6 +1044,10 @@ impl StorageEngine {
         if children.is_empty() {
             // Delete empty branch node
             slotted_page.delete_value(page_index)?;
+            // If we're the root node, orphan our page
+            if page_index == 0 {
+                self.orphan_page(context, slotted_page.id())?;
+            }
             Ok(PointerChange::Delete)
         } else if children.len() == 1 {
             // Merge branch with its only child
@@ -1433,7 +1430,6 @@ impl StorageEngine {
                     if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
                         let child_page_id = child.location().page_id().unwrap();
                         writeln!(buf, "{new_indent}Child on new page: {child_page_id:?}")?;
-                        return Ok(());
                     } else {
                         self.print_page_helper(
                             context,
@@ -1860,8 +1856,7 @@ fn move_subtrie_nodes(
                 // Recursively move its children
                 let new_location = move_subtrie_nodes(source_page, child_index, target_page)?;
                 // update the pointer in the parent node
-                updated_node
-                    .set_child(branch_index, child_ptr.with_location(new_location))?;
+                updated_node.set_child(branch_index, child_ptr.with_location(new_location))?;
             }
         }
     }
