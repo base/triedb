@@ -4,9 +4,9 @@ use crate::{
     location::Location,
     meta::{MetadataManager, OrphanPage},
     node::{
-        Node,
-        Node::{AccountLeaf, Branch},
-        NodeError, TrieValue,
+        Node, NodeError,
+        NodeKind::{AccountLeaf, Branch, StorageLeaf},
+        TrieValue,
     },
     page::{
         Page, PageError, PageId, PageManager, PageMut, SlottedPage, SlottedPageMut,
@@ -250,11 +250,11 @@ impl StorageEngine {
             return Ok(Some(node.value()?));
         }
 
-        let (child_pointer, new_path_offset) = match node {
+        let (child_pointer, new_path_offset) = match node.kind() {
             AccountLeaf { ref storage_root, .. } => {
                 (storage_root.as_ref(), path_offset + common_prefix_length)
             }
-            Branch { ref children, .. } => (
+            Branch { ref children } => (
                 children[remaining_path[0] as usize].as_ref(),
                 path_offset + common_prefix_length + 1,
             ),
@@ -522,7 +522,7 @@ impl StorageEngine {
         slotted_page: &mut SlottedPageMut<'_>,
     ) -> Result<Pointer, Error> {
         let new_node = Node::new_leaf(path.clone(), value)?;
-        let rlp_node = new_node.as_rlp_node();
+        let rlp_node = new_node.to_rlp_node();
 
         let index = slotted_page.insert_value(&new_node)?;
         assert_eq!(index, 0, "root node must be at index 0");
@@ -556,7 +556,7 @@ impl StorageEngine {
         let node_branch_index = node.prefix()[common_prefix_length];
         // Update the existing node with the new prefix
         node.set_prefix(node.prefix().slice(common_prefix_length + 1..))?;
-        let rlp_node = node.as_rlp_node();
+        let rlp_node = node.to_rlp_node();
         slotted_page.set_value(cell_index, node)?;
 
         // Make sure there is no insertions until the new branch node is inserted
@@ -647,7 +647,7 @@ impl StorageEngine {
         slotted_page.set_value(page_index, &new_node)?;
 
         if remaining_changes.is_empty() {
-            let rlp_node = new_node.as_rlp_node();
+            let rlp_node = new_node.to_rlp_node();
             Ok(PointerChange::Update(Pointer::new(
                 node_location(slotted_page.id(), page_index),
                 rlp_node,
@@ -667,7 +667,7 @@ impl StorageEngine {
                 Ok(PointerChange::None) => {
                     // even if the storage is unchanged, we still need to update the RLP encoding of
                     // this account node as its contents have changed
-                    let rlp_node = new_node.as_rlp_node();
+                    let rlp_node = new_node.to_rlp_node();
                     Ok(PointerChange::Update(Pointer::new(
                         node_location(slotted_page.id(), page_index),
                         rlp_node,
@@ -725,7 +725,7 @@ impl StorageEngine {
                         Some(new_child_pointer),
                         0,
                     )?;
-                    let rlp_node = node.as_rlp_node();
+                    let rlp_node = node.to_rlp_node();
                     Ok(PointerChange::Update(Pointer::new(
                         node_location(slotted_page.id(), page_index),
                         rlp_node,
@@ -733,7 +733,7 @@ impl StorageEngine {
                 }
                 PointerChange::Delete => {
                     self.update_node_child(node, slotted_page, page_index, None, 0)?;
-                    let rlp_node = node.as_rlp_node();
+                    let rlp_node = node.to_rlp_node();
                     Ok(PointerChange::Update(Pointer::new(
                         node_location(slotted_page.id(), page_index),
                         rlp_node,
@@ -798,7 +798,7 @@ impl StorageEngine {
             return Err(Error::PageSplit(0));
         }
 
-        let rlp_node = new_node.as_rlp_node();
+        let rlp_node = new_node.to_rlp_node();
 
         // Insert the new node and update the parent
         let location = Location::for_cell(slotted_page.insert_value(&new_node)?);
@@ -806,7 +806,7 @@ impl StorageEngine {
         slotted_page.set_value(page_index, node)?;
 
         if remaining_changes.is_empty() {
-            let rlp_node = node.as_rlp_node();
+            let rlp_node = node.to_rlp_node();
             return Ok(PointerChange::Update(Pointer::new(
                 node_location(slotted_page.id(), page_index),
                 rlp_node,
@@ -992,7 +992,7 @@ impl StorageEngine {
                     return Err(Error::PageSplit(0));
                 }
 
-                let rlp_node = new_node.as_rlp_node();
+                let rlp_node = new_node.to_rlp_node();
                 let location = Location::for_cell(slotted_page.insert_value(&new_node)?);
                 node.set_child(child_index, Pointer::new(location, rlp_node))?;
                 slotted_page.set_value(page_index, node)?;
@@ -1053,7 +1053,7 @@ impl StorageEngine {
             self.merge_branch_with_only_child(context, slotted_page, page_index, node, idx, ptr)
         } else {
             // Normal branch node with multiple children
-            let rlp_node = node.as_rlp_node();
+            let rlp_node = node.to_rlp_node();
             Ok(PointerChange::Update(Pointer::new(
                 node_location(slotted_page.id(), page_index),
                 rlp_node,
@@ -1093,7 +1093,7 @@ impl StorageEngine {
         only_child_node.set_prefix(new_nibbles)?;
 
         // Get the RLP node for the merged child
-        let rlp_node = only_child_node.as_rlp_node();
+        let rlp_node = only_child_node.to_rlp_node();
 
         let child_is_in_same_page = child_slotted_page.is_none();
 
@@ -1379,8 +1379,8 @@ impl StorageEngine {
     ) -> Result<(), Error> {
         let node: Node = slotted_page.get_value(cell_index)?;
 
-        match node {
-            Node::AccountLeaf { ref storage_root, .. } => {
+        match node.kind() {
+            AccountLeaf { ref storage_root, .. } => {
                 StorageEngine::write_node_value(&node, slotted_page.id(), buf, &indent)?;
                 let mut new_indent = indent.clone();
                 new_indent.push('\t');
@@ -1409,7 +1409,7 @@ impl StorageEngine {
                 }
             }
 
-            Node::Branch { prefix: _, ref children } => {
+            Branch { ref children } => {
                 StorageEngine::write_node_value(&node.clone(), slotted_page.id(), buf, &indent)?;
                 for child in children.iter().flatten() {
                     let mut new_indent = indent.clone();
@@ -1436,7 +1436,8 @@ impl StorageEngine {
                 }
                 Ok(())
             }
-            Node::StorageLeaf { prefix: _, value_rlp: _ } => {
+
+            StorageLeaf { .. } => {
                 StorageEngine::write_node_value(&node, slotted_page.id(), buf, &indent)?;
                 Ok(())
             }
@@ -1515,11 +1516,11 @@ impl StorageEngine {
             return Ok(());
         }
 
-        let (child_pointer, new_path_offset) = match node {
+        let (child_pointer, new_path_offset) = match node.kind() {
             AccountLeaf { ref storage_root, .. } => {
                 (storage_root.as_ref(), path_offset + common_prefix_length)
             }
-            Branch { ref children, .. } => (
+            Branch { ref children } => (
                 children[remaining_path[0] as usize].as_ref(),
                 path_offset + common_prefix_length + 1,
             ),
@@ -1569,30 +1570,29 @@ impl StorageEngine {
         buf: &mut W,
         indent: &str,
     ) -> Result<(), Error> {
-        match &node {
-            Node::Branch { prefix, children } => {
+        let prefix = node.prefix();
+        match node.kind() {
+            Branch { ref children } => {
                 writeln!(
                     buf,
-                    "{}Branch Node:  Page ID: {}  Children: {:?}, Prefix: {}",
+                    "{}Branch Node:  Page ID: {}  Children: [{}], Prefix: {}",
                     indent,
                     page_id,
-                    children
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, child)| child.is_some())
-                        .map(|(i, _)| i.to_string())
-                        .collect::<Vec<_>>(),
+                    children.iter().enumerate().filter(|(_, child)| child.is_some()).fold(
+                        String::new(),
+                        |mut s, (i, _)| {
+                            if !s.is_empty() {
+                                s.push_str(", ")
+                            };
+                            s.push_str(&i.to_string());
+                            s
+                        }
+                    ),
                     alloy_primitives::hex::encode(prefix.pack())
                 )?;
                 Ok(())
             }
-            Node::AccountLeaf {
-                prefix,
-                nonce_rlp: _,
-                balance_rlp: _,
-                code_hash: _,
-                storage_root: _,
-            } => {
+            AccountLeaf { .. } => {
                 match node.value() {
                     Ok(TrieValue::Account(acct)) => {
                         writeln!(
@@ -1608,7 +1608,7 @@ impl StorageEngine {
                 };
                 Ok(())
             }
-            Node::StorageLeaf { prefix, value_rlp: _ } => {
+            StorageLeaf { .. } => {
                 match node.value() {
                     Ok(TrieValue::Storage(strg)) => {
                         let str_prefix = alloy_primitives::hex::encode(prefix.pack());
@@ -1667,12 +1667,12 @@ impl StorageEngine {
         stats.node_size_in_bytes.update_stats(node.size());
         stats.path_prefix_length.update_stats(node.prefix().len());
 
-        match node {
-            Node::AccountLeaf { storage_root, .. } => {
+        match node.kind() {
+            AccountLeaf { ref storage_root, .. } => {
                 //Note: direct child is not counted as part of stats.num_children
                 if let Some(direct_child) = storage_root {
                     let (new_slotted_page, cell_index) =
-                        self.get_slotted_page_and_index(context, &direct_child, slotted_page)?;
+                        self.get_slotted_page_and_index(context, direct_child, slotted_page)?;
                     //if we move to a new page, update relevent stats
                     if new_slotted_page.id() != slotted_page.id() {
                         let occupied_bytes = new_slotted_page.num_occupied_bytes();
@@ -1706,16 +1706,16 @@ impl StorageEngine {
                 }
             }
 
-            Node::Branch { children, .. } => {
+            Branch { ref children } => {
                 //update num children per branch
-                let child_iter = children.into_iter().flatten();
+                let child_iter = children.iter().flatten();
                 let num_children = child_iter.clone().count();
                 stats.num_children_per_branch.update_stats(num_children);
 
                 for child in child_iter {
                     //check if child is on same page
                     let (new_slotted_page, cell_index) =
-                        self.get_slotted_page_and_index(context, &child, slotted_page)?;
+                        self.get_slotted_page_and_index(context, child, slotted_page)?;
                     //update page depth if we move to a new page
                     if new_slotted_page.id() != slotted_page.id() {
                         let occupied_bytes = new_slotted_page.num_occupied_bytes();
@@ -1744,7 +1744,7 @@ impl StorageEngine {
                 }
                 Ok(())
             }
-            Node::StorageLeaf { .. } => {
+            StorageLeaf { .. } => {
                 stats.depth_of_trie_in_pages.update_stats(page_depth);
                 stats.depth_of_trie_in_nodes.update_stats(node_depth);
                 Ok(())
