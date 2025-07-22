@@ -7,24 +7,23 @@ use std::{
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 
-/// The type alias for contract_account_loc_cache
+/// Type alias for contract_account_loc_cache
 type ContractAccountLocCache = LruCache<Nibbles, (PageId, u8)>;
-/// The type alias for mapping snapshot_id to contract_account_loc_cache
+/// Type alias for mapping snapshot_id to contract_account_loc_cache
 type Cache = HashMap<SnapshotId, ContractAccountLocCache>;
 
 /// Holds the shared cache protected by an RwLock.
 #[derive(Debug)]
 pub struct CacheManager {
-    /// The actual cache protected by a Reader-Writer lock.
-    /// Arc is used to allow multiple threads to own references to the cache.
+    /// The shared mapping of snapshots to cache.
     cache: Arc<RwLock<Cache>>,
-    /// Default capacity for new LruCaches created within the HashMap
-    max_cache_size: NonZeroUsize,
+    /// Maximum size of each contract_account_loc_cache.
+    max_size: NonZeroUsize,
 }
 
 impl CacheManager {
-    pub fn new(max_cache_size: NonZeroUsize) -> Self {
-        CacheManager { cache: Arc::new(RwLock::new(HashMap::new())), max_cache_size }
+    pub fn new(max_size: NonZeroUsize) -> Self {
+        CacheManager { cache: Arc::new(RwLock::new(HashMap::new())), max_size }
     }
 
     /// Provides a reader handle to the cache.
@@ -36,17 +35,12 @@ impl CacheManager {
     /// Provides a writer handle to the cache.
     /// This briefly acquires a lock to clone the cache, then releases it.
     pub fn write(&self) -> Writer {
-        // Lock, clone, and immediately release the lock
-        let cloned_data = {
+        let cloned = {
             let guard = self.cache.read().unwrap();
             (*guard).clone()
         }; // Read lock is released here
 
-        Writer {
-            cache: Arc::clone(&self.cache),
-            changes: cloned_data,
-            max_cache_size: self.max_cache_size,
-        }
+        Writer { cache: Arc::clone(&self.cache), changes: cloned, max_size: self.max_size }
     }
 }
 
@@ -58,13 +52,9 @@ pub struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
-    /// Tries to get a value from a specific inner LruCache.
-    /// Returns `Some((PageId, u8))` if found, `None` otherwise.
-    /// Note: This is an immutable lookup, so it won't update LRU state.
+    /// Tries to get a value without updating LRU state from a specific inner LruCache.
     pub fn get(&self, outer_key: SnapshotId, inner_key: Nibbles) -> Option<&(PageId, u8)> {
-        self.guard
-            .get(&outer_key) // Get reference to inner LruCache
-            .and_then(|lru_cache| lru_cache.peek(&inner_key)) // Peek without modifying LRU state
+        self.guard.get(&outer_key).and_then(|lru_cache| lru_cache.peek(&inner_key))
     }
 }
 
@@ -75,32 +65,28 @@ impl<'a> Reader<'a> {
 pub struct Writer {
     cache: Arc<RwLock<Cache>>,
     changes: Cache, // The writer's own mutable copy of the cache
-    max_cache_size: NonZeroUsize,
+    max_size: NonZeroUsize,
 }
 
 impl Writer {
     /// Inserts or updates an entry in the cache.
-    /// If the outer_key's LruCache does not exist, it's created.
     pub fn insert(&mut self, outer_key: SnapshotId, inner_key: Nibbles, value: (PageId, u8)) {
         self.changes
             .entry(outer_key)
-            .or_insert_with(|| LruCache::new(self.max_cache_size))
+            .or_insert_with(|| LruCache::new(self.max_size))
             .put(inner_key, value);
     }
 
     /// Removes an entry from the cache.
-    /// Returns the removed value if it existed.
-    pub fn remove(&mut self, outer_key: SnapshotId, inner_key: Nibbles) -> Option<(PageId, u8)> {
-        self.changes.get_mut(&outer_key).and_then(|lru_cache| lru_cache.pop(&inner_key))
+    pub fn remove(&mut self, outer_key: SnapshotId, inner_key: Nibbles) {
+        self.changes.get_mut(&outer_key).and_then(|lru_cache| lru_cache.pop(&inner_key));
     }
 
     /// Commits the changes made by the writer back to the main shared cache.
     /// This consumes the `Writer`, acquiring a write lock only for the commit operation.
     pub fn commit(self) {
-        // Acquire write lock only for the commit operation
         let mut guard = self.cache.write().unwrap();
         *guard = self.changes;
-        // The guard is dropped here, releasing the write lock
     }
 }
 
@@ -141,9 +127,7 @@ mod tests {
             let reader = cache_clone_for_reader2.read();
             let val = reader.get(100, Nibbles::from_nibbles([2]));
             assert_eq!(val, Some(&(PageId::new(12).unwrap(), 13)));
-            // Simulate some work
             thread::sleep(Duration::from_millis(100));
-            // Reader guard is dropped here automatically
         });
 
         // --- Writer attempting to write while readers are active ---
@@ -186,15 +170,63 @@ mod tests {
         let cache = CacheManager::new(NonZeroUsize::new(2).unwrap());
         let shared_cache = Arc::new(cache);
 
+        // Insert some entries
         let mut writer = shared_cache.write();
         writer.insert(1, Nibbles::from_nibbles([1]), (PageId::new(1).unwrap(), 1));
         writer.insert(1, Nibbles::from_nibbles([2]), (PageId::new(2).unwrap(), 2));
         writer.insert(1, Nibbles::from_nibbles([3]), (PageId::new(3).unwrap(), 3)); // Should evict (1,1) if LRU working
         writer.commit();
 
+        // Try reading the entries
         let reader = shared_cache.read();
         assert_eq!(reader.get(1, Nibbles::from_nibbles([1])), None); // (1,1) should be evicted
         assert_eq!(reader.get(1, Nibbles::from_nibbles([2])), Some(&(PageId::new(2).unwrap(), 2)));
         assert_eq!(reader.get(1, Nibbles::from_nibbles([3])), Some(&(PageId::new(3).unwrap(), 3)));
+    }
+
+    #[test]
+    fn test_writer_remove() {
+        let cache = CacheManager::new(NonZeroUsize::new(2).unwrap());
+        let shared_cache = Arc::new(cache);
+
+        // Insert some entries
+        let mut writer1 = shared_cache.write();
+        writer1.insert(100, Nibbles::from_nibbles([1]), (PageId::new(10).unwrap(), 11));
+        writer1.insert(100, Nibbles::from_nibbles([2]), (PageId::new(12).unwrap(), 13));
+        writer1.insert(200, Nibbles::from_nibbles([1]), (PageId::new(20).unwrap(), 21));
+        writer1.commit();
+
+        // Verify entries exist
+        let reader = shared_cache.read();
+        assert_eq!(
+            reader.get(100, Nibbles::from_nibbles([1])),
+            Some(&(PageId::new(10).unwrap(), 11))
+        );
+        assert_eq!(
+            reader.get(100, Nibbles::from_nibbles([2])),
+            Some(&(PageId::new(12).unwrap(), 13))
+        );
+        assert_eq!(
+            reader.get(200, Nibbles::from_nibbles([1])),
+            Some(&(PageId::new(20).unwrap(), 21))
+        );
+        drop(reader);
+
+        // Remove an entry using Writer
+        let mut writer2 = shared_cache.write();
+        writer2.remove(100, Nibbles::from_nibbles([1]));
+        writer2.commit();
+
+        // Verify the entry is removed from shared state
+        let final_reader = shared_cache.read();
+        assert_eq!(final_reader.get(100, Nibbles::from_nibbles([1])), None); // Should be removed
+        assert_eq!(
+            final_reader.get(100, Nibbles::from_nibbles([2])),
+            Some(&(PageId::new(12).unwrap(), 13))
+        ); // Should still exist
+        assert_eq!(
+            final_reader.get(200, Nibbles::from_nibbles([1])),
+            Some(&(PageId::new(20).unwrap(), 21))
+        ); // Should still exist
     }
 }
