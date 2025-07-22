@@ -888,7 +888,7 @@ mod tests {
         )
         .expect("should set child");
         let bytes = node.serialize().unwrap();
-        assert_eq!(bytes, hex!("0xc10080840f0f0f0fdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef0000002aa01234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"));
+        assert_eq!(bytes, hex!("0xc10080840f0f0f0fdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef0000002a011234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"));
     }
 
     #[test]
@@ -907,10 +907,10 @@ mod tests {
         // children bitmask (10000000 00010000)
         expected.extend([128, 16]);
         // child 0
-        expected.extend([0, 0, 0, 42, 160]);
+        expected.extend([0, 0, 0, 42, 1]);
         expected.extend(hash1.as_slice());
         // child 11
-        expected.extend([0, 0, 0, 43, 160]);
+        expected.extend([0, 0, 0, 43, 1]);
         expected.extend(hash2.as_slice());
         // children 12-15
         assert_eq!(bytes, expected);
@@ -933,13 +933,13 @@ mod tests {
         // children bitmask (00110000 00000001)
         expected.extend([48, 1]);
         // child 2
-        expected.extend([0, 0, 0, 100, 160]);
+        expected.extend([0, 0, 0, 100, 1]);
         expected.extend(hash1.as_slice());
         // child 3
-        expected.extend([0, 0, 0, 200, 160]);
+        expected.extend([0, 0, 0, 200, 1]);
         expected.extend(hash2.as_slice());
         // child 15
-        expected.extend([0, 0, 0, 210, 160]);
+        expected.extend([0, 0, 0, 210, 1]);
         expected.extend(hash3.as_slice());
         // remaining empty slot
         expected.extend([0; 37]);
@@ -960,13 +960,13 @@ mod tests {
         // children bitmask (01100000 00000000)
         expected.extend([96, 0]);
         // child 1
-        expected.extend([0, 1, 134, 159]);
+        expected.extend([0, 1, 134, 159, 0]);
         expected.extend(v1);
-        expected.extend([0; 32]);
+        expected.extend([0; 31]);
         // child 2
-        expected.extend([0, 132, 95, 237]);
+        expected.extend([0, 132, 95, 237, 0]);
         expected.extend(v2);
-        expected.extend([0; 21]);
+        expected.extend([0; 20]);
         assert_eq!(bytes, expected);
     }
 
