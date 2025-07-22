@@ -541,7 +541,7 @@ impl StorageEngine {
         changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
         slotted_page: &mut SlottedPageMut<'_>,
-        page_index: u8,
+        cell_index: u8,
         node: &mut Node,
         common_prefix: Nibbles,
         common_prefix_length: usize,
@@ -549,36 +549,37 @@ impl StorageEngine {
         // Create a new branch node with the common prefix
         let mut new_parent_branch = Node::new_branch(common_prefix)?;
 
-        // Ensure page has enough space for a new branch + a new leaf node.
-        // a. New leaf node created in next free cell index.
-        // b. New branch node created by updating the existing node at page_index. Usually the
-        // branch node with 2 children size is (2+2+2*37 = 78 bytes) + prefix_length, the account
-        // node (not contract) is smaller, hence will delete the current cell and allocate new cell.
-        //
-        // Another approach could be more efficient to consider:
-        // a. Update current cell with new node (smaller size since the prefix is shorter), create
-        // new pointer to this cell.
-        // b. Create a new cell for the new branch node. Update page_index to point to this new
-        // branch.
-        //
-        // This approach allocate only 1 new slotted page for the branch node.
-        if slotted_page.num_free_bytes() < node.size() + new_parent_branch.size() {
+        // Ensure page has enough space for a new branch, a new cell pointer for the new branch,
+        // while taking into account the space saving from shrinking the existing node's prefix.
+        if slotted_page.num_free_bytes() <
+            new_parent_branch.size() + CELL_POINTER_SIZE - common_prefix_length
+        {
             self.split_page(context, slotted_page)?;
             return Err(Error::PageSplit(0));
         }
-
-        // Update the prefix of the existing node and insert it into the page
         let node_branch_index = node.prefix()[common_prefix_length];
+        // Update the existing node with the new prefix
         node.set_prefix(node.prefix().slice(common_prefix_length + 1..))?;
         let rlp_node = node.as_rlp_node();
-        let location = Location::for_cell(slotted_page.insert_value(node)?);
-        new_parent_branch.set_child(node_branch_index, Pointer::new(location, rlp_node))?;
+        slotted_page.set_value(cell_index, node)?;
 
-        // Set the new branch as the current node
-        slotted_page.set_value(page_index, &new_parent_branch)?;
+        // Make sure there is no insertions until the new branch node is inserted
+        let new_parent_branch_cell_index = slotted_page.next_free_cell_index()?;
+        // Set child location to new_parent_branch_cell_index since it will be swapped with the
+        // existing node later.
+        new_parent_branch.set_child(
+            node_branch_index,
+            Pointer::new(Location::for_cell(new_parent_branch_cell_index), rlp_node),
+        )?;
+        let inserted_branch_cell_index = slotted_page.insert_value(&new_parent_branch)?;
+        debug_assert_eq!(
+            inserted_branch_cell_index, new_parent_branch_cell_index,
+            "new parent branch cell index should be the same as the next free cell index, a different caused by interruption between the next_free_cell_index and insert_value"
+        );
+        slotted_page.swap_cell_pointers(cell_index, new_parent_branch_cell_index)?;
 
         // Insert the changes into the new branch via recursion
-        self.set_values_in_cloned_page(context, changes, path_offset, slotted_page, page_index)
+        self.set_values_in_cloned_page(context, changes, path_offset, slotted_page, cell_index)
     }
 
     /// Handles the case when the path matches the node prefix exactly
