@@ -7,12 +7,10 @@ use std::{
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 
-/// Type alias for contract_account_loc_cache
 type ContractAccountLocCache = LruCache<Nibbles, (PageId, u8)>;
-/// Type alias for mapping snapshot_id to contract_account_loc_cache
 type Cache = HashMap<SnapshotId, ContractAccountLocCache>;
 
-/// Holds the shared cache protected by an RwLock.
+/// Holds the shared cache.
 #[derive(Debug)]
 pub struct CacheManager {
     /// The shared mapping of snapshots to cache.
