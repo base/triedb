@@ -24,6 +24,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
 name = "alloy-primitives"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -82,7 +88,7 @@ version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "983d99aa81f586cef9dae38443245e585840fcf0fc58b09aee0b1f27aed1d500"
 dependencies = [
- "alloy-primitives 0.8.25",
+ "alloy-primitives",
  "alloy-rlp",
  "arbitrary",
  "arrayvec",
@@ -433,8 +439,8 @@ checksum = "f46ad14479a25103f283c0f10005961cf086d8dc42205bb44c46ac563475dca6"
 name = "cli"
 version = "0.1.0"
 dependencies = [
- "alloy-primitives 0.8.25",
- "alloy-trie 0.7.9",
+ "alloy-primitives",
+ "alloy-trie",
  "clap",
  "hex",
  "triedb",
@@ -804,6 +810,8 @@ version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf151400ff0baff5465007dd2f3e717f3fe502074ca563069ce3a6629d07b289"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash",
 ]
 
@@ -944,6 +952,15 @@ checksum = "96936507f153605bddfcda068dd804796c84324ed2510809e5b2a624c81da765"
 dependencies = [
  "autocfg",
  "scopeguard",
+]
+
+[[package]]
+name = "lru"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86ea4e65087ff52f3862caff188d489f1fab49a0cb09e01b2e3f1a617b10aaed"
+dependencies = [
+ "hashbrown",
 ]
 
 [[package]]
@@ -1742,12 +1759,12 @@ dependencies = [
 name = "triedb"
 version = "0.1.0"
 dependencies = [
- "alloy-primitives 1.2.1",
+ "alloy-primitives",
  "alloy-rlp",
- "alloy-trie 0.8.1",
+ "alloy-trie",
  "arrayvec",
  "fxhash",
- "log",
+ "lru",
  "memmap2",
  "metrics",
  "metrics-derive",
