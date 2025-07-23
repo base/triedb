@@ -422,7 +422,7 @@ mod tests {
                 .iter()
                 .map(|orphan| orphan.page_id())
                 .collect::<Vec<_>>();
-            let all_pages = (1..db.storage_engine.page_manager.size())
+            let all_pages = (1..=db.storage_engine.page_manager.size())
                 .map(|page_id| PageId::new(page_id).unwrap());
             all_pages.filter(move |page_id| !orphan_pages.contains(page_id)).collect()
         }
