@@ -3,6 +3,7 @@ use crate::{
     pointer::Pointer,
 };
 use alloy_trie::Nibbles;
+use std::sync::Arc;
 
 /// Mutable overlay state that accumulates changes during transaction building.
 /// Changes are stored unsorted for fast insertion, then sorted when frozen.
@@ -44,7 +45,7 @@ impl OverlayStateMut {
     /// This sorts the changes and deduplicates by path, keeping the last value for each path.
     pub fn freeze(mut self) -> OverlayState {
         if self.changes.is_empty() {
-            return OverlayState { changes: Vec::new().into_boxed_slice(), prefix_offset: 0 };
+            return OverlayState { data: Arc::new([]), start_idx: 0, end_idx: 0, prefix_offset: 0 };
         }
 
         // Sort by path
@@ -66,57 +67,89 @@ impl OverlayStateMut {
             }
         }
 
-        OverlayState { changes: deduped.into_boxed_slice(), prefix_offset: 0 }
+        let data: Arc<[(Nibbles, Option<TrieValue>)]> = Arc::from(deduped.into_boxed_slice());
+        let len = data.len();
+        OverlayState { data, start_idx: 0, end_idx: len, prefix_offset: 0 }
     }
 }
 
-/// Immutable overlay state with sorted changes for efficient querying and sub-slicing.
+/// Immutable overlay state with sorted changes for efficient querying and zero-copy sub-slicing.
 /// This is created by freezing an OverlayStateMut and allows for efficient prefix operations.
+///
+/// The overlay uses Arc-based storage for zero-copy sub-slicing and thread-safe sharing.
+/// Sub-slices share the same underlying data and only track different bounds within it.
+///
+/// # Thread Safety
+///
+/// OverlayState is thread-safe and can be safely shared across threads. Multiple threads
+/// can work with non-overlapping sub-slices simultaneously without any synchronization.
+/// The Arc<[...]> provides thread-safe reference counting for the underlying data.
 #[derive(Debug, Clone)]
 pub struct OverlayState {
-    changes: Box<[(Nibbles, Option<TrieValue>)]>,
+    data: Arc<[(Nibbles, Option<TrieValue>)]>,
+    start_idx: usize,
+    end_idx: usize,
     prefix_offset: usize,
 }
+
+// SAFETY: OverlayState is thread-safe because:
+// - Arc<[...]> provides thread-safe reference counting
+// - All fields are immutable after construction
+// - No interior mutability is used
+// - All operations are read-only or create new instances
+unsafe impl Send for OverlayState {}
+unsafe impl Sync for OverlayState {}
 
 impl OverlayState {
     /// Creates an empty overlay state.
     pub fn empty() -> Self {
-        Self { changes: Vec::new().into_boxed_slice(), prefix_offset: 0 }
+        Self { data: Arc::new([]), start_idx: 0, end_idx: 0, prefix_offset: 0 }
+    }
+
+    pub fn data(&self) -> &[(Nibbles, Option<TrieValue>)] {
+        &self.data
+    }
+
+    /// Returns the effective slice of data for this overlay, respecting bounds.
+    fn effective_slice(&self) -> &[(Nibbles, Option<TrieValue>)] {
+        &self.data[self.start_idx..self.end_idx]
     }
 
     /// Returns the number of changes in the overlay.
     pub fn len(&self) -> usize {
-        self.changes.len()
+        self.end_idx - self.start_idx
     }
 
     /// Returns true if the overlay is empty.
     pub fn is_empty(&self) -> bool {
-        self.changes.is_empty()
+        self.start_idx >= self.end_idx
     }
 
     /// Looks up a specific path in the overlay.
     /// Returns Some(value) if found, None if not in overlay.
     /// The path is adjusted by the prefix_offset before lookup.
     pub fn lookup(&self, path: &Nibbles) -> Option<&Option<TrieValue>> {
-        match self.changes.binary_search_by(|(p, _)| self.compare_with_offset(p, path)) {
-            Ok(index) => Some(&self.changes[index].1),
+        let slice = self.effective_slice();
+        match slice.binary_search_by(|(p, _)| self.compare_with_offset(p, path)) {
+            Ok(index) => Some(&slice[index].1),
             Err(_) => None,
         }
     }
 
     /// Finds all entries that have the given prefix.
-    /// Returns a sub-slice of the overlay containing only matching entries.
+    /// Returns a zero-copy sub-slice of the overlay containing only matching entries.
     /// The prefix is compared against offset-adjusted paths.
     pub fn find_prefix_range(&self, prefix: &Nibbles) -> OverlayState {
-        if self.changes.is_empty() {
+        if self.is_empty() {
             return OverlayState::empty();
         }
 
+        let slice = self.effective_slice();
         let mut start_idx = None;
-        let mut end_idx = self.changes.len();
+        let mut end_idx = slice.len();
 
         // Find the range of entries that start with the prefix after applying offset
-        for (i, (path, _)) in self.changes.iter().enumerate() {
+        for (i, (path, _)) in slice.iter().enumerate() {
             if path.len() >= self.prefix_offset {
                 let adjusted_path = path.slice(self.prefix_offset..);
                 if adjusted_path.len() >= prefix.len() && adjusted_path[..prefix.len()] == *prefix {
@@ -133,7 +166,9 @@ impl OverlayState {
 
         match start_idx {
             Some(start) => OverlayState {
-                changes: self.changes[start..end_idx].to_vec().into_boxed_slice(),
+                data: Arc::clone(&self.data),
+                start_idx: self.start_idx + start,
+                end_idx: self.start_idx + end_idx,
                 prefix_offset: self.prefix_offset,
             },
             None => OverlayState::empty(),
@@ -155,9 +190,10 @@ impl OverlayState {
 
         // Validate that all paths share the same prefix up to total_offset
         // and that offset-adjusted paths maintain sort order
-        if self.changes.len() > 1 {
-            let first_path = &self.changes[0].0;
-            let last_path = &self.changes[self.changes.len() - 1].0;
+        if self.len() > 1 {
+            let slice = self.effective_slice();
+            let first_path = &slice[0].0;
+            let last_path = &slice[slice.len() - 1].0;
 
             // Check that both first and last paths are long enough
             if first_path.len() < total_offset || last_path.len() < total_offset {
@@ -177,7 +213,12 @@ impl OverlayState {
             }
         }
 
-        OverlayState { changes: self.changes.clone(), prefix_offset: total_offset }
+        OverlayState {
+            data: Arc::clone(&self.data),
+            start_idx: self.start_idx,
+            end_idx: self.end_idx,
+            prefix_offset: total_offset,
+        }
     }
 
     /// Helper method to compare a stored path with a target path, applying prefix_offset.
@@ -195,31 +236,40 @@ impl OverlayState {
         }
     }
 
-    /// Creates a sub-slice of the overlay from the given range.
+    /// Creates a zero-copy sub-slice of the overlay from the given range.
     /// This is useful for recursive traversal where we want to pass a subset
-    /// of changes to child operations.
+    /// of changes to child operations without copying data.
+    ///
+    /// # Performance
+    ///
+    /// This operation is O(1) and creates no allocations. The returned OverlayState
+    /// shares the same underlying Arc<[...]> data and only tracks different bounds.
+    /// Perfect for thread pool scenarios where each thread processes a disjoint range.
     pub fn sub_slice(&self, start: usize, end: usize) -> OverlayState {
-        let end = end.min(self.changes.len());
+        let current_len = self.len();
+        let end = end.min(current_len);
         let start = start.min(end);
 
         OverlayState {
-            changes: self.changes[start..end].to_vec().into_boxed_slice(),
+            data: Arc::clone(&self.data),
+            start_idx: self.start_idx + start,
+            end_idx: self.start_idx + end,
             prefix_offset: self.prefix_offset,
         }
     }
 
-    /// Creates a sub-slice containing only changes that come before the given prefix.
+    /// Creates a zero-copy sub-slice containing only changes that come before the given prefix.
     /// The prefix comparison takes prefix_offset into account.
     pub fn sub_slice_before_prefix(&self, prefix: &Nibbles) -> OverlayState {
-        let index = self
-            .changes
+        let slice = self.effective_slice();
+        let index = slice
             .binary_search_by(|(p, _)| self.compare_with_offset(p, prefix))
             .unwrap_or_else(|i| i); // Insert position is exactly what we want for "before"
         self.sub_slice(0, index)
     }
 
-    /// Creates a sub-slice containing only changes that come strictly after the given prefix.
-    /// The prefix comparison takes prefix_offset into account.
+    /// Creates a zero-copy sub-slice containing only changes that come strictly after the given
+    /// prefix. The prefix comparison takes prefix_offset into account.
     pub fn sub_slice_after_prefix(&self, prefix: &Nibbles) -> OverlayState {
         // Find the next key after prefix by incrementing prefix
         let next_prefix = match prefix.increment() {
@@ -230,25 +280,25 @@ impl OverlayState {
             }
         };
 
-        let index = self
-            .changes
+        let slice = self.effective_slice();
+        let index = slice
             .binary_search_by(|(p, _)| self.compare_with_offset(p, &next_prefix))
             .unwrap_or_else(|i| i);
-        self.sub_slice(index, self.changes.len())
+        self.sub_slice(index, slice.len())
     }
 
-    /// Creates a sub-slice containing only changes that affect the subtree
+    /// Creates a zero-copy sub-slice containing only changes that affect the subtree
     /// rooted at the given path prefix. This is used during recursive trie traversal
     /// to filter overlay changes relevant to each subtree.
     pub fn sub_slice_for_prefix(&self, prefix: &Nibbles) -> OverlayState {
         self.find_prefix_range(prefix)
     }
 
-    /// Returns an iterator over all changes in the overlay.
+    /// Returns an iterator over all changes in the overlay, respecting slice bounds.
     /// The paths are adjusted by the prefix_offset.
     pub fn iter(&self) -> impl Iterator<Item = (Nibbles, &Option<TrieValue>)> {
-        self.changes.iter().filter_map(move |(path, value)| {
-            if path.len() >= self.prefix_offset {
+        self.effective_slice().iter().filter_map(move |(path, value)| {
+            if path.len() > self.prefix_offset {
                 let adjusted_path = path.slice(self.prefix_offset..);
                 Some((adjusted_path, value))
             } else {
@@ -730,5 +780,90 @@ mod tests {
         assert_eq!(storage_with_prefix5.len(), 2);
         assert!(storage_with_prefix5.contains(&Nibbles::from_nibbles([5, 5])));
         assert!(storage_with_prefix5.contains(&Nibbles::from_nibbles([5, 6])));
+    }
+
+    #[test]
+    fn test_zero_copy_sub_slicing() {
+        let mut mutable = OverlayStateMut::new();
+        let account = test_account();
+
+        // Add multiple entries
+        for i in 0..10 {
+            mutable.insert(
+                Nibbles::from_nibbles([i, 0, 0, 0]),
+                Some(TrieValue::Account(account.clone())),
+            );
+        }
+
+        let frozen = mutable.freeze();
+        assert_eq!(frozen.len(), 10);
+
+        // Create sub-slices
+        let first_half = frozen.sub_slice(0, 5);
+        let second_half = frozen.sub_slice(5, 10);
+        let middle = frozen.sub_slice(2, 8);
+
+        // Verify lengths
+        assert_eq!(first_half.len(), 5);
+        assert_eq!(second_half.len(), 5);
+        assert_eq!(middle.len(), 6);
+
+        // Verify they share the same Arc (same pointer)
+        assert!(std::ptr::eq(frozen.data.as_ptr(), first_half.data.as_ptr()));
+        assert!(std::ptr::eq(frozen.data.as_ptr(), second_half.data.as_ptr()));
+        assert!(std::ptr::eq(frozen.data.as_ptr(), middle.data.as_ptr()));
+
+        // Test recursive sub-slicing
+        let sub_sub = middle.sub_slice(1, 4);
+        assert_eq!(sub_sub.len(), 3);
+        assert!(std::ptr::eq(frozen.data.as_ptr(), sub_sub.data.as_ptr()));
+
+        // Verify bounds are correct
+        assert_eq!(sub_sub.start_idx, 3); // middle starts at 2, +1 = 3
+        assert_eq!(sub_sub.end_idx, 6); // middle starts at 2, +4 = 6
+    }
+
+    #[test]
+    fn test_thread_safety_with_arc() {
+        use std::{sync::Arc as StdArc, thread};
+
+        let mut mutable = OverlayStateMut::new();
+        let account = test_account();
+
+        // Add entries
+        for i in 0..100 {
+            mutable.insert(
+                Nibbles::from_nibbles([i % 16, (i / 16) % 16, 0, 0]),
+                Some(TrieValue::Account(account.clone())),
+            );
+        }
+
+        let frozen = mutable.freeze();
+        let shared_overlay = StdArc::new(frozen);
+
+        // Spawn multiple threads that work with different sub-slices
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                let overlay = StdArc::clone(&shared_overlay);
+                thread::spawn(move || {
+                    let start = i * 25;
+                    let end = (i + 1) * 25;
+                    let sub_slice = overlay.sub_slice(start, end);
+
+                    // Each thread verifies its slice
+                    assert_eq!(sub_slice.len(), 25);
+
+                    // Count entries (just to do some work)
+                    let count = sub_slice.iter().count();
+                    assert_eq!(count, 25);
+
+                    count
+                })
+            })
+            .collect();
+
+        // Wait for all threads and collect results
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(results, vec![25, 25, 25, 25]);
     }
 }
