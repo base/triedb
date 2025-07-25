@@ -23,8 +23,10 @@ jobs:
         egress-policy: audit
 
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-    - name: Build
+    - name: Build source
       run: cargo build --verbose --profile=${{ matrix.profile }}
+    - name: Build CLI
+      run: cargo build --verbose --manifest-path=cli/Cargo.toml --profile=${{ matrix.profile }}
 
   format:
     runs-on: ubuntu-latest
@@ -96,3 +98,22 @@ jobs:
     - name: Run integration tests
       run:
         make integration-tests cargo_flags=--profile=${{ matrix.profile }} test_flags=--nocapture
+
+  check-cli-lockfile:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Harden the runner (Audit all outbound calls)
+      uses: step-security/harden-runner@6c439dc8bdf85cadbbce9ed30d1c7b959517bc49 # v2.12.2
+      with:
+        egress-policy: audit
+
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+    - name: Check CLI Cargo.lock is up-to-date
+      run: |
+        cd cli
+        cargo check --locked
+        if [ $? -ne 0 ]; then
+          echo "::error::CLI Cargo.lock is out of date. Please run 'cargo update' in the cli directory and commit the changes."
+          exit 1
+        fi

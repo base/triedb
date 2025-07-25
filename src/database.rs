@@ -28,6 +28,7 @@ pub struct DatabaseOptions {
     create_new: bool,
     wipe: bool,
     meta_path: Option<PathBuf>,
+    max_pages: u32,
 }
 
 #[derive(Debug)]
@@ -75,6 +76,12 @@ impl DatabaseOptions {
     /// path.
     pub fn meta_path(&mut self, meta_path: impl Into<PathBuf>) -> &mut Self {
         self.meta_path = Some(meta_path.into());
+        self
+    }
+
+    /// Sets the maximum number of pages that can be allocated.
+    pub fn max_pages(&mut self, max_pages: u32) -> &mut Self {
+        self.max_pages = max_pages;
         self
     }
 
@@ -422,7 +429,7 @@ mod tests {
                 .iter()
                 .map(|orphan| orphan.page_id())
                 .collect::<Vec<_>>();
-            let all_pages = (1..db.storage_engine.page_manager.size())
+            let all_pages = (1..=db.storage_engine.page_manager.size())
                 .map(|page_id| PageId::new(page_id).unwrap());
             all_pages.filter(move |page_id| !orphan_pages.contains(page_id)).collect()
         }
