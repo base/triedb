@@ -17,6 +17,7 @@ pub mod location;
 pub mod meta;
 pub mod metrics;
 pub mod node;
+pub mod overlay;
 pub mod page;
 pub mod path;
 pub mod pointer;
