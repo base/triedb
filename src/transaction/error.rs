@@ -12,7 +12,9 @@ impl fmt::Display for TransactionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Generic => write!(f, "transaction error"),
-            Self::OverlayNotEnabled => write!(f, "overlay functionality is not enabled for this transaction"),
+            Self::OverlayNotEnabled => {
+                write!(f, "overlay functionality is not enabled for this transaction")
+            }
         }
     }
 }
