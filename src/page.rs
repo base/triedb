@@ -11,7 +11,12 @@ mod page;
 mod slotted_page;
 mod state;
 
-pub use manager::{mmap::PageManager, options::PageManagerOptions, PageError};
+pub use manager::{
+    buffer_pool::{BufferPoolManager, BufferPoolManagerOptions},
+    mmap::PageManager,
+    options::PageManagerOptions,
+    PageError, PageManagerTrait,
+};
 pub use page::{Page, PageMut};
 pub use slotted_page::{SlottedPage, SlottedPageMut, CELL_POINTER_SIZE};
 
