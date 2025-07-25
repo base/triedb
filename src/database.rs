@@ -2,7 +2,7 @@ use crate::{
     context::TransactionContext,
     meta::{MetadataManager, OpenMetadataError},
     metrics::DatabaseMetrics,
-    page::{PageError, PageId, PageManager},
+    page::{PageError, PageId, PageManager, PageManagerTrait},
     storage::engine::{self, StorageEngine},
     transaction::{Transaction, TransactionError, TransactionManager, RO, RW},
 };
