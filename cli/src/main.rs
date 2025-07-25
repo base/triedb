@@ -250,7 +250,7 @@ fn get_trie_value(
             tx.debug_account(output, address_path, verbosity_level)?;
         }
         TrieValuePath::Storage(storage_path) => {
-            tx.debug_storage(output, storage_path, verbosity_level)?;
+            tx.debug_storage(output, &storage_path, verbosity_level)?;
         }
     }
 

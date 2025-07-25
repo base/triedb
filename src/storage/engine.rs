@@ -520,7 +520,7 @@ impl StorageEngine {
         let index = slotted_page.insert_value(&new_node)?;
         assert_eq!(index, 0, "root node must be at index 0");
 
-        Ok(Pointer::new(Location::for_page(slotted_page.id()), rlp_node))
+        Ok(Pointer::new_leaf(Location::for_page(slotted_page.id()), rlp_node))
     }
 
     /// Handles the case when the path does not match the node prefix
@@ -556,9 +556,14 @@ impl StorageEngine {
         let new_parent_branch_cell_index = slotted_page.next_free_cell_index()?;
         // Set child location to new_parent_branch_cell_index since it will be swapped with the
         // existing node later.
+        let child_pointer = if node.is_branch() {
+            Pointer::new_branch(Location::for_cell(new_parent_branch_cell_index), rlp_node)
+        } else {
+            Pointer::new_leaf(Location::for_cell(new_parent_branch_cell_index), rlp_node)
+        };
         new_parent_branch.set_child(
             node_branch_index,
-            Pointer::new(Location::for_cell(new_parent_branch_cell_index), rlp_node),
+            child_pointer,
         )?;
         let inserted_branch_cell_index = slotted_page.insert_value(&new_parent_branch)?;
         debug_assert_eq!(
@@ -588,9 +593,9 @@ impl StorageEngine {
             if node.has_children() {
                 // Delete the entire subtrie (e.g., for an AccountLeaf, delete all storage)
                 self.delete_subtrie(context, slotted_page, page_index)?;
+            } else {
+                slotted_page.delete_value(page_index)?;
             }
-
-            slotted_page.delete_value(page_index)?;
 
             assert_eq!(
                 changes.len(),
@@ -641,7 +646,7 @@ impl StorageEngine {
 
         if remaining_changes.is_empty() {
             let rlp_node = new_node.to_rlp_node();
-            Ok(PointerChange::Update(Pointer::new(
+            Ok(PointerChange::Update(Pointer::new_leaf(
                 node_location(slotted_page.id(), page_index),
                 rlp_node,
             )))
@@ -661,7 +666,7 @@ impl StorageEngine {
                     // even if the storage is unchanged, we still need to update the RLP encoding of
                     // this account node as its contents have changed
                     let rlp_node = new_node.to_rlp_node();
-                    Ok(PointerChange::Update(Pointer::new(
+                    Ok(PointerChange::Update(Pointer::new_leaf(
                         node_location(slotted_page.id(), page_index),
                         rlp_node,
                     )))
@@ -719,7 +724,7 @@ impl StorageEngine {
                         0,
                     )?;
                     let rlp_node = node.to_rlp_node();
-                    Ok(PointerChange::Update(Pointer::new(
+                    Ok(PointerChange::Update(Pointer::new_leaf(
                         node_location(slotted_page.id(), page_index),
                         rlp_node,
                     )))
@@ -727,7 +732,7 @@ impl StorageEngine {
                 PointerChange::Delete => {
                     self.update_node_child(node, slotted_page, page_index, None, 0)?;
                     let rlp_node = node.to_rlp_node();
-                    Ok(PointerChange::Update(Pointer::new(
+                    Ok(PointerChange::Update(Pointer::new_leaf(
                         node_location(slotted_page.id(), page_index),
                         rlp_node,
                     )))
@@ -795,12 +800,12 @@ impl StorageEngine {
 
         // Insert the new node and update the parent
         let location = Location::for_cell(slotted_page.insert_value(&new_node)?);
-        node.set_child(0, Pointer::new(location, rlp_node))?;
+        node.set_child(0, Pointer::new_leaf(location, rlp_node))?;
         slotted_page.set_value(page_index, node)?;
 
         if remaining_changes.is_empty() {
             let rlp_node = node.to_rlp_node();
-            return Ok(PointerChange::Update(Pointer::new(
+            return Ok(PointerChange::Update(Pointer::new_leaf(
                 node_location(slotted_page.id(), page_index),
                 rlp_node,
             )));
@@ -987,7 +992,7 @@ impl StorageEngine {
 
                 let rlp_node = new_node.to_rlp_node();
                 let location = Location::for_cell(slotted_page.insert_value(&new_node)?);
-                node.set_child(child_index, Pointer::new(location, rlp_node))?;
+                node.set_child(child_index, Pointer::new_leaf(location, rlp_node))?;
                 slotted_page.set_value(page_index, node)?;
 
                 // If there are more matching changes, recurse
@@ -1051,7 +1056,7 @@ impl StorageEngine {
         } else {
             // Normal branch node with multiple children
             let rlp_node = node.to_rlp_node();
-            Ok(PointerChange::Update(Pointer::new(
+            Ok(PointerChange::Update(Pointer::new_branch(
                 node_location(slotted_page.id(), page_index),
                 rlp_node,
             )))
@@ -1139,10 +1144,13 @@ impl StorageEngine {
             assert_eq!(only_child_node_index, page_index);
         }
 
-        Ok(PointerChange::Update(Pointer::new(
-            node_location(slotted_page.id(), only_child_node_index),
-            rlp_node,
-        )))
+        let pointer = if only_child_node.is_branch() {
+            Pointer::new_branch(node_location(slotted_page.id(), only_child_node_index), rlp_node)
+        } else {
+            Pointer::new_leaf(node_location(slotted_page.id(), only_child_node_index), rlp_node)
+        };
+
+        Ok(PointerChange::Update(pointer))
     }
 
     // Handles merging a branch with a child on a different page
@@ -1172,7 +1180,13 @@ impl StorageEngine {
             self.orphan_page(context, branch_page_id)?;
         }
 
-        Ok(PointerChange::Update(Pointer::new(node_location(child_slotted_page.id(), 0), rlp_node)))
+        let pointer = if only_child_node.is_branch() {
+            Pointer::new_branch(node_location(child_slotted_page.id(), 0), rlp_node)
+        } else {
+            Pointer::new_leaf(node_location(child_slotted_page.id(), 0), rlp_node)
+        };
+
+        Ok(PointerChange::Update(pointer))
     }
 
     // Split the page into two, moving the largest immediate subtrie of the root node to a new child
@@ -1220,10 +1234,7 @@ impl StorageEngine {
             // Update the pointer in the root node to point to the new page
             root_node.set_child(
                 largest_child_index,
-                Pointer::new(
-                    Location::for_page(child_slotted_page.id()),
-                    largest_child_pointer.rlp().clone(),
-                ),
+                largest_child_pointer.with_location(Location::for_page(child_slotted_page.id())),
             )?;
         }
         page.set_value(0, &root_node)?;
@@ -1419,7 +1430,6 @@ impl StorageEngine {
                     if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
                         let child_page_id = child.location().page_id().unwrap();
                         writeln!(buf, "{new_indent}Child on new page: {child_page_id:?}")?;
-                        return Ok(());
                     } else {
                         self.print_page_helper(
                             context,
@@ -1846,8 +1856,7 @@ fn move_subtrie_nodes(
                 // Recursively move its children
                 let new_location = move_subtrie_nodes(source_page, child_index, target_page)?;
                 // update the pointer in the parent node
-                updated_node
-                    .set_child(branch_index, Pointer::new(new_location, child_ptr.rlp().clone()))?;
+                updated_node.set_child(branch_index, child_ptr.with_location(new_location))?;
             }
         }
     }
@@ -3719,16 +3728,16 @@ mod tests {
 
         let mut new_branch_node: Node = Node::new_branch(Nibbles::new()).expect("can create node");
         new_branch_node
-            .set_child(0, Pointer::new(child_1_location, RlpNode::default()))
+            .set_child(0, Pointer::new_leaf(child_1_location, RlpNode::default()))
             .expect("can set child");
         new_branch_node
-            .set_child(15, Pointer::new(child_2_location, RlpNode::default()))
+            .set_child(15, Pointer::new_leaf(child_2_location, RlpNode::default()))
             .expect("can set child");
         let new_branch_node_index = slotted_page1.insert_value(&new_branch_node).unwrap();
         let new_branch_node_location = Location::from(new_branch_node_index as u32);
 
         root_node
-            .set_child(5, Pointer::new(new_branch_node_location, RlpNode::default()))
+            .set_child(5, Pointer::new_leaf(new_branch_node_location, RlpNode::default()))
             .expect("can set child");
         slotted_page1.set_value(0, &root_node).unwrap();
 
@@ -3828,10 +3837,10 @@ mod tests {
         // next we create and update our root node
         let mut root_node = Node::new_branch(Nibbles::new()).expect("can create node");
         root_node
-            .set_child(0, Pointer::new(child_1_location, RlpNode::default()))
+            .set_child(0, Pointer::new_leaf(child_1_location, RlpNode::default()))
             .expect("can set child");
         root_node
-            .set_child(15, Pointer::new(child_2_location, RlpNode::default()))
+            .set_child(15, Pointer::new_leaf(child_2_location, RlpNode::default()))
             .expect("can set child");
 
         let root_node_page = storage_engine.allocate_page(&mut context).unwrap();

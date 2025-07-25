@@ -1,6 +1,6 @@
 use std::{error::Error, fmt};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TransactionError;
 
 impl fmt::Display for TransactionError {
