@@ -22,12 +22,16 @@ impl StorageEngine {
             return Ok(context.root_node_hash);
         }
 
-        let mut hash_builder = HashBuilder::default();
+        let mut hash_builder = HashBuilder::default().with_updates(true);
 
         // Use proper trie traversal with overlay integration
         self.traverse_with_overlay(context, overlay, &mut hash_builder)?;
 
-        let root = hash_builder.root();
+        let (mut hash_builder, updated_branch_nodes) = hash_builder.split();
+        // println!("Updated branch nodes: {:?}", updated_branch_nodes);
+
+        let root = hash_builder.root(); // This will clear the hash builder
+                                        // println!("Root: {:?}", root);
         Ok(root)
     }
 
@@ -50,12 +54,7 @@ impl StorageEngine {
             )?;
         } else {
             // No root page, just add all overlay changes to the hash builder
-            for (path, value) in overlay.iter() {
-                if let Some(trie_value) = value {
-                    let rlp_encoded = self.encode_trie_value(trie_value)?;
-                    hash_builder.add_leaf(path, &rlp_encoded);
-                }
-            }
+            self.process_overlay_state(context, overlay, hash_builder)?;
         }
 
         Ok(())
@@ -108,12 +107,7 @@ impl StorageEngine {
         let post_overlay = overlay.sub_slice_after_prefix(&full_path);
 
         // Add all pre-overlay changes
-        for (path, value) in pre_overlay.iter() {
-            if let Some(trie_value) = value {
-                let rlp_encoded = self.encode_trie_value(trie_value)?;
-                hash_builder.add_leaf(path, &rlp_encoded);
-            }
-        }
+        self.process_overlay_state(context, &pre_overlay, hash_builder)?;
 
         // Check if this node is affected by overlay
         if overlay.affects_path(&full_path) {
@@ -131,20 +125,43 @@ impl StorageEngine {
             self.handle_unaffected_node(
                 context,
                 hash_builder,
-                slotted_page,
                 &node,
+                path_prefix,
                 &full_path,
                 node_hash,
             )?;
         }
 
-        for (path, value) in post_overlay.iter() {
-            if let Some(trie_value) = value {
-                let rlp_encoded = self.encode_trie_value(trie_value)?;
-                hash_builder.add_leaf(path, &rlp_encoded);
+        // Add all post-overlay changes
+        self.process_overlay_state(context, &post_overlay, hash_builder)?;
+
+        Ok(())
+    }
+
+    fn process_overlay_state(
+        &self,
+        context: &TransactionContext,
+        overlay: &OverlayState,
+        hash_builder: &mut HashBuilder,
+    ) -> Result<(), Error> {
+        for (path, value) in overlay.iter() {
+            // only process leaves in the current trie
+            if path.len() == 64 {
+                match value {
+                    Some(TrieValue::Account(_)) => {
+                        self.handle_overlayed_account(context, overlay, hash_builder, &path)?;
+                    }
+                    Some(TrieValue::Storage(storage_value)) => {
+                        let rlp_encoded =
+                            self.encode_trie_value(&TrieValue::Storage(*storage_value))?;
+                        hash_builder.add_leaf(path, &rlp_encoded);
+                    }
+                    None => {
+                        // Tombstone - skip
+                    }
+                }
             }
         }
-
         Ok(())
     }
 
@@ -158,17 +175,15 @@ impl StorageEngine {
         node: &Node,
         full_path: &Nibbles,
     ) -> Result<(), Error> {
-        use crate::node::NodeKind;
-
         match node.kind() {
-            NodeKind::AccountLeaf { .. } if full_path.len() == 64 => {
+            NodeKind::AccountLeaf { .. } => {
                 // Account leaf at address level - handle potential storage overlays
                 self.handle_account_leaf_with_overlay(
                     context,
                     overlay,
                     hash_builder,
                     slotted_page,
-                    node,
+                    Some(node),
                     full_path,
                 )?;
             }
@@ -201,19 +216,6 @@ impl StorageEngine {
                     full_path,
                 )?;
             }
-            _ => {
-                // Other leaf nodes - handle with simple leaf logic
-                if let Some(overlay_value) = overlay.lookup(full_path) {
-                    if let Some(trie_value) = overlay_value {
-                        let rlp_encoded = self.encode_trie_value(trie_value)?;
-                        hash_builder.add_leaf(full_path.clone(), &rlp_encoded);
-                    }
-                } else {
-                    let node_value = node.value()?;
-                    let rlp_encoded = self.encode_trie_value(&node_value)?;
-                    hash_builder.add_leaf(full_path.clone(), &rlp_encoded);
-                }
-            }
         }
         Ok(())
     }
@@ -223,8 +225,8 @@ impl StorageEngine {
         &self,
         _context: &TransactionContext,
         hash_builder: &mut HashBuilder,
-        _slotted_page: &SlottedPage,
         node: &Node,
+        path_prefix: &Nibbles,
         full_path: &Nibbles,
         node_hash: Option<B256>,
     ) -> Result<(), Error> {
@@ -233,22 +235,15 @@ impl StorageEngine {
                 // Account leaf - use disk value directly
                 let node_value = node.value()?;
                 let rlp_encoded = self.encode_trie_value(&node_value)?;
+                // println!("Adding unaffected leaf: {:?}", full_path);
                 hash_builder.add_leaf(full_path.clone(), &rlp_encoded);
             }
             NodeKind::Branch { .. } => {
                 // Branch node - since it's unaffected by overlay, we can use its existing hash
                 // This is much more efficient than recursing into all children
-                if let Some(hash) = node_hash {
-                    // Use the precomputed hash directly for this branch subtree
-                    // stored_in_database = true since this is an existing node from disk
-                    hash_builder.add_branch(full_path.clone(), hash, true);
-                } else {
-                    // Fallback: if we don't have the hash, we need to compute it
-                    // This shouldn't normally happen but provides a safety net
-                    let node_value = node.value()?;
-                    let rlp_encoded = self.encode_trie_value(&node_value)?;
-                    hash_builder.add_leaf(full_path.clone(), &rlp_encoded);
-                }
+                // println!("Adding branch node: {:?}", path_prefix);
+                let hash = node_hash.unwrap();
+                hash_builder.add_branch(path_prefix.clone(), hash, true);
             }
         }
         Ok(())
@@ -291,17 +286,15 @@ impl StorageEngine {
                         child_hash,
                     )?;
                 } else if let Some(child_page_id) = child_location.page_id() {
-                    // Child is in a different page - add safety check
-                    if self.page_exists(context, child_page_id) {
-                        self.traverse_page_with_overlay(
-                            context,
-                            &child_overlay,
-                            hash_builder,
-                            child_page_id,
-                            &child_path,
-                            child_hash,
-                        )?;
-                    }
+                    // Child is in a different page
+                    self.traverse_page_with_overlay(
+                        context,
+                        &child_overlay,
+                        hash_builder,
+                        child_page_id,
+                        &child_path,
+                        child_hash,
+                    )?;
                 }
             } else {
                 // No child exists on disk, but check if overlay has leaves for this subtree
@@ -328,95 +321,128 @@ impl StorageEngine {
         overlay: &OverlayState,
         hash_builder: &mut HashBuilder,
         slotted_page: &SlottedPage,
-        node: &Node,
+        node: Option<&Node>,
         full_path: &Nibbles,
     ) -> Result<(), Error> {
         // Get the original account from the node
-        let original_account = match node.value()? {
+        let original_account = node.map(|n| match n.value().unwrap() {
             TrieValue::Account(account) => account,
             _ => {
-                // This shouldn't happen for AccountLeaf nodes, but handle gracefully
-                let rlp_encoded = self.encode_trie_value(&node.value()?)?;
-                hash_builder.add_leaf(full_path.clone(), &rlp_encoded);
-                return Ok(());
+                panic!("Node is not an account leaf");
             }
-        };
+        });
 
         // Check if this account is directly overlaid (account-level changes)
-        if let Some(overlay_value) = overlay.lookup(full_path) {
+        let account = if let Some(overlay_value) = overlay.lookup(full_path) {
             // Direct account overlay - use overlay value, but still check for storage overlays
             if let Some(trie_value) = overlay_value {
                 // Even with account overlay, we might need to compute storage root for storage
                 // overlays
                 if let TrieValue::Account(overlay_account) = trie_value {
-                    // Check if there are storage overlays for this account
-                    let storage_overlays = overlay.find_prefix_range(full_path);
-                    let has_storage_overlays = storage_overlays
-                        .iter()
-                        .any(|(path, _)| path.len() == 128 && path.len() > full_path.len());
-
-                    if has_storage_overlays {
-                        // Compute new storage root with overlays
-                        let new_storage_root = self.compute_storage_root_iteratively(
-                            context,
-                            node, // Use the original node for storage traversal
-                            full_path,
-                            &storage_overlays,
-                            slotted_page,
-                        )?;
-
-                        // Create modified account with new storage root
-                        let mut modified_account = overlay_account.clone();
-                        modified_account.storage_root = new_storage_root;
-                        let rlp_encoded =
-                            self.encode_trie_value(&TrieValue::Account(modified_account))?;
-                        hash_builder.add_leaf(full_path.clone(), &rlp_encoded);
-                    } else {
-                        // No storage overlays, use account overlay as-is
-                        let rlp_encoded = self.encode_trie_value(trie_value)?;
-                        hash_builder.add_leaf(full_path.clone(), &rlp_encoded);
-                    }
+                    Some(overlay_account.clone())
                 } else {
-                    // Not an account value, just use as-is
-                    let rlp_encoded = self.encode_trie_value(trie_value)?;
-                    hash_builder.add_leaf(full_path.clone(), &rlp_encoded);
+                    panic!("Overlay value is not an account");
                 }
+            } else {
+                // If overlay_value is None, it's a deletion - skip
+                println!("Skipping deletion: {full_path:?}");
+                None
             }
-            // If overlay_value is None, it's a deletion - skip
-            return Ok(());
-        }
+        } else {
+            original_account
+        };
 
-        // Check if there are any storage overlays for this account
-        // Storage overlays have 128-nibble paths that start with this account's 64-nibble path
-        let storage_overlays = overlay.find_prefix_range(full_path);
-        let has_storage_overlays = storage_overlays
-            .iter()
-            .any(|(path, _)| path.len() == 128 && path.len() > full_path.len());
+        if let Some(account) = account {
+            // Check if there are any storage overlays for this account
+            // Storage overlays have 128-nibble paths that start with this account's 64-nibble path
+            let storage_overlays = overlay.find_prefix_range(full_path);
+            let has_storage_overlays = storage_overlays.iter().any(|(path, _)| path.len() == 128);
 
-        if !has_storage_overlays {
-            // No storage overlays for this account, use original account
-            let rlp_encoded = self.encode_trie_value(&TrieValue::Account(original_account))?;
+            if !has_storage_overlays {
+                // No storage overlays for this account, use original account
+                let rlp_encoded = self.encode_trie_value(&TrieValue::Account(account))?;
+                println!("Adding account leaf: {full_path:?}");
+                hash_builder.add_leaf(full_path.clone(), &rlp_encoded);
+                return Ok(());
+            }
+
+            // We have storage overlays, need to compute a new storage root using iterative approach
+            let new_storage_root = self.compute_storage_root_iteratively(
+                context,
+                node,
+                &storage_overlays,
+                slotted_page,
+            )?;
+
+            // Create a modified account with the new storage root
+            let mut modified_account = account;
+            modified_account.storage_root = new_storage_root;
+
+            // Add the modified account to the main HashBuilder
+            let rlp_encoded = self.encode_trie_value(&TrieValue::Account(modified_account))?;
             hash_builder.add_leaf(full_path.clone(), &rlp_encoded);
-            return Ok(());
         }
+        Ok(())
+    }
 
-        // We have storage overlays, need to compute a new storage root using iterative approach
-        let new_storage_root = self.compute_storage_root_iteratively(
-            context,
-            node,
-            full_path,
-            &storage_overlays,
-            slotted_page,
-        )?;
+    fn handle_overlayed_account(
+        &self,
+        context: &TransactionContext,
+        overlay: &OverlayState,
+        hash_builder: &mut HashBuilder,
+        full_path: &Nibbles,
+    ) -> Result<(), Error> {
+        // Check if the overlay is an account leaf or None
+        let account = if let Some(overlay_value) = overlay.lookup(full_path) {
+            // Direct account overlay - use overlay value, but still check for storage overlays
+            if let Some(trie_value) = overlay_value {
+                // Even with account overlay, we might need to compute storage root for storage
+                // overlays
+                if let TrieValue::Account(overlay_account) = trie_value {
+                    Some(overlay_account.clone())
+                } else {
+                    panic!("Overlay value is not an account");
+                }
+            } else {
+                // If overlay_value is None, it's a deletion - skip
+                println!("Skipping deletion: {full_path:?}");
+                None
+            }
+        } else {
+            None
+        };
 
-        // Create a modified account with the new storage root
-        let mut modified_account = original_account;
-        modified_account.storage_root = new_storage_root;
+        if let Some(account) = account {
+            // Check if there are any storage overlays for this account
+            // Storage overlays have 128-nibble paths that start with this account's 64-nibble path
+            let storage_overlays = overlay.find_prefix_range(full_path);
+            let has_storage_overlays = storage_overlays.iter().any(|(path, _)| path.len() == 128);
 
-        // Add the modified account to the main HashBuilder
-        let rlp_encoded = self.encode_trie_value(&TrieValue::Account(modified_account))?;
-        hash_builder.add_leaf(full_path.clone(), &rlp_encoded);
+            if !has_storage_overlays {
+                // No storage overlays for this account, use original account
+                let rlp_encoded = self.encode_trie_value(&TrieValue::Account(account))?;
+                println!("Adding account leaf: {full_path:?}");
+                hash_builder.add_leaf(full_path.clone(), &rlp_encoded);
+                return Ok(());
+            }
 
+            // We have storage overlays, need to compute a new storage root
+            let storage_overlay = storage_overlays.with_prefix_offset(64);
+
+            let mut storage_hash_builder = HashBuilder::default().with_updates(true);
+
+            self.process_overlay_state(context, &storage_overlay, &mut storage_hash_builder)?;
+
+            let new_storage_root = storage_hash_builder.root();
+
+            // Create a modified account with the new storage root
+            let mut modified_account = account;
+            modified_account.storage_root = new_storage_root;
+
+            // Add the modified account to the main HashBuilder
+            let rlp_encoded = self.encode_trie_value(&TrieValue::Account(modified_account))?;
+            hash_builder.add_leaf(full_path.clone(), &rlp_encoded);
+        }
         Ok(())
     }
 
@@ -425,8 +451,7 @@ impl StorageEngine {
     fn compute_storage_root_iteratively(
         &self,
         context: &TransactionContext,
-        account_node: &Node,
-        _account_path: &Nibbles,
+        account_node: Option<&Node>,
         storage_overlays: &OverlayState,
         slotted_page: &SlottedPage,
     ) -> Result<B256, Error> {
@@ -434,19 +459,22 @@ impl StorageEngine {
         // This converts 128-nibble storage paths to 64-nibble storage-relative paths
         let storage_overlay = storage_overlays.with_prefix_offset(64);
 
-        let mut storage_hash_builder = HashBuilder::default();
+        let mut storage_hash_builder = HashBuilder::default().with_updates(true);
 
         // Get the original account's storage root to determine if we need to traverse existing
         // storage
-        let original_storage_root = match account_node.value()? {
-            TrieValue::Account(account) => account.storage_root,
-            _ => return Err(Error::NodeError(crate::node::NodeError::NoValue)), /* This shouldn't happen for account nodes */
-        };
+        let original_storage_root = account_node
+            .map(|n| match n.value().unwrap() {
+                TrieValue::Account(account) => account.storage_root,
+                _ => panic!("Node is not an account leaf"), /* This shouldn't happen for account
+                                                             * nodes */
+            })
+            .unwrap_or(alloy_trie::EMPTY_ROOT_HASH);
 
         // If the account has existing storage, traverse the existing storage trie
         if original_storage_root != alloy_trie::EMPTY_ROOT_HASH {
             // Try to find the storage root page from the account node's direct child
-            if let Ok(Some(storage_root_pointer)) = account_node.direct_child() {
+            if let Ok(Some(storage_root_pointer)) = account_node.unwrap().direct_child() {
                 let storage_root_location = storage_root_pointer.location();
                 let storage_root_hash = storage_root_pointer.rlp().as_hash();
 
@@ -475,21 +503,15 @@ impl StorageEngine {
             }
         } else {
             // No existing storage, just add overlay changes
-            for (path, value) in storage_overlay.iter() {
-                if let Some(trie_value) = value {
-                    let rlp_encoded = self.encode_trie_value(trie_value)?;
-                    storage_hash_builder.add_leaf(path, &rlp_encoded);
-                }
-            }
+            self.process_overlay_state(context, &storage_overlay, &mut storage_hash_builder)?;
         }
 
-        let computed_root = storage_hash_builder.root();
-        Ok(computed_root)
-    }
+        let (mut storage_hash_builder, updated_branch_nodes) = storage_hash_builder.split();
+        println!("Updated storage branch nodes: {updated_branch_nodes:?}");
 
-    /// Check if a page exists in the storage
-    fn page_exists(&self, context: &TransactionContext, page_id: PageId) -> bool {
-        self.get_page(context, page_id).is_ok()
+        let computed_root = storage_hash_builder.root();
+        println!("Computed storage root: {computed_root:?}");
+        Ok(computed_root)
     }
 
     /// Helper to encode TrieValue as RLP
@@ -517,8 +539,9 @@ mod tests {
         account::Account, database::Database, node::TrieValue, overlay::OverlayStateMut,
         path::AddressPath,
     };
-    use alloy_primitives::{address, U256};
+    use alloy_primitives::{address, Address, U256};
     use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
+    use rand::Rng;
     use tempdir::TempDir;
 
     #[test]
@@ -1654,5 +1677,114 @@ mod tests {
             overlay_root, committed_root,
             "Empty account storage overlay root should match committed root"
         );
+    }
+
+    #[test]
+    fn test_1000_accounts_with_10_overlay() {
+        let tmp_dir = TempDir::new("test_1000_accounts_with_10_overlay").unwrap();
+        let file_path = tmp_dir.path().join("test.db");
+        let db = Database::create_new(file_path).unwrap();
+
+        let mut context = db.storage_engine.write_context();
+        let mut rng = rand::rng();
+
+        let mut changes: Vec<(Nibbles, Option<TrieValue>)> = Vec::with_capacity(1000);
+
+        for i in 0..1000 {
+            let account_address = Address::random();
+            let account =
+                Account::new(i, U256::from(rng.random::<u64>()), EMPTY_ROOT_HASH, KECCAK_EMPTY);
+            let account_path = AddressPath::for_address(account_address);
+
+            changes.push((account_path.into(), Some(TrieValue::Account(account))));
+        }
+
+        changes.sort_by(|a, b| a.0.cmp(&b.0));
+
+        db.storage_engine.set_values(&mut context, &mut changes).unwrap();
+
+        let initial_root = context.root_node_hash;
+
+        // Create overlay with modifications to every 100th account
+        let mut overlay_mut = OverlayStateMut::new();
+
+        // Take every 100th account from the changes
+        for (i, (path, value)) in changes.iter().step_by(100).enumerate() {
+            if let Some(TrieValue::Account(account)) = value {
+                if i % 2 == 0 {
+                    // For half of the sampled accounts, create new modified account
+                    let mut new_account = account.clone();
+                    new_account.balance = U256::from(rng.random::<u64>()); // Random new balance
+                    overlay_mut.insert(path.clone(), Some(TrieValue::Account(new_account)));
+                } else {
+                    // For other half, mark for deletion
+                    overlay_mut.insert(path.clone(), None);
+                }
+            }
+        }
+
+        let overlay = overlay_mut.freeze();
+
+        let overlay_root = db.storage_engine.compute_root_with_overlay(&context, &overlay).unwrap();
+        assert_ne!(overlay_root, initial_root);
+
+        // Verify by committing the storage addition
+        db.storage_engine.set_values(&mut context, overlay.data().to_vec().as_mut()).unwrap();
+        let committed_root = context.root_node_hash;
+
+        db.storage_engine
+            .print_page(&context, std::io::stdout(), context.root_node_page_id)
+            .unwrap();
+
+        assert_eq!(overlay_root, committed_root, "1000 accounts with 10 overlay should match");
+    }
+
+    #[test]
+    fn test_overlay_new_account_with_storage() {
+        let tmp_dir = TempDir::new("test_overlay_new_account_with_storage").unwrap();
+        let file_path = tmp_dir.path().join("test.db");
+        let db = Database::create_new(file_path).unwrap();
+
+        let mut context = db.storage_engine.write_context();
+
+        let account_address = Address::random();
+        let account_path = AddressPath::for_address(account_address);
+        let account = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
+
+        db.storage_engine
+            .set_values(
+                &mut context,
+                &mut [(account_path.clone().into(), Some(TrieValue::Account(account.clone())))],
+            )
+            .unwrap();
+
+        let initial_root = context.root_node_hash;
+
+        let mut overlay_mut = OverlayStateMut::new();
+        let new_address = Address::random();
+        let new_account_path = AddressPath::for_address(new_address);
+        let new_account = Account::new(2, U256::from(200), EMPTY_ROOT_HASH, KECCAK_EMPTY);
+        overlay_mut.insert(new_account_path.into(), Some(TrieValue::Account(new_account.clone())));
+
+        let storage_key = U256::from(42);
+        let storage_path =
+            crate::path::StoragePath::for_address_and_slot(new_address, storage_key.into());
+        let storage_value = U256::from(123);
+        overlay_mut
+            .insert(storage_path.full_path(), Some(TrieValue::Storage(storage_value.into())));
+
+        let overlay = overlay_mut.freeze();
+        let overlay_root = db.storage_engine.compute_root_with_overlay(&context, &overlay).unwrap();
+        assert_ne!(overlay_root, initial_root);
+
+        // Verify by committing the storage addition
+        db.storage_engine.set_values(&mut context, overlay.data().to_vec().as_mut()).unwrap();
+        let committed_root = context.root_node_hash;
+
+        db.storage_engine
+            .print_page(&context, std::io::stdout(), context.root_node_page_id)
+            .unwrap();
+
+        assert_eq!(overlay_root, committed_root, "Overlay new account with storage should match");
     }
 }
