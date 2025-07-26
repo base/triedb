@@ -47,7 +47,7 @@ pub struct BufferPoolManagerOptions {
 
 impl BufferPoolManagerOptions {
     pub fn new() -> Self {
-        Self { num_frames: 1024 }
+        Self { num_frames: 1024 * 1024 * 10 }
     }
 
     pub fn num_frames(&mut self, num_frames: u32) -> &mut Self {
