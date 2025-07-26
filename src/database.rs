@@ -2,7 +2,7 @@ use crate::{
     context::TransactionContext,
     meta::{MetadataManager, OpenMetadataError},
     metrics::DatabaseMetrics,
-    page::{PageError, PageId, PageManager, PageManagerTrait},
+    page::{BufferPoolManager, PageError, PageId, PageManager, PageManagerTrait},
     storage::engine::{self, StorageEngine},
     transaction::{Transaction, TransactionError, TransactionManager, RO, RW},
 };
@@ -99,6 +99,15 @@ impl DatabaseOptions {
 }
 
 impl Database {
+    pub fn new_with_buffer_pool(db_path: impl AsRef<Path>) -> Result<Self, OpenError> {
+        let db_path = db_path.as_ref();
+        let mut meta_path = db_path.to_path_buf();
+        meta_path.as_mut_os_string().push(".meta");
+
+        let page_manager = BufferPoolManager::open(db_path).map_err(OpenError::PageError)?;
+        Self::new(StorageEngine::new(page_manager, meta_manager))
+    }
+
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self, OpenError> {
         Self::options().open(db_path)
     }
