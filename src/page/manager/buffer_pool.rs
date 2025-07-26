@@ -33,7 +33,7 @@ struct FrameHeader {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct FrameId(usize);
+struct FrameId(u32);
 
 #[derive(Debug)]
 struct DiskScheduler {}
@@ -42,15 +42,15 @@ struct DiskScheduler {}
 struct LRUReplacer {}
 
 pub struct BufferPoolManagerOptions {
-    pub(super) num_frames: usize,
+    pub(super) num_frames: u32,
 }
 
 impl BufferPoolManagerOptions {
     pub fn new() -> Self {
-        Self { num_frames: 1024 * 1024 * 10 }
+        Self { num_frames: 1024 }
     }
 
-    pub fn num_frames(&mut self, num_frames: usize) -> &mut Self {
+    pub fn num_frames(&mut self, num_frames: u32) -> &mut Self {
         self.num_frames = num_frames;
         self
     }
@@ -59,7 +59,7 @@ impl BufferPoolManagerOptions {
 // TODO: could have a list of dirty pages
 #[derive(Debug)]
 pub struct BufferPoolManager {
-    num_frames: usize,
+    num_frames: u32,
     page_count: AtomicU32,
     file_len: AtomicU64,
     file: File,
@@ -110,14 +110,14 @@ impl BufferPoolManager {
         let num_frames = opts.num_frames;
         let page_count = AtomicU32::new(0);
         let file_len = AtomicU64::new(file.metadata().map_err(PageError::IO)?.len());
-        let page_table = DashMap::with_capacity(num_frames);
-        let mut frames = Vec::with_capacity(num_frames);
+        let page_table = DashMap::with_capacity(num_frames as usize);
+        let mut frames = Vec::with_capacity(num_frames as usize);
         for _ in 0..num_frames {
             let boxed_array = Box::new([0; Page::SIZE]);
             let ptr = Box::into_raw(boxed_array);
             frames.push(Frame { ptr });
         }
-        let dirty_frames = Mutex::new(Vec::with_capacity(num_frames));
+        let dirty_frames = Mutex::new(Vec::with_capacity(num_frames as usize));
         let free_frames = Mutex::new((0..num_frames).map(FrameId).collect::<Vec<_>>());
         let disk_scheduler = DiskScheduler {};
         let lru_replacer = LRUReplacer {};
@@ -164,7 +164,7 @@ impl PageManagerTrait for BufferPoolManager {
             return Err(PageError::PageNotFound(page_id));
         }
         let cached_page = self.page_table.get(&page_id).map(|frame_header| {
-            let frame = &self.frames[frame_header.frame_id.0];
+            let frame = &self.frames[frame_header.frame_id.0 as usize];
             unsafe { Page::from_ptr(page_id, frame.ptr) }
         });
         if let Some(page) = cached_page {
@@ -188,7 +188,7 @@ impl PageManagerTrait for BufferPoolManager {
             return Err(PageError::PageNotFound(page_id));
         }
         let cached_page = self.page_table.get(&page_id).map(|frame_header| {
-            let frame = &self.frames[frame_header.frame_id.0];
+            let frame = &self.frames[frame_header.frame_id.0 as usize];
             unsafe { PageMut::from_ptr(page_id, snapshot_id, frame.ptr) }
         });
 
@@ -221,7 +221,7 @@ impl PageManagerTrait for BufferPoolManager {
         self.page_table.insert(page_id, FrameHeader { frame_id: frame_id.clone(), pin_count: 0 });
         self.dirty_frames.lock().push((frame_id, page_id));
 
-        let data = self.frames[frame_id.0].ptr;
+        let data = self.frames[frame_id.0 as usize].ptr;
         unsafe { PageMut::acquire_unchecked(page_id, snapshot_id, data) }
     }
 
@@ -250,7 +250,7 @@ impl PageManagerTrait for BufferPoolManager {
             if batch.is_empty() {
                 current_offset = Some(offset);
             }
-            let frame = &self.frames[frame_id.0];
+            let frame = &self.frames[frame_id.0 as usize];
             unsafe {
                 let page_data = std::slice::from_raw_parts(frame.ptr as *const u8, Page::SIZE);
                 batch.push(IoSlice::new(page_data));
