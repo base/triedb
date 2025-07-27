@@ -47,7 +47,7 @@ pub struct BufferPoolManagerOptions {
 
 impl BufferPoolManagerOptions {
     pub fn new() -> Self {
-        Self { num_frames: 1024 * 1024 * 10 }
+        Self { num_frames: 1024 * 1024 * 2 }
     }
 
     pub fn num_frames(&mut self, num_frames: u32) -> &mut Self {
@@ -68,11 +68,9 @@ pub struct BufferPoolManager {
     page_table: DashMap<PageId, FrameHeader>, /* mapping between page id and buffer pool frames,
                                                * indexed by page id with fix num_frames size */
     free_frames: Mutex<Vec<FrameId>>, /* list of free frames that do not hold any pages'
-                                       * data, indexed by frame id with fix num_frames
-                                       * size */
+                                       * data, with fix num_frames size */
     dirty_frames: Mutex<Vec<(FrameId, PageId)>>, /* list of dirty frames that need to be flushed
-                                                  * to disk,
-                                                  * indexed by frame id with fix num_frames size */
+                                                  * to disk, with fix num_frames size */
     disk_scheduler: DiskScheduler, /* the scheduler to schedule disk flushing operations */
     lru_replacer: LRUReplacer,     /* the replacer to find unpinned/candidate pages for
                                     * eviction */
