@@ -7,6 +7,7 @@ use std::{
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
+use cache_advisor::CacheAdvisor;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 
@@ -45,9 +46,11 @@ pub struct BufferPoolManagerOptions {
     pub(super) num_frames: u32,
 }
 
+const DEFAULT_NUM_FRAMES: u32 = 1024 * 1024 * 2;
+
 impl BufferPoolManagerOptions {
     pub fn new() -> Self {
-        Self { num_frames: 1024 * 1024 * 2 }
+        Self { num_frames: DEFAULT_NUM_FRAMES }
     }
 
     pub fn num_frames(&mut self, num_frames: u32) -> &mut Self {
@@ -72,7 +75,7 @@ pub struct BufferPoolManager {
     dirty_frames: Mutex<Vec<(FrameId, PageId)>>, /* list of dirty frames that need to be flushed
                                                   * to disk, with fix num_frames size */
     disk_scheduler: DiskScheduler, /* the scheduler to schedule disk flushing operations */
-    lru_replacer: LRUReplacer,     /* the replacer to find unpinned/candidate pages for
+    lru_replacer: CacheAdvisor,    /* the replacer to find unpinned/candidate pages for
                                     * eviction */
 }
 
@@ -118,7 +121,7 @@ impl BufferPoolManager {
         let dirty_frames = Mutex::new(Vec::with_capacity(num_frames as usize));
         let free_frames = Mutex::new((0..num_frames).map(FrameId).collect::<Vec<_>>());
         let disk_scheduler = DiskScheduler {};
-        let lru_replacer = LRUReplacer {};
+        let lru_replacer = CacheAdvisor::new(num_frames as usize, 20);
 
         Ok(BufferPoolManager {
             num_frames,
