@@ -33,7 +33,7 @@ struct FrameHeader {
     pin_count: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 struct FrameId(u32);
 
 #[derive(Debug)]
@@ -148,7 +148,7 @@ impl BufferPoolManager {
 
     fn get_free_frame(&self) -> Option<FrameId> {
         let mut free_frames = self.free_frames.lock();
-        // TODO: we could run out of free frames, need to evict pages
+        // TODO: could run out of free frames, need to evict pages
         free_frames.pop()
     }
 
@@ -172,7 +172,7 @@ impl PageManagerTrait for BufferPoolManager {
             return page;
         }
 
-        // Otherwise, we need to load the page from disk
+        // Otherwise, need to load the page from disk
         let mut file = &self.file;
         let frame_id = self.get_free_frame().ok_or(PageError::OutOfMemory)?;
 
@@ -197,7 +197,7 @@ impl PageManagerTrait for BufferPoolManager {
             return page;
         }
 
-        // Otherwise, we need to load the page from disk
+        // Otherwise, need to load the page from disk
         let mut file = &self.file;
         let frame_id = self.get_free_frame().ok_or(PageError::OutOfMemory)?;
 
@@ -310,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn test_allocate_get() {
+    fn test_allocate_cache() {
         let snapshot = 1234;
         let f = tempfile::tempfile().expect("temporary file creation failed");
         let opts = BufferPoolManagerOptions::new();
@@ -327,10 +327,40 @@ mod tests {
             assert_eq!(page.contents(), &mut [0; Page::DATA_SIZE]);
             assert_eq!(page.snapshot_id(), snapshot);
             drop(page);
+        }
+
+        // Verify the page is in the cache, and is dirty after allocate
+        for i in 1..=10 {
+            let i = PageId::new(i).unwrap();
+            let cached_page = m.page_table.get(&i).expect("page not in cache");
+            let dirty_frames = m.dirty_frames.lock();
+            assert!(dirty_frames.iter().any(|x| x.0 == cached_page.frame_id && x.1 == i));
+        }
+    }
+
+    #[test]
+    fn test_allocate_get() {
+        let snapshot = 1234;
+        let f = tempfile::tempfile().expect("temporary file creation failed");
+        let opts = BufferPoolManagerOptions::new();
+        let m = BufferPoolManager::from_file_with_options(&opts, f.try_clone().unwrap())
+            .expect("mmap creation failed");
+
+        for i in 1..=10 {
+            let i = PageId::new(i).unwrap();
+            let err = m.get(42, i).unwrap_err();
+            assert!(matches!(err, PageError::PageNotFound(page_id) if page_id == i));
+
+            let mut page = m.allocate(snapshot).unwrap();
+            assert_eq!(page.id(), i);
+            assert_eq!(page.contents(), &mut [0; Page::DATA_SIZE]);
+            assert_eq!(page.snapshot_id(), snapshot);
+            page.contents_mut().iter_mut().for_each(|byte| *byte = 0x12);
+            drop(page);
 
             let page = m.get(snapshot, i).unwrap();
             assert_eq!(page.id(), i);
-            assert_eq!(page.contents(), &mut [0; Page::DATA_SIZE]);
+            assert_eq!(page.contents(), &mut [0x12; Page::DATA_SIZE]);
             assert_eq!(page.snapshot_id(), snapshot);
         }
     }
