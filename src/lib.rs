@@ -20,6 +20,7 @@ pub mod node;
 pub mod page;
 pub mod path;
 pub mod pointer;
+pub mod rlp;
 pub mod snapshot;
 pub mod storage;
 pub mod transaction;

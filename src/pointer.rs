@@ -1,37 +1,48 @@
-use alloy_trie::nodes::RlpNode;
-
 use crate::{
+    executor::{Inline, Wait},
     location::Location,
+    rlp::DeferredRlpNode,
     storage::value::{self, Value},
 };
 use alloy_primitives::{B256, U256};
 use alloy_rlp::encode;
+use alloy_trie::nodes::RlpNode;
 use proptest::prelude::*;
 use proptest_derive::Arbitrary;
 
 const HASH_FLAG: u8 = 0x1;
+
 /// A pointer to a node in the trie.
 /// This is a wrapper around a [Location] and an [RlpNode].
-#[derive(Debug, Clone, PartialEq, Eq, Arbitrary)]
+#[derive(Debug, PartialEq, Eq, Clone, Arbitrary)]
 pub struct Pointer {
     location: Location,
     #[proptest(strategy = "u256_or_hash()")]
-    rlp: RlpNode,
+    rlp: DeferredRlpNode,
 }
 
 impl Pointer {
     /// Creates a new [Pointer] from a [Location] and an [RlpNode].
+    #[inline]
+    #[must_use]
     pub fn new(location: Location, rlp: RlpNode) -> Self {
+        Self::new_deferred(location, rlp.into())
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn new_deferred(location: Location, rlp: DeferredRlpNode) -> Self {
         Self { location, rlp }
     }
 
     /// Creates a new [Pointer] from a [Location] with an unhashed [RlpNode].
+    #[must_use]
     pub fn new_unhashed(location: Location) -> Self {
-        Self { location, rlp: RlpNode::from_rlp(&[]) }
+        Self { location, rlp: RlpNode::from_rlp(&[]).into() }
     }
 
     /// Returns the [RlpNode] wrapped by the [Pointer].
-    pub fn rlp(&self) -> &RlpNode {
+    pub fn rlp(&self) -> &DeferredRlpNode {
         &self.rlp
     }
 
@@ -48,6 +59,15 @@ impl Pointer {
     /// + 1 bit.
     pub fn is_hash(&self) -> bool {
         self.rlp.is_hash()
+    }
+}
+
+impl Wait for Pointer {
+    type Output = Self;
+
+    fn wait(&self) -> &Self::Output {
+        self.rlp.wait();
+        self
     }
 }
 
@@ -70,6 +90,7 @@ impl Value for Pointer {
         let arr: [u8; 37] = bytes.try_into().map_err(|_| value::Error::InvalidEncoding)?;
         let flags = arr[4];
         let rlp = if flags & HASH_FLAG == HASH_FLAG {
+            debug_assert!(!(arr[5..37]).iter().all(|b| *b == 0), "read a hash of all zeros");
             RlpNode::word_rlp(&B256::from_slice(&arr[5..37]))
         } else {
             // Because the RLP string must be 1-32 bytes, we can safely use the first byte to
@@ -111,7 +132,7 @@ impl From<&Pointer> for [u8; 37] {
         // Determine flags and content
         let rlp = pointer.rlp();
         let (flags, content) =
-            if rlp.is_hash() { (HASH_FLAG, &rlp[1..]) } else { (0, rlp.as_ref()) };
+            if rlp.is_hash() { (HASH_FLAG, &rlp.as_slice()[1..]) } else { (0, rlp.as_slice()) };
 
         data[4] = flags;
         let content_len = content.len().min(33);
@@ -120,25 +141,25 @@ impl From<&Pointer> for [u8; 37] {
     }
 }
 
-fn u256_or_hash() -> impl Strategy<Value = RlpNode> {
+fn u256_or_hash() -> impl Strategy<Value = DeferredRlpNode> {
     prop_oneof![arb_u256_rlp(), arb_hash_rlp(),]
 }
 
-fn arb_u256_rlp() -> impl Strategy<Value = RlpNode> {
-    any::<U256>().prop_map(|u| RlpNode::from_rlp(&encode(u))).boxed()
+fn arb_u256_rlp() -> impl Strategy<Value = DeferredRlpNode> {
+    any::<U256>().prop_map(|u| DeferredRlpNode::from_rlp(Inline, encode(u))).boxed()
 }
 
-fn arb_hash_rlp() -> impl Strategy<Value = RlpNode> {
-    any::<B256>().prop_map(|h: B256| RlpNode::word_rlp(&h)).boxed()
+fn arb_hash_rlp() -> impl Strategy<Value = DeferredRlpNode> {
+    any::<B256>().prop_map(|h: B256| DeferredRlpNode::word_rlp(&h)).boxed()
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::executor::Wait;
     use alloy_primitives::hex;
     use alloy_rlp::encode;
     use alloy_trie::EMPTY_ROOT_HASH;
-
-    use super::*;
 
     #[test]
     fn test_pointer_to_bytes() {
@@ -186,33 +207,33 @@ mod tests {
         rlp_hash_bytes.extend(&EMPTY_ROOT_HASH);
         let pointer = Pointer::from_bytes(&rlp_hash_bytes).unwrap();
         assert_eq!(pointer.location(), Location::for_cell(1));
-        assert_eq!(pointer.rlp(), &RlpNode::word_rlp(&EMPTY_ROOT_HASH));
+        assert_eq!(pointer.rlp().wait(), &RlpNode::word_rlp(&EMPTY_ROOT_HASH));
 
         let mut short_rlp_bytes = vec![0, 0, 0, 1, 0, 42];
         short_rlp_bytes.extend([0; 31]);
         let pointer = Pointer::from_bytes(&short_rlp_bytes).unwrap();
         assert_eq!(pointer.location(), Location::for_cell(1));
-        assert_eq!(pointer.rlp(), &RlpNode::from_rlp(&encode(42u64)));
+        assert_eq!(pointer.rlp().wait(), &RlpNode::from_rlp(&encode(42u64)));
 
         let mut zero_rlp_bytes = vec![0, 0, 0, 1, 0, 128];
         zero_rlp_bytes.extend([0; 31]);
         let pointer = Pointer::from_bytes(&zero_rlp_bytes).unwrap();
         assert_eq!(pointer.location(), Location::for_cell(1));
-        assert_eq!(pointer.rlp(), &RlpNode::from_rlp(&encode(0u64)));
+        assert_eq!(pointer.rlp().wait(), &RlpNode::from_rlp(&encode(0u64)));
 
         let mut short_string_rlp_bytes = vec![0, 0, 0, 1, 0, 139];
         short_string_rlp_bytes.extend(b"hello world");
         short_string_rlp_bytes.extend([0; 20]);
         let pointer = Pointer::from_bytes(&short_string_rlp_bytes).unwrap();
         assert_eq!(pointer.location(), Location::for_cell(1));
-        assert_eq!(pointer.rlp(), &RlpNode::from_rlp(&encode("hello world")));
+        assert_eq!(pointer.rlp().wait(), &RlpNode::from_rlp(&encode("hello world")));
 
         let mut short_leaf_rlp_bytes =
             vec![0, 0, 0, 1, 0, 0xc7, 0x83, 0x61, 0x62, 0x63, 0x82, 0x30, 0x39];
         short_leaf_rlp_bytes.extend([0; 24]);
         let pointer = Pointer::from_bytes(&short_leaf_rlp_bytes).unwrap();
         assert_eq!(pointer.location(), Location::for_cell(1));
-        assert_eq!(pointer.rlp(), &RlpNode::from_rlp(&hex!("c783616263823039")));
+        assert_eq!(pointer.rlp().wait(), &RlpNode::from_rlp(&hex!("c783616263823039")));
     }
 
     proptest! {

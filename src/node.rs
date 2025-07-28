@@ -1,6 +1,8 @@
 use crate::{
     account::Account,
+    executor::{Executor, Wait},
     pointer::Pointer,
+    rlp::DeferredRlpNode,
     storage::value::{self, Value},
 };
 use alloy_primitives::{hex, StorageValue, B256, U256};
@@ -282,7 +284,12 @@ impl Node {
     ///
     /// This will typically be a 33 byte prefixed keccak256 hash.
     pub fn to_rlp_node(&self) -> RlpNode {
-        RlpNode::from_rlp(&self.rlp_encode())
+        RlpNode::from_rlp(&self.wait().rlp_encode())
+    }
+
+    pub fn to_deferred_rlp_node<E: Executor>(&self, executor: E) -> DeferredRlpNode {
+        let this = self.clone();
+        DeferredRlpNode::from_rlp_with(executor, move || this.wait().rlp_encode())
     }
 
     /// Returns the RLP encoding of the [Node].
@@ -316,6 +323,29 @@ impl Node {
         let total_children = children.iter().filter(|child| child.is_some()).count();
         let slot_size = max(total_children.next_power_of_two(), MIN_SLOT_SIZE);
         (total_children, slot_size)
+    }
+}
+
+impl Wait for Node {
+    type Output = Self;
+
+    fn wait(&self) -> &Self::Output {
+        match self.kind() {
+            NodeKind::AccountLeaf { ref storage_root, .. } => {
+                if let Some(storage_root) = storage_root {
+                    storage_root.wait();
+                }
+            }
+            NodeKind::StorageLeaf { .. } => {}
+            NodeKind::Branch { ref children } => {
+                children.iter().for_each(|child| {
+                    if let Some(child) = child {
+                        child.wait();
+                    }
+                });
+            }
+        }
+        self
     }
 }
 
@@ -648,7 +678,7 @@ pub fn encode_branch(children: &[Option<Pointer>], out: &mut dyn BufMut) -> usiz
     // now encode the children
     for child in children.iter() {
         if let Some(child) = child {
-            out.put_slice(child.rlp());
+            out.put_slice(child.rlp().as_slice());
         } else {
             out.put_u8(EMPTY_STRING_CODE);
         }
