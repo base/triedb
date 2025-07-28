@@ -111,6 +111,12 @@ impl Page<'_> {
     pub fn contents(&self) -> &[u8] {
         self.raw_contents()
     }
+
+    /// Returns all contents of the page, including the header
+    #[cfg(test)]
+    pub fn all_contents(&self) -> &[u8; Page::SIZE] {
+        unsafe { &*self.inner.ptr.cast() }
+    }
 }
 
 impl fmt::Debug for Page<'_> {

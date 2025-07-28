@@ -183,10 +183,12 @@ impl PageManagerTrait for BufferPoolManager {
         let frame_id = self.get_free_frame().ok_or(PageError::OutOfMemory)?;
 
         file.seek(SeekFrom::Start(page_id.as_offset() as u64)).map_err(PageError::IO)?;
-        let mut buf = vec![0; Page::SIZE];
-        file.read_exact(&mut buf).map_err(PageError::IO)?;
+        let buf: *mut [u8; Page::SIZE] = self.frames[frame_id.0 as usize].ptr;
+        unsafe {
+            file.read_exact(&mut *buf).map_err(PageError::IO)?;
+        }
         self.page_table.insert(page_id, FrameHeader { frame_id, pin_count: 0 });
-        unsafe { Page::from_ptr(page_id, buf.as_mut_ptr().cast()) }
+        unsafe { Page::from_ptr(page_id, buf) }
     }
 
     /// Retrieves a mutable page from the buffer pool.
@@ -208,11 +210,13 @@ impl PageManagerTrait for BufferPoolManager {
         let frame_id = self.get_free_frame().ok_or(PageError::OutOfMemory)?;
 
         file.seek(SeekFrom::Start(page_id.as_offset() as u64)).map_err(PageError::IO)?;
-        let mut buf = vec![0; Page::SIZE];
-        file.read_exact(&mut buf).map_err(PageError::IO)?;
+        let buf: *mut [u8; Page::SIZE] = self.frames[frame_id.0 as usize].ptr;
+        unsafe {
+            file.read_exact(&mut *buf).map_err(PageError::IO)?;
+        }
         self.page_table.insert(page_id, FrameHeader { frame_id, pin_count: 0 });
         self.dirty_frames.lock().push((frame_id, page_id));
-        unsafe { PageMut::from_ptr(page_id, snapshot_id, buf.as_mut_ptr().cast()) }
+        unsafe { PageMut::from_ptr(page_id, snapshot_id, buf) }
     }
 
     /// Adds a new page to the buffer pool.
@@ -449,8 +453,6 @@ mod tests {
     fn get_cache() {
         let snapshot = 123;
         let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
-        // let f = temp_file.into_file();
-        let _i = temp_file.path().to_str();
         {
             let m = BufferPoolManager::open(temp_file.path()).expect("buffer pool creation failed");
             for i in 1..=255 {
@@ -460,6 +462,7 @@ mod tests {
             m.sync().expect("sync failed");
         }
         {
+            // get
             let mut opts = BufferPoolManagerOptions::new();
             opts.page_count(255);
             let m = BufferPoolManager::open_with_options(&opts, temp_file.path())
@@ -468,22 +471,13 @@ mod tests {
                 let page_id = PageId::new(i).unwrap();
                 let page = m.get(snapshot + i as u64, page_id).expect("page not in cache");
                 assert_eq!(page.contents(), &mut [0xab ^ (i as u8); Page::DATA_SIZE]);
-                m.page_table.get(&page_id).expect("page not in cache");
+                let frame_id = m.page_table.get(&page_id).expect("page not in cache").frame_id;
+                let frame = &m.frames[frame_id.0 as usize];
+                assert_eq!(frame.ptr as *const u8, page.all_contents().as_ptr());
             }
         }
         {
-            let mut opts = BufferPoolManagerOptions::new();
-            opts.page_count(255);
-            let m = BufferPoolManager::open_with_options(&opts, temp_file.path())
-                .expect("buffer pool creation failed");
-            for i in 1..=255 {
-                let page_id = PageId::new(i).unwrap();
-                let page = m.get(snapshot + i as u64, page_id).expect("page not in cache");
-                assert_eq!(page.contents(), &mut [0xab ^ (i as u8); Page::DATA_SIZE]);
-                m.page_table.get(&page_id).expect("page not in cache");
-            }
-        }
-        {
+            // get_mut
             let mut opts = BufferPoolManagerOptions::new();
             opts.page_count(255);
             let m = BufferPoolManager::open_with_options(&opts, temp_file.path())
@@ -492,13 +486,10 @@ mod tests {
                 let page_id = PageId::new(i).unwrap();
                 let page = m.get_mut(snapshot + i as u64, page_id).expect("page not in cache");
                 assert_eq!(page.contents(), &mut [0xab ^ (i as u8); Page::DATA_SIZE]);
-                m.page_table.get(&page_id).expect("page not in cache");
+                let frame_id = m.page_table.get(&page_id).expect("page not in cache").frame_id;
+                let frame = &m.frames[frame_id.0 as usize];
+                assert_eq!(frame.ptr as *const u8, page.all_contents().as_ptr());
             }
         }
-    }
-
-    #[test]
-    fn get_mut_cache() {
-        todo!()
     }
 }
