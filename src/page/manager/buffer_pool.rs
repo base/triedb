@@ -329,7 +329,7 @@ mod tests {
             drop(page);
         }
 
-        // Verify the page is in the cache, and is dirty after allocate
+        // Verify pages are in the cache, and are dirty after allocate
         for i in 1..=10 {
             let i = PageId::new(i).unwrap();
             let cached_page = m.page_table.get(&i).expect("page not in cache");
@@ -433,5 +433,37 @@ mod tests {
             assert_eq!(read(&f, 8), (snapshot + i as u64).to_le_bytes());
             assert_eq!(read(&f, Page::DATA_SIZE - 8), [0xab ^ (i as u8); Page::DATA_SIZE - 8]);
         }
+    }
+
+    #[test]
+    fn get_cache() {
+        let snapshot = 123;
+        let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
+        // let f = temp_file.into_file();
+        let _i = temp_file.path().to_str();
+
+        {
+            let m = BufferPoolManager::open(temp_file.path()).expect("buffer pool creation failed");
+            for i in 1..=255 {
+                let mut p = m.allocate(snapshot + i as u64).expect("page allocation failed");
+                p.contents_mut().iter_mut().for_each(|byte| *byte = 0xab ^ (i as u8));
+            }
+            m.sync().expect("sync failed");
+        }
+
+        {
+            let m = BufferPoolManager::open(temp_file.path()).expect("buffer pool creation failed");
+            for i in 1..=255 {
+                let page_id = PageId::new(i).unwrap();
+                let page = m.get(snapshot + i as u64, page_id).expect("page not in cache");
+                assert_eq!(page.contents(), &mut [0xab ^ (i as u8); Page::DATA_SIZE]);
+                m.page_table.get(&page_id).expect("page not in cache");
+            }
+        }
+    }
+
+    #[test]
+    fn get_mut_cache() {
+        todo!()
     }
 }
