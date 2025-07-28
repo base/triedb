@@ -105,11 +105,11 @@ impl<T> Clone for Future<T> {
 
 impl<T: fmt::Debug> fmt::Debug for Future<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        struct Pending;
+        struct Pending(*const ());
 
         impl fmt::Debug for Pending {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("<pending>")
+                write!(f, "<pending @ {:?}>", self.0)
             }
         }
 
@@ -121,9 +121,12 @@ impl<T: fmt::Debug> fmt::Debug for Future<T> {
             }
         }
 
+        let p = Arc::as_ptr(&self.cell) as *const ();
+        let p = Pending(p);
+
         f.debug_tuple("Future")
             .field(match self.try_get() {
-                None => &Pending,
+                None => &p,
                 Some(Ok(value)) => value,
                 Some(Err(PoisonError)) => &Poisoned,
             })
