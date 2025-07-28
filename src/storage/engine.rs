@@ -89,7 +89,11 @@ impl StorageEngine {
     /// Mark a given page as no longer in use (orphan).
     fn orphan_page(&self, context: &TransactionContext, page_id: PageId) -> Result<(), Error> {
         let orphan = OrphanPage::new(page_id, context.snapshot_id);
-        self.meta_manager.lock().orphan_pages().push(orphan).map_err(Error::from)
+        self.meta_manager
+            .lock()
+            .orphan_pages()
+            .push(orphan, context.snapshot_id)
+            .map_err(Error::from)
     }
 
     /// Retrieves a mutable clone of a [Page] from the underlying [PageManager].
@@ -1868,7 +1872,7 @@ impl StorageEngine {
             .meta_manager
             .lock()
             .orphan_pages()
-            .pop(alive_snapshot)
+            .pop(alive_snapshot, context.snapshot_id)
             .map(|orphan| orphan.page_id());
 
         let page_to_return = if let Some(orphaned_page_id) = orphaned_page_id {
@@ -3119,7 +3123,7 @@ mod tests {
 
         // Prepare updates for some existing accounts
         for (i, (path, _)) in accounts.iter().enumerate() {
-            if i.is_multiple_of(5) {
+            if i % 5 == 0 {
                 // Update every 5th account
                 let new_balance = rng.random_range(0..1_000_000);
                 let new_nonce = rng.random_range(0..100);
