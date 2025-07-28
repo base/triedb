@@ -172,10 +172,9 @@ impl StorageEngine {
         // check the cache
         let nibbles = storage_path.get_address().to_nibbles();
         let cache_reader = self.contract_account_loc_cache.read();
-        let cache_location = cache_reader.get(context.snapshot_id, nibbles.clone());
+        let cache_location = cache_reader.get(context.snapshot_id, nibbles);
         let (slotted_page, page_index, path_offset) = match cache_location {
             Some((page_id, page_index)) => {
-                let (page_id, page_index) = (*page_id, *page_index);
                 context.transaction_metrics.inc_cache_storage_read_hit();
 
                 let path_offset = storage_path.get_slot_offset();
@@ -249,12 +248,11 @@ impl StorageEngine {
                 {
                     let original_path = Nibbles::from_nibbles_unchecked(original_path_slice);
                     let mut cache_writer = self.contract_account_loc_cache.write();
-                    cache_writer.insert(
+                    cache_writer.write(
                         context.snapshot_id,
                         original_path,
-                        (slotted_page.id(), page_index),
+                        Some((slotted_page.id(), page_index)),
                     );
-                    cache_writer.commit();
                 }
             }
 
@@ -329,7 +327,6 @@ impl StorageEngine {
                 cache_writer.remove(context.snapshot_id, address_path.to_nibbles().clone());
             }
         });
-        cache_writer.commit();
 
         let pointer_change =
             self.set_values_in_page(context, changes, 0, context.root_node_page_id.unwrap())?;
@@ -2528,8 +2525,7 @@ mod tests {
                 storage_engine.get_account(&mut context, address_path.clone()).unwrap().unwrap();
             assert_eq!(read_account, account);
             let cache_reader = storage_engine.contract_account_loc_cache.read();
-            let cached_location =
-                cache_reader.get(context.snapshot_id, address_path.to_nibbles().clone());
+            let cached_location = cache_reader.get(context.snapshot_id, address_path.to_nibbles());
             assert!(cached_location.is_none());
         }
         {
@@ -2589,7 +2585,7 @@ mod tests {
             // the account should be cached
             let cache_reader = storage_engine.contract_account_loc_cache.read();
             let account_cache_location =
-                cache_reader.get(context.snapshot_id, address_path.to_nibbles().clone()).unwrap();
+                cache_reader.get(context.snapshot_id, address_path.to_nibbles()).unwrap();
             assert_eq!(account_cache_location.0, PageId::new(1).unwrap());
             assert_eq!(account_cache_location.1, 2); // 0 is the branch page, 1 is the first EOA
                                                      // account, 2 is the this contract account
@@ -2678,7 +2674,7 @@ mod tests {
             // the cache should be invalidated
             let cache_reader = storage_engine.contract_account_loc_cache.read();
             let account_cache_location =
-                cache_reader.get(context.snapshot_id, address_path.to_nibbles().clone());
+                cache_reader.get(context.snapshot_id, address_path.to_nibbles());
             assert!(account_cache_location.is_none());
         }
     }
