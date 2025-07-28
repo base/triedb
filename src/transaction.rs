@@ -6,7 +6,6 @@ use crate::{
     context::TransactionContext,
     database::Database,
     node::TrieValue,
-    overlay::OverlayStateMut,
     path::{AddressPath, StoragePath},
     storage::proofs::AccountProof,
 };
@@ -47,7 +46,6 @@ pub struct Transaction<DB, K: TransactionKind> {
     context: TransactionContext,
     database: DB,
     pending_changes: HashMap<Nibbles, Option<TrieValue>>,
-    overlay_state: Option<OverlayStateMut>,
     _marker: std::marker::PhantomData<K>,
 }
 
@@ -58,7 +56,6 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
             context,
             database,
             pending_changes: HashMap::new(),
-            overlay_state: None,
             _marker: std::marker::PhantomData,
         }
     }
