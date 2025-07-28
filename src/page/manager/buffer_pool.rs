@@ -44,17 +44,23 @@ struct LRUReplacer {}
 
 pub struct BufferPoolManagerOptions {
     pub(super) num_frames: u32,
+    pub(super) page_count: u32,
 }
 
 const DEFAULT_NUM_FRAMES: u32 = 1024 * 1024 * 2;
 
 impl BufferPoolManagerOptions {
     pub fn new() -> Self {
-        Self { num_frames: DEFAULT_NUM_FRAMES }
+        Self { num_frames: DEFAULT_NUM_FRAMES, page_count: 0 }
     }
 
     pub fn num_frames(&mut self, num_frames: u32) -> &mut Self {
         self.num_frames = num_frames;
+        self
+    }
+
+    pub fn page_count(&mut self, page_count: u32) -> &mut Self {
+        self.page_count = page_count;
         self
     }
 }
@@ -109,7 +115,7 @@ impl BufferPoolManager {
         file: File,
     ) -> Result<Self, PageError> {
         let num_frames = opts.num_frames;
-        let page_count = AtomicU32::new(0);
+        let page_count = AtomicU32::new(opts.page_count);
         let file_len = AtomicU64::new(file.metadata().map_err(PageError::IO)?.len());
         let page_table = DashMap::with_capacity(num_frames as usize);
         let mut frames = Vec::with_capacity(num_frames as usize);
@@ -358,6 +364,7 @@ mod tests {
             page.contents_mut().iter_mut().for_each(|byte| *byte = 0x12);
             drop(page);
 
+            // Verify the page content with get()
             let page = m.get(snapshot, i).unwrap();
             assert_eq!(page.id(), i);
             assert_eq!(page.contents(), &mut [0x12; Page::DATA_SIZE]);
@@ -396,6 +403,7 @@ mod tests {
         p1.contents_mut().iter_mut().for_each(|byte| *byte = 0xcd);
         drop(p1);
 
+        // Verify the page content with get after get_mut and modify
         let p1 = m.get(snapshot, page_id!(1)).unwrap();
         assert_eq!(p1.id(), page_id!(1));
         assert_eq!(p1.snapshot_id(), snapshot);
@@ -426,10 +434,12 @@ mod tests {
         for i in 1..=255 {
             let mut p = m.allocate(snapshot + i as u64).expect("page allocation failed");
             p.contents_mut().iter_mut().for_each(|byte| *byte = 0xab ^ (i as u8));
-            drop(p);
-            m.sync().expect("sync failed");
+        }
+        m.sync().expect("sync failed");
+
+        assert_eq!(len(&f), 256 * Page::SIZE);
+        for i in 1..=255 {
             seek(&f, i * Page::SIZE as u64);
-            assert_eq!(len(&f), (i + 1) as usize * Page::SIZE);
             assert_eq!(read(&f, 8), (snapshot + i as u64).to_le_bytes());
             assert_eq!(read(&f, Page::DATA_SIZE - 8), [0xab ^ (i as u8); Page::DATA_SIZE - 8]);
         }
@@ -441,7 +451,6 @@ mod tests {
         let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
         // let f = temp_file.into_file();
         let _i = temp_file.path().to_str();
-
         {
             let m = BufferPoolManager::open(temp_file.path()).expect("buffer pool creation failed");
             for i in 1..=255 {
@@ -450,12 +459,38 @@ mod tests {
             }
             m.sync().expect("sync failed");
         }
-
         {
-            let m = BufferPoolManager::open(temp_file.path()).expect("buffer pool creation failed");
+            let mut opts = BufferPoolManagerOptions::new();
+            opts.page_count(255);
+            let m = BufferPoolManager::open_with_options(&opts, temp_file.path())
+                .expect("buffer pool creation failed");
             for i in 1..=255 {
                 let page_id = PageId::new(i).unwrap();
                 let page = m.get(snapshot + i as u64, page_id).expect("page not in cache");
+                assert_eq!(page.contents(), &mut [0xab ^ (i as u8); Page::DATA_SIZE]);
+                m.page_table.get(&page_id).expect("page not in cache");
+            }
+        }
+        {
+            let mut opts = BufferPoolManagerOptions::new();
+            opts.page_count(255);
+            let m = BufferPoolManager::open_with_options(&opts, temp_file.path())
+                .expect("buffer pool creation failed");
+            for i in 1..=255 {
+                let page_id = PageId::new(i).unwrap();
+                let page = m.get(snapshot + i as u64, page_id).expect("page not in cache");
+                assert_eq!(page.contents(), &mut [0xab ^ (i as u8); Page::DATA_SIZE]);
+                m.page_table.get(&page_id).expect("page not in cache");
+            }
+        }
+        {
+            let mut opts = BufferPoolManagerOptions::new();
+            opts.page_count(255);
+            let m = BufferPoolManager::open_with_options(&opts, temp_file.path())
+                .expect("buffer pool creation failed");
+            for i in 1..=255 {
+                let page_id = PageId::new(i).unwrap();
+                let page = m.get_mut(snapshot + i as u64, page_id).expect("page not in cache");
                 assert_eq!(page.contents(), &mut [0xab ^ (i as u8); Page::DATA_SIZE]);
                 m.page_table.get(&page_id).expect("page not in cache");
             }
