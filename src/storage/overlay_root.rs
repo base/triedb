@@ -894,8 +894,8 @@ mod tests {
                 &mut context,
                 &mut [
                     (account_path.clone().into(), Some(TrieValue::Account(account.clone()))),
-                    (storage_path1.full_path(), Some(TrieValue::Storage(storage_value1.into()))),
-                    (storage_path2.full_path(), Some(TrieValue::Storage(storage_value2.into()))),
+                    (storage_path1.full_path(), Some(TrieValue::Storage(storage_value1))),
+                    (storage_path2.full_path(), Some(TrieValue::Storage(storage_value2))),
                 ],
             )
             .unwrap();
@@ -906,10 +906,8 @@ mod tests {
         // Test Case 1: Overlay that modifies existing storage
         let mut overlay_mut = OverlayStateMut::new();
         let new_storage_value1 = U256::from(999);
-        overlay_mut.insert(
-            storage_path1.full_path(),
-            Some(OverlayValue::Storage(new_storage_value1.into())),
-        );
+        overlay_mut
+            .insert(storage_path1.full_path(), Some(OverlayValue::Storage(new_storage_value1)));
         let overlay = overlay_mut.freeze();
 
         let (overlay_root, _) =
@@ -923,11 +921,8 @@ mod tests {
                 &mut verification_context,
                 &mut [
                     (account_path.clone().into(), Some(TrieValue::Account(account.clone()))),
-                    (
-                        storage_path1.full_path(),
-                        Some(TrieValue::Storage(new_storage_value1.into())),
-                    ),
-                    (storage_path2.full_path(), Some(TrieValue::Storage(storage_value2.into()))),
+                    (storage_path1.full_path(), Some(TrieValue::Storage(new_storage_value1))),
+                    (storage_path2.full_path(), Some(TrieValue::Storage(storage_value2))),
                 ],
             )
             .unwrap();
@@ -944,8 +939,7 @@ mod tests {
         let storage_path3 =
             crate::path::StoragePath::for_address_and_slot(account_address, storage_key3.into());
         let storage_value3 = U256::from(789);
-        overlay_mut2
-            .insert(storage_path3.full_path(), Some(OverlayValue::Storage(storage_value3.into())));
+        overlay_mut2.insert(storage_path3.full_path(), Some(OverlayValue::Storage(storage_value3)));
         let overlay2 = overlay_mut2.freeze();
 
         let (overlay_root2, _) =
@@ -960,9 +954,9 @@ mod tests {
                 &mut verification_context2,
                 &mut [
                     (account_path.clone().into(), Some(TrieValue::Account(account.clone()))),
-                    (storage_path1.full_path(), Some(TrieValue::Storage(storage_value1.into()))),
-                    (storage_path2.full_path(), Some(TrieValue::Storage(storage_value2.into()))),
-                    (storage_path3.full_path(), Some(TrieValue::Storage(storage_value3.into()))),
+                    (storage_path1.full_path(), Some(TrieValue::Storage(storage_value1))),
+                    (storage_path2.full_path(), Some(TrieValue::Storage(storage_value2))),
+                    (storage_path3.full_path(), Some(TrieValue::Storage(storage_value3))),
                 ],
             )
             .unwrap();
@@ -989,7 +983,7 @@ mod tests {
                 &mut verification_context3,
                 &mut [
                     (account_path.clone().into(), Some(TrieValue::Account(account.clone()))),
-                    (storage_path1.full_path(), Some(TrieValue::Storage(storage_value1.into()))),
+                    (storage_path1.full_path(), Some(TrieValue::Storage(storage_value1))),
                     // storage_path2 is omitted - effectively deleted
                 ],
             )
@@ -1008,10 +1002,8 @@ mod tests {
             account_path.clone().into(),
             Some(OverlayValue::Account(updated_account.clone())),
         );
-        overlay_mut4.insert(
-            storage_path1.full_path(),
-            Some(OverlayValue::Storage(new_storage_value1.into())),
-        );
+        overlay_mut4
+            .insert(storage_path1.full_path(), Some(OverlayValue::Storage(new_storage_value1)));
         let overlay4 = overlay_mut4.freeze();
 
         let (overlay_root4, _) =
@@ -1121,7 +1113,7 @@ mod tests {
                 &mut context,
                 &mut [
                     (account_path.clone().into(), Some(TrieValue::Account(account.clone()))),
-                    (storage_path1.full_path(), Some(TrieValue::Storage(U256::from(111).into()))),
+                    (storage_path1.full_path(), Some(TrieValue::Storage(U256::from(111)))),
                 ],
             )
             .unwrap();
@@ -1136,8 +1128,7 @@ mod tests {
 
         // println!("Storage path 2: {:?}", storage_path2.full_path());
 
-        overlay_mut
-            .insert(storage_path2.full_path(), Some(OverlayValue::Storage(U256::from(222).into())));
+        overlay_mut.insert(storage_path2.full_path(), Some(OverlayValue::Storage(U256::from(222))));
         let overlay = overlay_mut.freeze();
 
         let (overlay_root, _) =
@@ -1148,8 +1139,8 @@ mod tests {
         let mut verification_context = db.storage_engine.write_context();
         db.storage_engine.set_values(&mut verification_context, &mut [
             (account_path.into(), Some(TrieValue::Account(account))),
-            (storage_path1.full_path(), Some(TrieValue::Storage(U256::from(111).into()))), // Original
-            (storage_path2.full_path(), Some(TrieValue::Storage(U256::from(222).into()))), // New
+            (storage_path1.full_path(), Some(TrieValue::Storage(U256::from(111)))), // Original
+            (storage_path2.full_path(), Some(TrieValue::Storage(U256::from(222)))), // New
         ]).unwrap();
         let committed_root = verification_context.root_node_hash;
 
@@ -1189,8 +1180,8 @@ mod tests {
                 &mut [
                     (account1_path.clone().into(), Some(TrieValue::Account(account1.clone()))),
                     (account2_path.clone().into(), Some(TrieValue::Account(account2.clone()))),
-                    (storage1_path.full_path(), Some(TrieValue::Storage(U256::from(111).into()))),
-                    (storage2_path.full_path(), Some(TrieValue::Storage(U256::from(222).into()))),
+                    (storage1_path.full_path(), Some(TrieValue::Storage(U256::from(111)))),
+                    (storage2_path.full_path(), Some(TrieValue::Storage(U256::from(222)))),
                 ],
             )
             .unwrap();
@@ -1199,10 +1190,8 @@ mod tests {
 
         // Test: Modify just one storage value per account via overlay
         let mut overlay_mut = OverlayStateMut::new();
-        overlay_mut
-            .insert(storage1_path.full_path(), Some(OverlayValue::Storage(U256::from(999).into())));
-        overlay_mut
-            .insert(storage2_path.full_path(), Some(OverlayValue::Storage(U256::from(888).into())));
+        overlay_mut.insert(storage1_path.full_path(), Some(OverlayValue::Storage(U256::from(999))));
+        overlay_mut.insert(storage2_path.full_path(), Some(OverlayValue::Storage(U256::from(888))));
         let overlay = overlay_mut.freeze();
 
         let (overlay_root, _) =
@@ -1217,8 +1206,8 @@ mod tests {
                 &mut [
                     (account1_path.into(), Some(TrieValue::Account(account1))),
                     (account2_path.into(), Some(TrieValue::Account(account2))),
-                    (storage1_path.full_path(), Some(TrieValue::Storage(U256::from(999).into()))),
-                    (storage2_path.full_path(), Some(TrieValue::Storage(U256::from(888).into()))),
+                    (storage1_path.full_path(), Some(TrieValue::Storage(U256::from(999)))),
+                    (storage2_path.full_path(), Some(TrieValue::Storage(U256::from(888)))),
                 ],
             )
             .unwrap();
@@ -1256,8 +1245,8 @@ mod tests {
                 &mut context,
                 &mut [
                     (account_path.clone().into(), Some(TrieValue::Account(account.clone()))),
-                    (storage_path1.full_path(), Some(TrieValue::Storage(U256::from(111).into()))),
-                    (storage_path2.full_path(), Some(TrieValue::Storage(U256::from(222).into()))),
+                    (storage_path1.full_path(), Some(TrieValue::Storage(U256::from(111)))),
+                    (storage_path2.full_path(), Some(TrieValue::Storage(U256::from(222)))),
                 ],
             )
             .unwrap();
@@ -1268,17 +1257,14 @@ mod tests {
         let mut overlay_mut = OverlayStateMut::new();
 
         // Modify existing storage slot 1
-        overlay_mut.insert(
-            storage_path1.full_path(),
-            Some(OverlayValue::Storage(U256::from(1111).into())),
-        );
+        overlay_mut
+            .insert(storage_path1.full_path(), Some(OverlayValue::Storage(U256::from(1111))));
 
         // Add new storage slot 3
         let storage_key3 = U256::from(40);
         let storage_path3 =
             crate::path::StoragePath::for_address_and_slot(account_address, storage_key3.into());
-        overlay_mut
-            .insert(storage_path3.full_path(), Some(OverlayValue::Storage(U256::from(444).into())));
+        overlay_mut.insert(storage_path3.full_path(), Some(OverlayValue::Storage(U256::from(444))));
 
         let overlay = overlay_mut.freeze();
 
@@ -1289,9 +1275,9 @@ mod tests {
         // Verify by committing all changes
         db.storage_engine.set_values(&mut context, &mut [
             (account_path.into(), Some(TrieValue::Account(account))),
-            (storage_path1.full_path(), Some(TrieValue::Storage(U256::from(1111).into()))), // Modified
-            (storage_path2.full_path(), Some(TrieValue::Storage(U256::from(222).into()))), // Unchanged
-            (storage_path3.full_path(), Some(TrieValue::Storage(U256::from(444).into()))), // New
+            (storage_path1.full_path(), Some(TrieValue::Storage(U256::from(1111)))), // Modified
+            (storage_path2.full_path(), Some(TrieValue::Storage(U256::from(222)))), // Unchanged
+            (storage_path3.full_path(), Some(TrieValue::Storage(U256::from(444)))), // New
         ]).unwrap();
         let committed_root = context.root_node_hash;
 
@@ -1327,8 +1313,8 @@ mod tests {
                 &mut context,
                 &mut [
                     (account_path.clone().into(), Some(TrieValue::Account(account.clone()))),
-                    (storage_path1.full_path(), Some(TrieValue::Storage(U256::from(111).into()))),
-                    (storage_path2.full_path(), Some(TrieValue::Storage(U256::from(222).into()))),
+                    (storage_path1.full_path(), Some(TrieValue::Storage(U256::from(111)))),
+                    (storage_path2.full_path(), Some(TrieValue::Storage(U256::from(222)))),
                 ],
             )
             .unwrap();
@@ -1337,8 +1323,7 @@ mod tests {
 
         // Test: Overlay that modifies ONLY ONE storage slot, leaving the other unchanged
         let mut overlay_mut = OverlayStateMut::new();
-        overlay_mut
-            .insert(storage_path1.full_path(), Some(OverlayValue::Storage(U256::from(999).into())));
+        overlay_mut.insert(storage_path1.full_path(), Some(OverlayValue::Storage(U256::from(999))));
         let overlay = overlay_mut.freeze();
 
         let (overlay_root, _) =
@@ -1349,8 +1334,8 @@ mod tests {
         let mut verification_context = db.storage_engine.write_context();
         db.storage_engine.set_values(&mut verification_context, &mut [
             (account_path.into(), Some(TrieValue::Account(account))),
-            (storage_path1.full_path(), Some(TrieValue::Storage(U256::from(999).into()))), // Modified
-            (storage_path2.full_path(), Some(TrieValue::Storage(U256::from(222).into()))), // Unchanged
+            (storage_path1.full_path(), Some(TrieValue::Storage(U256::from(999)))), // Modified
+            (storage_path2.full_path(), Some(TrieValue::Storage(U256::from(222)))), // Unchanged
         ]).unwrap();
         let committed_root = verification_context.root_node_hash;
 
@@ -1398,9 +1383,9 @@ mod tests {
                 &mut [
                     (account1_path.clone().into(), Some(TrieValue::Account(account1.clone()))),
                     (account2_path.clone().into(), Some(TrieValue::Account(account2.clone()))),
-                    (storage1_path1.full_path(), Some(TrieValue::Storage(U256::from(111).into()))),
-                    (storage1_path2.full_path(), Some(TrieValue::Storage(U256::from(222).into()))),
-                    (storage2_path1.full_path(), Some(TrieValue::Storage(U256::from(333).into()))),
+                    (storage1_path1.full_path(), Some(TrieValue::Storage(U256::from(111)))),
+                    (storage1_path2.full_path(), Some(TrieValue::Storage(U256::from(222)))),
+                    (storage2_path1.full_path(), Some(TrieValue::Storage(U256::from(333)))),
                 ],
             )
             .unwrap();
@@ -1411,25 +1396,19 @@ mod tests {
         let mut overlay_mut = OverlayStateMut::new();
 
         // Modify account1's storage
-        overlay_mut.insert(
-            storage1_path1.full_path(),
-            Some(OverlayValue::Storage(U256::from(1111).into())),
-        );
+        overlay_mut
+            .insert(storage1_path1.full_path(), Some(OverlayValue::Storage(U256::from(1111))));
 
         // Add new storage to account1
         let storage1_key3 = U256::from(40);
         let storage1_path3 =
             crate::path::StoragePath::for_address_and_slot(account1_address, storage1_key3.into());
-        overlay_mut.insert(
-            storage1_path3.full_path(),
-            Some(OverlayValue::Storage(U256::from(444).into())),
-        );
+        overlay_mut
+            .insert(storage1_path3.full_path(), Some(OverlayValue::Storage(U256::from(444))));
 
         // Modify account2's storage
-        overlay_mut.insert(
-            storage2_path1.full_path(),
-            Some(OverlayValue::Storage(U256::from(3333).into())),
-        );
+        overlay_mut
+            .insert(storage2_path1.full_path(), Some(OverlayValue::Storage(U256::from(3333))));
 
         let overlay = overlay_mut.freeze();
 
@@ -1445,10 +1424,10 @@ mod tests {
                 &mut [
                     (account1_path.into(), Some(TrieValue::Account(account1))),
                     (account2_path.into(), Some(TrieValue::Account(account2))),
-                    (storage1_path1.full_path(), Some(TrieValue::Storage(U256::from(1111).into()))),
-                    (storage1_path2.full_path(), Some(TrieValue::Storage(U256::from(222).into()))),
-                    (storage1_path3.full_path(), Some(TrieValue::Storage(U256::from(444).into()))),
-                    (storage2_path1.full_path(), Some(TrieValue::Storage(U256::from(3333).into()))),
+                    (storage1_path1.full_path(), Some(TrieValue::Storage(U256::from(1111)))),
+                    (storage1_path2.full_path(), Some(TrieValue::Storage(U256::from(222)))),
+                    (storage1_path3.full_path(), Some(TrieValue::Storage(U256::from(444)))),
+                    (storage2_path1.full_path(), Some(TrieValue::Storage(U256::from(3333)))),
                 ],
             )
             .unwrap();
@@ -1493,8 +1472,8 @@ mod tests {
                 &mut [
                     (account1_path.clone().into(), Some(TrieValue::Account(account1.clone()))),
                     (account2_path.clone().into(), Some(TrieValue::Account(account2.clone()))),
-                    (storage1_path.full_path(), Some(TrieValue::Storage(U256::from(111).into()))),
-                    (storage2_path.full_path(), Some(TrieValue::Storage(U256::from(222).into()))),
+                    (storage1_path.full_path(), Some(TrieValue::Storage(U256::from(111)))),
+                    (storage2_path.full_path(), Some(TrieValue::Storage(U256::from(222)))),
                 ],
             )
             .unwrap();
@@ -1503,8 +1482,7 @@ mod tests {
 
         // Test: Modify just one storage slot for account1
         let mut overlay_mut = OverlayStateMut::new();
-        overlay_mut
-            .insert(storage1_path.full_path(), Some(OverlayValue::Storage(U256::from(999).into())));
+        overlay_mut.insert(storage1_path.full_path(), Some(OverlayValue::Storage(U256::from(999))));
         let overlay = overlay_mut.freeze();
 
         let (overlay_root, _) =
@@ -1516,8 +1494,8 @@ mod tests {
         db.storage_engine.set_values(&mut verification_context, &mut [
             (account1_path.into(), Some(TrieValue::Account(account1))),
             (account2_path.into(), Some(TrieValue::Account(account2))),
-            (storage1_path.full_path(), Some(TrieValue::Storage(U256::from(999).into()))), // Modified
-            (storage2_path.full_path(), Some(TrieValue::Storage(U256::from(222).into()))), // Unchanged
+            (storage1_path.full_path(), Some(TrieValue::Storage(U256::from(999)))), // Modified
+            (storage2_path.full_path(), Some(TrieValue::Storage(U256::from(222)))), // Unchanged
         ]).unwrap();
         let committed_root = verification_context.root_node_hash;
 
@@ -1560,8 +1538,8 @@ mod tests {
                 &mut [
                     (account1_path.clone().into(), Some(TrieValue::Account(account1.clone()))),
                     (account2_path.clone().into(), Some(TrieValue::Account(account2.clone()))),
-                    (storage1_path.full_path(), Some(TrieValue::Storage(U256::from(111).into()))),
-                    (storage2_path.full_path(), Some(TrieValue::Storage(U256::from(222).into()))),
+                    (storage1_path.full_path(), Some(TrieValue::Storage(U256::from(111)))),
+                    (storage2_path.full_path(), Some(TrieValue::Storage(U256::from(222)))),
                 ],
             )
             .unwrap();
@@ -1570,10 +1548,8 @@ mod tests {
 
         // Test: Modify storage for BOTH accounts
         let mut overlay_mut = OverlayStateMut::new();
-        overlay_mut
-            .insert(storage1_path.full_path(), Some(OverlayValue::Storage(U256::from(999).into())));
-        overlay_mut
-            .insert(storage2_path.full_path(), Some(OverlayValue::Storage(U256::from(888).into())));
+        overlay_mut.insert(storage1_path.full_path(), Some(OverlayValue::Storage(U256::from(999))));
+        overlay_mut.insert(storage2_path.full_path(), Some(OverlayValue::Storage(U256::from(888))));
         let overlay = overlay_mut.freeze();
 
         let (overlay_root, _) =
@@ -1585,8 +1561,8 @@ mod tests {
         db.storage_engine.set_values(&mut verification_context, &mut [
             (account1_path.into(), Some(TrieValue::Account(account1))),
             (account2_path.into(), Some(TrieValue::Account(account2))),
-            (storage1_path.full_path(), Some(TrieValue::Storage(U256::from(999).into()))), // Modified
-            (storage2_path.full_path(), Some(TrieValue::Storage(U256::from(888).into()))), // Modified
+            (storage1_path.full_path(), Some(TrieValue::Storage(U256::from(999)))), // Modified
+            (storage2_path.full_path(), Some(TrieValue::Storage(U256::from(888)))), // Modified
         ]).unwrap();
         let committed_root = verification_context.root_node_hash;
 
@@ -1626,7 +1602,7 @@ mod tests {
                 &mut [
                     (account1_path.clone().into(), Some(TrieValue::Account(account1.clone()))),
                     (account2_path.clone().into(), Some(TrieValue::Account(account2.clone()))),
-                    (storage1_path1.full_path(), Some(TrieValue::Storage(U256::from(111).into()))),
+                    (storage1_path1.full_path(), Some(TrieValue::Storage(U256::from(111)))),
                 ],
             )
             .unwrap();
@@ -1639,10 +1615,8 @@ mod tests {
         let storage1_path2 =
             crate::path::StoragePath::for_address_and_slot(account1_address, storage1_key2.into());
 
-        overlay_mut.insert(
-            storage1_path2.full_path(),
-            Some(OverlayValue::Storage(U256::from(444).into())),
-        );
+        overlay_mut
+            .insert(storage1_path2.full_path(), Some(OverlayValue::Storage(U256::from(444))));
         let overlay = overlay_mut.freeze();
 
         let (overlay_root, _) =
@@ -1654,8 +1628,8 @@ mod tests {
         db.storage_engine.set_values(&mut verification_context, &mut [
             (account1_path.into(), Some(TrieValue::Account(account1))),
             (account2_path.into(), Some(TrieValue::Account(account2))),
-            (storage1_path1.full_path(), Some(TrieValue::Storage(U256::from(111).into()))), // Original
-            (storage1_path2.full_path(), Some(TrieValue::Storage(U256::from(444).into()))), // New
+            (storage1_path1.full_path(), Some(TrieValue::Storage(U256::from(111)))), // Original
+            (storage1_path2.full_path(), Some(TrieValue::Storage(U256::from(444)))), // New
         ]).unwrap();
         let committed_root = verification_context.root_node_hash;
 
@@ -1691,8 +1665,7 @@ mod tests {
         let storage_path =
             crate::path::StoragePath::for_address_and_slot(account_address, storage_key.into());
         let storage_value = U256::from(123);
-        overlay_mut
-            .insert(storage_path.full_path(), Some(OverlayValue::Storage(storage_value.into())));
+        overlay_mut.insert(storage_path.full_path(), Some(OverlayValue::Storage(storage_value)));
         let overlay = overlay_mut.freeze();
 
         let (overlay_root, _) =
@@ -1706,7 +1679,7 @@ mod tests {
                 &mut verification_context,
                 &mut [
                     (account_path.into(), Some(TrieValue::Account(account))),
-                    (storage_path.full_path(), Some(TrieValue::Storage(storage_value.into()))),
+                    (storage_path.full_path(), Some(TrieValue::Storage(storage_value))),
                 ],
             )
             .unwrap();
@@ -1779,7 +1752,7 @@ mod tests {
             let mut path = path.clone();
             for i in 0..16 {
                 if branch.hash_mask.is_bit_set(i) {
-                    path.push(i as u8);
+                    path.push(i);
                     overlay_mut_with_branches
                         .insert(path.clone(), Some(OverlayValue::Hash(branch.hashes[hash_idx])));
                     hash_idx += 1;
@@ -1841,8 +1814,7 @@ mod tests {
         let storage_path =
             crate::path::StoragePath::for_address_and_slot(new_address, storage_key.into());
         let storage_value = U256::from(123);
-        overlay_mut
-            .insert(storage_path.full_path(), Some(OverlayValue::Storage(storage_value.into())));
+        overlay_mut.insert(storage_path.full_path(), Some(OverlayValue::Storage(storage_value)));
 
         let overlay = overlay_mut.freeze();
         let (overlay_root, _) =

@@ -766,14 +766,13 @@ mod tests {
         let account = test_account();
 
         // Create overlay with account-prefixed storage paths for a SINGLE account
-        let _account_prefix = vec![1, 0, 0, 0]; // 4-nibble account prefix
+        let _account_prefix = [1, 0, 0, 0]; // 4-nibble account prefix
 
         let paths = [
-            vec![1, 0, 0, 0, 2, 0], // account + storage [2, 0]
-            vec![1, 0, 0, 0, 5, 0], // account + storage [5, 0]
-            vec![1, 0, 0, 0, 8, 0], // account + storage [8, 0]
-            vec![1, 0, 0, 0, 9, 0], /* account + storage [9, 0] - changed from different account
-                                     * to same account */
+            [1, 0, 0, 0, 2, 0], // account + storage [2, 0]
+            [1, 0, 0, 0, 5, 0], // account + storage [5, 0]
+            [1, 0, 0, 0, 8, 0], // account + storage [8, 0]
+            [1, 0, 0, 0, 9, 0], // account + storage [9, 0]
         ];
 
         for path in &paths {
@@ -810,8 +809,8 @@ mod tests {
         let account = test_account();
 
         // Create storage overlays for two different accounts
-        let account1_prefix = vec![1, 0, 0, 0]; // Account 1: 4 nibbles
-        let _account2_prefix = vec![2, 0, 0, 0]; // Account 2: 4 nibbles
+        let account1_prefix = [1, 0, 0, 0]; // Account 1: 4 nibbles
+        let _account2_prefix = [2, 0, 0, 0]; // Account 2: 4 nibbles
 
         // Storage for account 1
         mutable.insert(
@@ -832,8 +831,7 @@ mod tests {
         let frozen = mutable.freeze();
 
         // Test finding storage for account 1 using find_prefix_range on original overlay
-        let account1_storage =
-            frozen.find_prefix_range(&Nibbles::from_nibbles(account1_prefix.clone()));
+        let account1_storage = frozen.find_prefix_range(&Nibbles::from_nibbles(account1_prefix));
         assert_eq!(account1_storage.len(), 2);
 
         // Now test with prefix_offset - should convert to storage-relative paths
@@ -892,7 +890,7 @@ mod tests {
 
     #[test]
     fn test_thread_safety_with_arc() {
-        use std::{sync::Arc as StdArc, thread};
+        use std::thread;
 
         let mut mutable = OverlayStateMut::new();
         let account = test_account();
@@ -906,12 +904,12 @@ mod tests {
         }
 
         let frozen = mutable.freeze();
-        let shared_overlay = StdArc::new(frozen);
+        let shared_overlay = Arc::new(frozen);
 
         // Spawn multiple threads that work with different sub-slices
         let handles: Vec<_> = (0..4)
             .map(|i| {
-                let overlay = StdArc::clone(&shared_overlay);
+                let overlay = Arc::clone(&shared_overlay);
                 thread::spawn(move || {
                     let start = i * 25;
                     let end = (i + 1) * 25;
@@ -941,7 +939,7 @@ mod tests {
 
         // Create a diverse set of paths to test prefix partitioning
         // Use vectors instead of arrays to avoid size mismatch issues
-        let test_paths = vec![
+        let test_paths = [
             // Before prefix [1, 2]
             (vec![0, 5, 6, 7], Some(OverlayValue::Account(account.clone()))),
             (vec![1, 0, 0, 0], Some(OverlayValue::Account(account.clone()))),
@@ -963,7 +961,7 @@ mod tests {
         }
 
         let frozen = mutable.freeze();
-        let prefix = Nibbles::from_nibbles(vec![1, 2]);
+        let prefix = Nibbles::from_nibbles([1, 2]);
 
         // Test sub_slice_by_prefix
         let (before, with_prefix, after) = frozen.sub_slice_by_prefix(&prefix);
@@ -971,24 +969,24 @@ mod tests {
         // Verify before slice - should contain paths < [1, 2]
         assert_eq!(before.len(), 3);
         let before_paths: Vec<_> = before.iter().map(|(path, _)| path).collect();
-        assert!(before_paths.contains(&Nibbles::from_nibbles(vec![0, 5, 6, 7])));
-        assert!(before_paths.contains(&Nibbles::from_nibbles(vec![1, 0, 0, 0])));
-        assert!(before_paths.contains(&Nibbles::from_nibbles(vec![1, 1, 9, 9])));
+        assert!(before_paths.contains(&Nibbles::from_nibbles([0, 5, 6, 7])));
+        assert!(before_paths.contains(&Nibbles::from_nibbles([1, 0, 0, 0])));
+        assert!(before_paths.contains(&Nibbles::from_nibbles([1, 1, 9, 9])));
 
         // Verify with_prefix slice - should contain paths that start with [1, 2]
         assert_eq!(with_prefix.len(), 4);
         let with_prefix_paths: Vec<_> = with_prefix.iter().map(|(path, _)| path).collect();
-        assert!(with_prefix_paths.contains(&Nibbles::from_nibbles(vec![1, 2])));
-        assert!(with_prefix_paths.contains(&Nibbles::from_nibbles(vec![1, 2, 3, 4])));
-        assert!(with_prefix_paths.contains(&Nibbles::from_nibbles(vec![1, 2, 5, 6])));
-        assert!(with_prefix_paths.contains(&Nibbles::from_nibbles(vec![1, 2, 7, 8])));
+        assert!(with_prefix_paths.contains(&Nibbles::from_nibbles([1, 2])));
+        assert!(with_prefix_paths.contains(&Nibbles::from_nibbles([1, 2, 3, 4])));
+        assert!(with_prefix_paths.contains(&Nibbles::from_nibbles([1, 2, 5, 6])));
+        assert!(with_prefix_paths.contains(&Nibbles::from_nibbles([1, 2, 7, 8])));
 
         // Verify after slice - should contain paths > [1, 2, ...] range
         assert_eq!(after.len(), 3);
         let after_paths: Vec<_> = after.iter().map(|(path, _)| path).collect();
-        assert!(after_paths.contains(&Nibbles::from_nibbles(vec![1, 3, 0, 0])));
-        assert!(after_paths.contains(&Nibbles::from_nibbles(vec![2, 0, 0, 0])));
-        assert!(after_paths.contains(&Nibbles::from_nibbles(vec![5, 5, 5, 5])));
+        assert!(after_paths.contains(&Nibbles::from_nibbles([1, 3, 0, 0])));
+        assert!(after_paths.contains(&Nibbles::from_nibbles([2, 0, 0, 0])));
+        assert!(after_paths.contains(&Nibbles::from_nibbles([5, 5, 5, 5])));
 
         // Verify that all slices together contain all original entries
         assert_eq!(before.len() + with_prefix.len() + after.len(), frozen.len());
@@ -1001,14 +999,14 @@ mod tests {
         assert!(empty_after.is_empty());
 
         // Test with prefix that doesn't match anything
-        let no_match_prefix = Nibbles::from_nibbles(vec![9, 9, 9]);
+        let no_match_prefix = Nibbles::from_nibbles([9, 9, 9]);
         let (no_before, no_with, no_after) = frozen.sub_slice_by_prefix(&no_match_prefix);
         assert_eq!(no_before.len(), frozen.len()); // All entries should be "before"
         assert!(no_with.is_empty());
         assert!(no_after.is_empty());
 
         // Test edge case: prefix with all 0xF's (should handle increment() returning None)
-        let max_prefix = Nibbles::from_nibbles(vec![0xF, 0xF]);
+        let max_prefix = Nibbles::from_nibbles([0xF, 0xF]);
         let (max_before, max_with, max_after) = frozen.sub_slice_by_prefix(&max_prefix);
         // All our test entries should be before 0xFF
         assert_eq!(max_before.len(), frozen.len());
@@ -1022,25 +1020,13 @@ mod tests {
         let account = test_account();
 
         // Test case where we have exact prefix matches and no extensions
-        let prefix = Nibbles::from_nibbles(vec![2, 3]);
+        let prefix = Nibbles::from_nibbles([2, 3]);
 
-        mutable.insert(
-            Nibbles::from_nibbles(vec![1, 9]),
-            Some(OverlayValue::Account(account.clone())),
-        );
-        mutable.insert(
-            Nibbles::from_nibbles(vec![2, 2]),
-            Some(OverlayValue::Account(account.clone())),
-        );
+        mutable.insert(Nibbles::from_nibbles([1, 9]), Some(OverlayValue::Account(account.clone())));
+        mutable.insert(Nibbles::from_nibbles([2, 2]), Some(OverlayValue::Account(account.clone())));
         mutable.insert(prefix.clone(), Some(OverlayValue::Account(account.clone()))); // Exact match
-        mutable.insert(
-            Nibbles::from_nibbles(vec![2, 4]),
-            Some(OverlayValue::Account(account.clone())),
-        );
-        mutable.insert(
-            Nibbles::from_nibbles(vec![3, 0]),
-            Some(OverlayValue::Account(account.clone())),
-        );
+        mutable.insert(Nibbles::from_nibbles([2, 4]), Some(OverlayValue::Account(account.clone())));
+        mutable.insert(Nibbles::from_nibbles([3, 0]), Some(OverlayValue::Account(account.clone())));
 
         let frozen = mutable.freeze();
         let (before, with_prefix, after) = frozen.sub_slice_by_prefix(&prefix);
@@ -1060,21 +1046,19 @@ mod tests {
         let account = test_account();
 
         // Create paths that simulate account (4 nibbles) + storage (4 nibbles) patterns
-        let _account_prefix = vec![1, 0, 0, 0];
+        let _account_prefix = [1, 0, 0, 0];
 
         // Storage paths for the same account
-        let storage_paths = vec![
-            vec![1, 0, 0, 0, 2, 0, 0, 0], // account + storage [2,0,0,0]
-            vec![1, 0, 0, 0, 5, 0, 0, 0], // account + storage [5,0,0,0]
-            vec![1, 0, 0, 0, 5, 1, 0, 0], // account + storage [5,1,0,0]
-            vec![1, 0, 0, 0, 8, 0, 0, 0], // account + storage [8,0,0,0]
+        let storage_paths = [
+            [1, 0, 0, 0, 2, 0, 0, 0], // account + storage [2,0,0,0]
+            [1, 0, 0, 0, 5, 0, 0, 0], // account + storage [5,0,0,0]
+            [1, 0, 0, 0, 5, 1, 0, 0], // account + storage [5,1,0,0]
+            [1, 0, 0, 0, 8, 0, 0, 0], // account + storage [8,0,0,0]
         ];
 
         for path in storage_paths.iter() {
-            mutable.insert(
-                Nibbles::from_nibbles(path.clone()),
-                Some(OverlayValue::Account(account.clone())),
-            );
+            mutable
+                .insert(Nibbles::from_nibbles(path), Some(OverlayValue::Account(account.clone())));
         }
 
         let frozen = mutable.freeze();
@@ -1083,23 +1067,23 @@ mod tests {
         let storage_overlay = frozen.with_prefix_offset(4);
 
         // Test partitioning by storage prefix [5]
-        let storage_prefix = Nibbles::from_nibbles(vec![5]);
+        let storage_prefix = Nibbles::from_nibbles([5]);
         let (before, with_prefix, after) = storage_overlay.sub_slice_by_prefix(&storage_prefix);
 
         // Before should contain [2,0,0,0]
         assert_eq!(before.len(), 1);
         let before_paths: Vec<_> = before.iter().map(|(path, _)| path).collect();
-        assert!(before_paths.contains(&Nibbles::from_nibbles(vec![2, 0, 0, 0])));
+        assert!(before_paths.contains(&Nibbles::from_nibbles([2, 0, 0, 0])));
 
         // With prefix should contain [5,0,0,0] and [5,1,0,0]
         assert_eq!(with_prefix.len(), 2);
         let with_prefix_paths: Vec<_> = with_prefix.iter().map(|(path, _)| path).collect();
-        assert!(with_prefix_paths.contains(&Nibbles::from_nibbles(vec![5, 0, 0, 0])));
-        assert!(with_prefix_paths.contains(&Nibbles::from_nibbles(vec![5, 1, 0, 0])));
+        assert!(with_prefix_paths.contains(&Nibbles::from_nibbles([5, 0, 0, 0])));
+        assert!(with_prefix_paths.contains(&Nibbles::from_nibbles([5, 1, 0, 0])));
 
         // After should contain [8,0,0,0]
         assert_eq!(after.len(), 1);
         let after_paths: Vec<_> = after.iter().map(|(path, _)| path).collect();
-        assert!(after_paths.contains(&Nibbles::from_nibbles(vec![8, 0, 0, 0])));
+        assert!(after_paths.contains(&Nibbles::from_nibbles([8, 0, 0, 0])));
     }
 }
