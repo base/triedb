@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     ffi::CString,
     fs::File,
     io::{self, IoSlice, Read, Seek, SeekFrom, Write},
@@ -76,8 +77,8 @@ pub struct BufferPoolManager {
                          * num_frames size */
     page_table: DashMap<PageId, FrameHeader>, /* mapping between page id and buffer pool frames,
                                                * indexed by page id with fix num_frames size */
-    free_frames: Mutex<Vec<FrameId>>, /* list of free frames that do not hold any pages'
-                                       * data, with fix num_frames size */
+    free_frames: Mutex<VecDeque<FrameId>>, /* list of free frames that do not hold any pages'
+                                            * data, with fix num_frames size */
     dirty_frames: Mutex<Vec<(FrameId, PageId)>>, /* list of dirty frames that need to be flushed
                                                   * to disk, with fix num_frames size */
     disk_scheduler: DiskScheduler, /* the scheduler to schedule disk flushing operations */
@@ -125,7 +126,7 @@ impl BufferPoolManager {
             frames.push(Frame { ptr });
         }
         let dirty_frames = Mutex::new(Vec::with_capacity(num_frames as usize));
-        let free_frames = Mutex::new((0..num_frames).map(FrameId).collect::<Vec<_>>());
+        let free_frames = Mutex::new((0..num_frames).map(FrameId).collect::<VecDeque<_>>());
         let disk_scheduler = DiskScheduler {};
         let lru_replacer = Mutex::new(CacheAdvisor::new(num_frames as usize, 20));
 
@@ -154,13 +155,29 @@ impl BufferPoolManager {
 
     fn get_free_frame(&self) -> Option<FrameId> {
         let mut free_frames = self.free_frames.lock();
-        // TODO: could run out of free frames, need to evict pages
-        free_frames.pop()
+        free_frames.pop_front()
     }
 
     fn grow_if_needed(&self, min_len: u32) -> Result<(), PageError> {
         // TODO: implement this
         Ok(())
+    }
+
+    /// Access a page, update the cache advisory
+    fn access_page(&self, page_id: PageId) {
+        let mut lru_replacer = self.lru_replacer.lock();
+        let evicted = lru_replacer.accessed_reuse_buffer(page_id.as_u64(), 1);
+        if !evicted.is_empty() {
+            let mut free_frames = self.free_frames.lock();
+            evicted.iter().for_each(|(page_id, _)| {
+                let page_id = PageId::try_from(*page_id as u32).unwrap();
+                let frame = self.page_table.remove(&page_id);
+                if let Some((_, frame_header)) = frame {
+                    free_frames.push_back(frame_header.frame_id);
+                }
+            });
+            lru_replacer.reset_internal_access_buffer();
+        }
     }
 }
 
@@ -187,20 +204,8 @@ impl PageManagerTrait for BufferPoolManager {
         unsafe {
             file.read_exact(&mut *buf).map_err(PageError::IO)?;
         }
-        // Update the page table
         self.page_table.insert(page_id, FrameHeader { frame_id, pin_count: 0 });
-        // Update cache advisory
-        let mut lru_replacer = self.lru_replacer.lock();
-        let evicted = lru_replacer.accessed_reuse_buffer(page_id.as_u64(), 1);
-        if evicted.len() > 0 {
-            evicted.iter().for_each(|(page_id, _)| {
-                let frame = self.page_table.get(&PageId::try_from(*page_id as u32).unwrap());
-                if let Some(frame_id) = frame {
-                    self.free_frames.lock().push(frame_id.frame_id);
-                };
-            });
-            lru_replacer.reset_internal_access_buffer();
-        }
+        self.access_page(page_id);
 
         unsafe { Page::from_ptr(page_id, buf) }
     }
@@ -230,19 +235,7 @@ impl PageManagerTrait for BufferPoolManager {
         }
         self.page_table.insert(page_id, FrameHeader { frame_id, pin_count: 0 });
         self.dirty_frames.lock().push((frame_id, page_id));
-
-        // Update cache advisory
-        let mut lru_replacer = self.lru_replacer.lock();
-        let evicted = lru_replacer.accessed_reuse_buffer(page_id.as_u64(), 1);
-        if evicted.len() > 0 {
-            evicted.iter().for_each(|(page_id, _)| {
-                let frame = self.page_table.get(&PageId::try_from(*page_id as u32).unwrap());
-                if let Some(frame_id) = frame {
-                    self.free_frames.lock().push(frame_id.frame_id);
-                };
-            });
-            lru_replacer.reset_internal_access_buffer();
-        }
+        self.access_page(page_id);
 
         unsafe { PageMut::from_ptr(page_id, snapshot_id, buf) }
     }
@@ -259,6 +252,7 @@ impl PageManagerTrait for BufferPoolManager {
 
         self.page_table.insert(page_id, FrameHeader { frame_id: frame_id.clone(), pin_count: 0 });
         self.dirty_frames.lock().push((frame_id, page_id));
+        self.access_page(page_id);
 
         let data = self.frames[frame_id.0 as usize].ptr;
         unsafe { PageMut::acquire_unchecked(page_id, snapshot_id, data) }
@@ -526,27 +520,24 @@ mod tests {
         let snapshot = 123;
         let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
         let mut opts = BufferPoolManagerOptions::new();
-        opts.num_frames(256);
+        opts.num_frames(256 * 10);
         let m = BufferPoolManager::open_with_options(&opts, temp_file.path())
             .expect("buffer pool creation failed");
 
-        for i in 1..=200 {
-            let mut p = m.allocate(snapshot + i as u64).expect("page allocation failed");
-            p.contents_mut().iter_mut().for_each(|byte| *byte = 0xab ^ (i as u8));
-        }
-        m.sync().expect("sync failed");
-
-        for i in 201..=400 {
+        (1..=20000).for_each(|i| {
             let mut p =
                 m.allocate(snapshot + i as u64).expect(&format!("page allocation failed {}", i));
             p.contents_mut().iter_mut().for_each(|byte| *byte = 0xab ^ (i as u8));
-        }
-        m.sync().expect("sync failed");
+            if i % 100 == 0 {
+                m.sync().expect("sync failed");
+            }
+        });
 
-        for i in 1..=12 {
+        (1..=20000).for_each(|i| {
             let page_id = PageId::new(i).unwrap();
-            let page = m.get(snapshot + i as u64, page_id).expect("page not in cache");
+            let page =
+                m.get(snapshot + i as u64, page_id).expect(&format!("failed to get page {}", i));
             assert_eq!(page.contents(), &mut [0xab ^ (i as u8); Page::DATA_SIZE]);
-        }
+        });
     }
 }
