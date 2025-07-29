@@ -104,6 +104,13 @@ impl PageId {
         self.0.get()
     }
 
+    /// Returns the page ID as an `u64`.
+    #[inline]
+    #[must_use]
+    pub const fn as_u64(&self) -> u64 {
+        self.0.get() as u64
+    }
+
     /// Returns the page ID as an `usize`.
     #[inline]
     #[must_use]

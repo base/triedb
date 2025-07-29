@@ -81,7 +81,7 @@ pub struct BufferPoolManager {
     dirty_frames: Mutex<Vec<(FrameId, PageId)>>, /* list of dirty frames that need to be flushed
                                                   * to disk, with fix num_frames size */
     disk_scheduler: DiskScheduler, /* the scheduler to schedule disk flushing operations */
-    lru_replacer: CacheAdvisor,    /* the replacer to find unpinned/candidate pages for
+    lru_replacer: Mutex<CacheAdvisor>, /* the replacer to find unpinned/candidate pages for
                                     * eviction */
 }
 
@@ -127,7 +127,7 @@ impl BufferPoolManager {
         let dirty_frames = Mutex::new(Vec::with_capacity(num_frames as usize));
         let free_frames = Mutex::new((0..num_frames).map(FrameId).collect::<Vec<_>>());
         let disk_scheduler = DiskScheduler {};
-        let lru_replacer = CacheAdvisor::new(num_frames as usize, 20);
+        let lru_replacer = Mutex::new(CacheAdvisor::new(num_frames as usize, 20));
 
         Ok(BufferPoolManager {
             num_frames,
@@ -187,7 +187,21 @@ impl PageManagerTrait for BufferPoolManager {
         unsafe {
             file.read_exact(&mut *buf).map_err(PageError::IO)?;
         }
+        // Update the page table
         self.page_table.insert(page_id, FrameHeader { frame_id, pin_count: 0 });
+        // Update cache advisory
+        let mut lru_replacer = self.lru_replacer.lock();
+        let evicted = lru_replacer.accessed_reuse_buffer(page_id.as_u64(), 1);
+        if evicted.len() > 0 {
+            evicted.iter().for_each(|(page_id, _)| {
+                let frame = self.page_table.get(&PageId::try_from(*page_id as u32).unwrap());
+                if let Some(frame_id) = frame {
+                    self.free_frames.lock().push(frame_id.frame_id);
+                };
+            });
+            lru_replacer.reset_internal_access_buffer();
+        }
+
         unsafe { Page::from_ptr(page_id, buf) }
     }
 
@@ -216,6 +230,20 @@ impl PageManagerTrait for BufferPoolManager {
         }
         self.page_table.insert(page_id, FrameHeader { frame_id, pin_count: 0 });
         self.dirty_frames.lock().push((frame_id, page_id));
+
+        // Update cache advisory
+        let mut lru_replacer = self.lru_replacer.lock();
+        let evicted = lru_replacer.accessed_reuse_buffer(page_id.as_u64(), 1);
+        if evicted.len() > 0 {
+            evicted.iter().for_each(|(page_id, _)| {
+                let frame = self.page_table.get(&PageId::try_from(*page_id as u32).unwrap());
+                if let Some(frame_id) = frame {
+                    self.free_frames.lock().push(frame_id.frame_id);
+                };
+            });
+            lru_replacer.reset_internal_access_buffer();
+        }
+
         unsafe { PageMut::from_ptr(page_id, snapshot_id, buf) }
     }
 
@@ -490,6 +518,35 @@ mod tests {
                 let frame = &m.frames[frame_id.0 as usize];
                 assert_eq!(frame.ptr as *const u8, page.all_contents().as_ptr());
             }
+        }
+    }
+
+    #[test]
+    fn pool_eviction() {
+        let snapshot = 123;
+        let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
+        let mut opts = BufferPoolManagerOptions::new();
+        opts.num_frames(256);
+        let m = BufferPoolManager::open_with_options(&opts, temp_file.path())
+            .expect("buffer pool creation failed");
+
+        for i in 1..=200 {
+            let mut p = m.allocate(snapshot + i as u64).expect("page allocation failed");
+            p.contents_mut().iter_mut().for_each(|byte| *byte = 0xab ^ (i as u8));
+        }
+        m.sync().expect("sync failed");
+
+        for i in 201..=400 {
+            let mut p =
+                m.allocate(snapshot + i as u64).expect(&format!("page allocation failed {}", i));
+            p.contents_mut().iter_mut().for_each(|byte| *byte = 0xab ^ (i as u8));
+        }
+        m.sync().expect("sync failed");
+
+        for i in 1..=12 {
+            let page_id = PageId::new(i).unwrap();
+            let page = m.get(snapshot + i as u64, page_id).expect("page not in cache");
+            assert_eq!(page.contents(), &mut [0xab ^ (i as u8); Page::DATA_SIZE]);
         }
     }
 }
