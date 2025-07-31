@@ -1,6 +1,7 @@
 use crate::page::{Page, PageError};
 
 // A pointer to a page cell, which encodes the offset and length as 12-bit numbers in 3 bytes.
+#[derive(Copy, Clone)]
 pub(crate) struct CellPointer<'p>(&'p [u8; 3]);
 
 #[derive(Debug)]

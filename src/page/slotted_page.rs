@@ -175,6 +175,9 @@ impl<'a> SlottedPageMut<'a> {
         let mut offset = cell_pointer.offset();
         let mut length = cell_pointer.length();
 
+        println!("set {}/{} [{} -> {} @ {:?}]", self.id(), index, length, value_length, cell_pointer);
+        //println!("  {:?}", self.cell_pointers_iter().collect::<Vec<_>>());
+
         match value_length.cmp(&(length as usize)) {
             Ordering::Greater => {
                 // The value is larger than the current cell, so we need to allocate a new cell.
@@ -197,14 +200,18 @@ impl<'a> SlottedPageMut<'a> {
         let end_index = (Page::DATA_SIZE as u16 - offset + length) as usize;
         let data = &mut self.page.contents_mut()[start_index..end_index];
         value.serialize_into(data).map_err(|_| PageError::InvalidValue)?;
+        //println!("  {:?}", self.cell_pointers_iter().collect::<Vec<_>>());
         Ok(())
     }
 
     // Inserts a value into the page and returns the index of the new value.
     pub fn insert_value<V: Value>(&mut self, value: &V) -> Result<u8, PageError> {
+        //println!("  before insert_value {:?}", self.cell_pointers_iter().collect::<Vec<_>>());
+        let id = self.id();
         let cell_index = self.next_free_cell_index()?;
         let value_length = value.size();
         let cell_pointer = self.allocate_cell_pointer(cell_index, value_length as u16)?;
+        println!("ins {}/{} [{} @ {:?}]", id, cell_index, value_length, cell_pointer);
 
         let offset = cell_pointer.offset();
         let length = cell_pointer.length();
@@ -212,11 +219,15 @@ impl<'a> SlottedPageMut<'a> {
         let end_index = (Page::DATA_SIZE as u16 - offset + length) as usize;
         let data = &mut self.page.contents_mut()[start_index..end_index];
         value.serialize_into(data).map_err(|_| PageError::InvalidValue)?;
+        //println!("  {:?}", self.cell_pointers_iter().collect::<Vec<_>>());
         Ok(cell_index)
     }
 
     // Deletes the value at the given index.
     pub fn delete_value(&mut self, index: u8) -> Result<(), PageError> {
+        println!("del {}/{}", self.id(), index);
+        //println!("{}", std::backtrace::Backtrace::capture());
+        //println!("  {:?}", self.cell_pointers_iter().collect::<Vec<_>>());
         let num_cells = self.num_cells();
         self.set_cell_pointer(index, 0, 0)?;
         let mut new_num_cells = num_cells;
@@ -230,6 +241,7 @@ impl<'a> SlottedPageMut<'a> {
         if new_num_cells < num_cells {
             self.set_num_cells(new_num_cells);
         }
+        //println!("  {:?}", self.cell_pointers_iter().collect::<Vec<_>>());
         Ok(())
     }
 
@@ -267,6 +279,8 @@ impl<'a> SlottedPageMut<'a> {
         index: u8,
         length: u16,
     ) -> Result<CellPointer<'_>, PageError> {
+        //println!("  allocate_cell_pointer");
+        //println!("  before allocate_cell_pointer {:?}", self.cell_pointers_iter().collect::<Vec<_>>());
         match self.find_available_slot(index, length)? {
             Some(offset) => {
                 let num_cells = self.num_cells();
@@ -335,6 +349,8 @@ impl<'a> SlottedPageMut<'a> {
             last_offset = new_offset;
         }
 
+        //println!("defrag");
+        //println!("  {:?}", self.cell_pointers_iter().collect::<Vec<_>>());
         Ok(true)
     }
 
@@ -420,11 +436,18 @@ impl<'a> SlottedPageMut<'a> {
         offset: u16,
         length: u16,
     ) -> Result<CellPointer<'_>, PageError> {
+        //println!("  before set_cell_pointer {:?}", self.cell_pointers_iter().collect::<Vec<_>>());
+        let c = {
         let start_index = get_content_index(index);
         let end_index = start_index + CELL_POINTER_SIZE;
         let data = &mut self.page.contents_mut()[start_index..end_index];
         let cell_pointer = CellPointer::new(offset, length, data.try_into().unwrap());
+        let data = &self.page.contents()[start_index..end_index];
+        let cell_pointer = CellPointer::try_from(data).unwrap();
         Ok(cell_pointer)
+        };
+        //println!("   after set_cell_pointer {:?}", self.cell_pointers_iter().collect::<Vec<_>>());
+        c
     }
 
     // Sets the number of cells in the page.

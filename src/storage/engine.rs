@@ -1,4 +1,6 @@
 use crate::{
+    rlp::DeferredRlpNode,
+    executor::Wait,
     account::Account,
     context::TransactionContext,
     location::Location,
@@ -18,13 +20,16 @@ use crate::{
     storage::{debug::DebugPage, value::Value},
 };
 use alloy_primitives::StorageValue;
-use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
+use alloy_trie::{nybbles, Nibbles, EMPTY_ROOT_HASH};
 use parking_lot::Mutex;
 use std::{
     fmt::Debug,
     io,
     sync::atomic::{AtomicU64, Ordering},
+    collections::HashMap,
 };
+use rayon::ThreadPool;
+use crate::executor::{threadpool};
 
 /// The [StorageEngine] is responsible for managing the storage of data in the database.
 /// It handles reading and writing account and storage values, as well as managing the lifecycle of
@@ -37,6 +42,7 @@ pub struct StorageEngine {
     pub(crate) page_manager: PageManager,
     pub(crate) meta_manager: Mutex<MetadataManager>,
     pub(crate) alive_snapshot: AtomicU64,
+    executor: ThreadPool,
 }
 
 #[derive(Debug)]
@@ -46,6 +52,86 @@ enum PointerChange {
     Delete,
 }
 
+#[derive(Debug)]
+struct SetDeferredValue<V> { page_id: PageId, index: u8, value: V }
+
+#[derive(Default, Debug)]
+struct DeferredChanges {
+    set: HashMap<(PageId, u8), Node>,
+}
+
+impl DeferredChanges {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn set_value(&mut self, page_id: PageId, index: u8, value: Node) {
+        self.set.insert((page_id, index), value);
+    }
+
+    fn delete_value(&mut self, page_id: PageId, index: u8) {
+        self.set.remove(&(page_id, index));
+    }
+
+    fn swap_cell_pointers(&mut self, page_id: PageId, index1: u8, index2: u8) {
+        println!("swap {page_id}/{index1} <-> {page_id}/{index2}");
+        let value1 = self.set.remove(&(page_id, index1));
+        let value2 = self.set.remove(&(page_id, index2));
+        if let Some(value1) = value1 {
+            self.set.insert((page_id, index2), value1);
+        }
+        if let Some(value2) = value2 {
+            self.set.insert((page_id, index1), value2);
+        }
+    }
+
+    fn orphan_page(&mut self, remove_page_id: PageId) {
+        println!("orphan {remove_page_id}");
+        self.set.retain(|&(page_id, _index), _value| page_id != remove_page_id);
+    }
+
+    fn flush(&mut self, engine: &StorageEngine, context: &mut TransactionContext) {
+        println!("set deferred values");
+        for ((page_id, index), value) in self.set.drain() {
+            let mut slotted_page = SlottedPageMut::try_from(engine.get_mut_page(context, page_id).expect("page disappeared")).expect("page could not be parsed");
+            slotted_page.set_value(index, value.wait()).expect("set failed");
+        }
+        println!("done setting deferred values");
+    }
+
+    fn flush_aux(&mut self, engine: &StorageEngine, context: &mut TransactionContext, aux_slotted_page: &mut SlottedPageMut<'_>) {
+        println!("set deferred values");
+        for ((page_id, index), value) in self.set.drain() {
+            println!("deferred set {page_id}/{index}");
+            if page_id == aux_slotted_page.id() {
+                aux_slotted_page.set_value(index, value.wait()).expect("set failed");
+            } else {
+                let mut slotted_page = SlottedPageMut::try_from(engine.get_mut_page(context, page_id).expect("page disappeared")).expect("page could not be parsed");
+                slotted_page.set_value(index, value.wait()).expect("set failed");
+            }
+        }
+        println!("done setting deferred values");
+    }
+
+    fn partial_flush(&mut self, engine: &StorageEngine, context: &mut TransactionContext, flush_page_id: PageId) {
+        println!("set deferred values (partial @ {flush_page_id})");
+        for ((page_id, index), value) in self.set.extract_if(|&(page_id, _index), _value| page_id == flush_page_id) {
+            let mut slotted_page = SlottedPageMut::try_from(engine.get_mut_page(context, page_id).expect("page disappeared")).expect("page could not be parsed");
+            slotted_page.set_value(index, value.wait()).expect("set failed");
+        }
+        println!("done setting deferred values");
+    }
+
+    fn partial_flush_aux(&mut self, engine: &StorageEngine, context: &mut TransactionContext, slotted_page: &mut SlottedPageMut<'_>) {
+        let flush_page_id = slotted_page.id();
+        println!("set deferred values (partial @ {flush_page_id})");
+        for ((page_id, index), value) in self.set.extract_if(|&(page_id, _index), _value| page_id == flush_page_id) {
+            slotted_page.set_value(index, value.wait()).expect("set failed");
+        }
+        println!("done setting deferred values");
+    }
+}
+
 impl StorageEngine {
     pub fn new(page_manager: PageManager, meta_manager: MetadataManager) -> Self {
         let alive_snapshot = meta_manager.active_slot().snapshot_id();
@@ -53,6 +139,7 @@ impl StorageEngine {
             page_manager,
             meta_manager: Mutex::new(meta_manager),
             alive_snapshot: AtomicU64::new(alive_snapshot),
+            executor: threadpool::builder().build().expect("failed to initialize thread pool"),
         }
     }
 
@@ -294,6 +381,8 @@ impl StorageEngine {
         context: &mut TransactionContext,
         mut changes: &mut [(Nibbles, Option<TrieValue>)],
     ) -> Result<(), Error> {
+        let mut deferred = DeferredChanges::new();
+
         changes.sort_by(|a, b| a.0.cmp(&b.0));
         if context.root_node_page_id.is_none() {
             // Handle empty trie case, inserting the first new value before traversing the trie.
@@ -304,7 +393,7 @@ impl StorageEngine {
             let root_pointer =
                 self.initialize_empty_trie(context, path, value, &mut slotted_page)?;
             context.root_node_page_id = root_pointer.location().page_id();
-            context.root_node_hash = root_pointer.rlp().as_hash().unwrap();
+            context.root_node_hash = root_pointer.wait().rlp().as_hash().unwrap();
             if remaining_changes.is_empty() {
                 return Ok(());
             }
@@ -319,11 +408,14 @@ impl StorageEngine {
         });
 
         let pointer_change =
-            self.set_values_in_page(context, changes, 0, context.root_node_page_id.unwrap())?;
+            self.set_values_in_page(context, changes, 0, context.root_node_page_id.unwrap(), &mut deferred)?;
+
+        deferred.flush(self, context);
+
         match pointer_change {
             PointerChange::Update(pointer) => {
                 context.root_node_page_id = pointer.location().page_id();
-                context.root_node_hash = pointer.rlp().as_hash().unwrap();
+                context.root_node_hash = pointer.wait().rlp().as_hash().unwrap();
             }
             PointerChange::Delete => {
                 context.root_node_page_id = None;
@@ -331,6 +423,7 @@ impl StorageEngine {
             }
             PointerChange::None => (),
         }
+
         Ok(())
     }
 
@@ -340,7 +433,9 @@ impl StorageEngine {
         mut changes: &[(Nibbles, Option<TrieValue>)],
         path_offset: u8,
         page_id: PageId,
+        deferred: &mut DeferredChanges,
     ) -> Result<PointerChange, Error> {
+        deferred.partial_flush(self, context, page_id);
         let page = self.get_mut_clone(context, page_id)?;
         let mut new_slotted_page = SlottedPageMut::try_from(page)?;
         let mut split_count = 0;
@@ -352,12 +447,10 @@ impl StorageEngine {
                 path_offset,
                 &mut new_slotted_page,
                 0,
+                deferred,
             );
 
             match result {
-                Ok(PointerChange::Delete) => return Ok(PointerChange::Delete),
-                Ok(PointerChange::None) => return Ok(PointerChange::None),
-                Ok(PointerChange::Update(pointer)) => return Ok(PointerChange::Update(pointer)),
                 // In the case of a page split, re-attempt the operation from scratch. This ensures
                 // that a page will be consistently evaluated, and not modified in
                 // the middle of an operation, which could result in inconsistent
@@ -371,10 +464,7 @@ impl StorageEngine {
                         return Err(Error::PageError(PageError::PageSplitLimitReached));
                     }
                 }
-                Err(Error::PageError(PageError::PageIsFull)) => {
-                    return Err(Error::PageError(PageError::PageIsFull));
-                }
-                Err(e) => return Err(e),
+                value => return value,
             }
         }
     }
@@ -407,11 +497,15 @@ impl StorageEngine {
         path_offset: u8,
         slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
+        deferred: &mut DeferredChanges,
     ) -> Result<PointerChange, Error> {
         if changes.is_empty() {
             return Ok(PointerChange::None);
         }
 
+        deferred.partial_flush_aux(self, context, slotted_page); // TODO: instead of flushing,
+                                                                 // change the call to `get_value`
+                                                                 // to check `deferred` first
         let mut node = slotted_page.get_value::<Node>(page_index)?;
 
         // Find the shortest common prefix between the node path and the changes
@@ -437,6 +531,7 @@ impl StorageEngine {
                         path_offset,
                         slotted_page,
                         page_index,
+                        deferred,
                     );
                 } else if changes_left.is_empty() {
                     return self.set_values_in_cloned_page(
@@ -445,6 +540,7 @@ impl StorageEngine {
                         path_offset,
                         slotted_page,
                         page_index,
+                        deferred,
                     );
                 } else {
                     unreachable!(
@@ -461,6 +557,7 @@ impl StorageEngine {
                 &mut node,
                 common_prefix,
                 common_prefix_length,
+                deferred,
             );
         }
 
@@ -477,6 +574,7 @@ impl StorageEngine {
                 &mut node,
                 path,
                 value,
+                deferred,
             );
         }
 
@@ -490,6 +588,7 @@ impl StorageEngine {
                 page_index,
                 &mut node,
                 common_prefix_length,
+                deferred,
             );
         }
 
@@ -503,6 +602,7 @@ impl StorageEngine {
             page_index,
             &mut node,
             common_prefix_length,
+            deferred,
         )
     }
 
@@ -534,6 +634,7 @@ impl StorageEngine {
         node: &mut Node,
         common_prefix: Nibbles,
         common_prefix_length: usize,
+        deferred: &mut DeferredChanges,
     ) -> Result<PointerChange, Error> {
         // Create a new branch node with the common prefix
         let mut new_parent_branch = Node::new_branch(common_prefix)?;
@@ -543,14 +644,16 @@ impl StorageEngine {
         if slotted_page.num_free_bytes() <
             new_parent_branch.size() + CELL_POINTER_SIZE - common_prefix_length / 2
         {
+            deferred.partial_flush_aux(self, context, slotted_page);
             self.split_page(context, slotted_page)?;
             return Err(Error::PageSplit(0));
         }
         let node_branch_index = node.prefix()[common_prefix_length];
         // Update the existing node with the new prefix
         node.set_prefix(node.prefix().slice(common_prefix_length + 1..))?;
-        let rlp_node = node.to_rlp_node();
+        let rlp_node = node.to_deferred_rlp_node(&self.executor);
         slotted_page.set_value(cell_index, node)?;
+        deferred.set_value(slotted_page.id(), cell_index, node.clone());
 
         // Make sure there is no insertions until the new branch node is inserted
         let new_parent_branch_cell_index = slotted_page.next_free_cell_index()?;
@@ -558,17 +661,19 @@ impl StorageEngine {
         // existing node later.
         new_parent_branch.set_child(
             node_branch_index,
-            Pointer::new(Location::for_cell(new_parent_branch_cell_index), rlp_node),
+            Pointer::new_deferred(Location::for_cell(new_parent_branch_cell_index), rlp_node),
         )?;
         let inserted_branch_cell_index = slotted_page.insert_value(&new_parent_branch)?;
+        deferred.set_value(slotted_page.id(), inserted_branch_cell_index, new_parent_branch);
         debug_assert_eq!(
             inserted_branch_cell_index, new_parent_branch_cell_index,
             "new parent branch cell index should be the same as the next free cell index, a different caused by interruption between the next_free_cell_index and insert_value"
         );
         slotted_page.swap_cell_pointers(cell_index, new_parent_branch_cell_index)?;
+        deferred.swap_cell_pointers(slotted_page.id(), cell_index, new_parent_branch_cell_index);
 
         // Insert the changes into the new branch via recursion
-        self.set_values_in_cloned_page(context, changes, path_offset, slotted_page, cell_index)
+        self.set_values_in_cloned_page(context, changes, path_offset, slotted_page, cell_index, deferred)
     }
 
     /// Handles the case when the path matches the node prefix exactly
@@ -582,15 +687,17 @@ impl StorageEngine {
         node: &mut Node,
         path: Nibbles,
         value: Option<&TrieValue>,
+        deferred: &mut DeferredChanges,
     ) -> Result<PointerChange, Error> {
         if value.is_none() {
             // Delete the node
             if node.has_children() {
                 // Delete the entire subtrie (e.g., for an AccountLeaf, delete all storage)
-                self.delete_subtrie(context, slotted_page, page_index)?;
+                self.delete_subtrie(context, slotted_page, page_index, deferred)?;
             }
 
             slotted_page.delete_value(page_index)?;
+            deferred.delete_value(slotted_page.id(), page_index);
 
             assert_eq!(
                 changes.len(),
@@ -616,6 +723,7 @@ impl StorageEngine {
                 path_offset,
                 slotted_page,
                 page_index,
+                deferred,
             );
         }
 
@@ -632,16 +740,18 @@ impl StorageEngine {
         if new_node_size > old_node_size {
             let node_size_incr = new_node_size - old_node_size;
             if slotted_page.num_free_bytes() < node_size_incr {
+                deferred.partial_flush_aux(self, context, slotted_page);
                 self.split_page(context, slotted_page)?;
                 return Err(Error::PageSplit(0));
             }
         }
 
         slotted_page.set_value(page_index, &new_node)?;
+        deferred.set_value(slotted_page.id(), page_index, new_node.clone());
 
         if remaining_changes.is_empty() {
-            let rlp_node = new_node.to_rlp_node();
-            Ok(PointerChange::Update(Pointer::new(
+            let rlp_node = new_node.to_deferred_rlp_node(&self.executor);
+            Ok(PointerChange::Update(Pointer::new_deferred(
                 node_location(slotted_page.id(), page_index),
                 rlp_node,
             )))
@@ -654,14 +764,15 @@ impl StorageEngine {
                 path_offset,
                 slotted_page,
                 page_index,
+                deferred,
             );
             match account_pointer_change {
                 Ok(PointerChange::Update(pointer)) => Ok(PointerChange::Update(pointer)),
                 Ok(PointerChange::None) => {
                     // even if the storage is unchanged, we still need to update the RLP encoding of
                     // this account node as its contents have changed
-                    let rlp_node = new_node.to_rlp_node();
-                    Ok(PointerChange::Update(Pointer::new(
+                    let rlp_node = new_node.to_deferred_rlp_node(&self.executor);
+                    Ok(PointerChange::Update(Pointer::new_deferred(
                         node_location(slotted_page.id(), page_index),
                         rlp_node,
                     )))
@@ -684,6 +795,7 @@ impl StorageEngine {
         page_index: u8,
         node: &mut Node,
         common_prefix_length: usize,
+        deferred: &mut DeferredChanges,
     ) -> Result<PointerChange, Error> {
         let child_pointer = node.direct_child()?;
 
@@ -697,6 +809,7 @@ impl StorageEngine {
                         path_offset + common_prefix_length as u8,
                         slotted_page,
                         child_cell_index,
+                        deferred,
                     )?
                 } else {
                     // Handle remote child node (on different page)
@@ -706,6 +819,7 @@ impl StorageEngine {
                         changes,
                         path_offset + common_prefix_length as u8,
                         child_page_id,
+                        deferred,
                     )?
                 };
 
@@ -717,17 +831,18 @@ impl StorageEngine {
                         page_index,
                         Some(new_child_pointer),
                         0,
+                        deferred,
                     )?;
-                    let rlp_node = node.to_rlp_node();
-                    Ok(PointerChange::Update(Pointer::new(
+                    let rlp_node = node.to_deferred_rlp_node(&self.executor);
+                    Ok(PointerChange::Update(Pointer::new_deferred(
                         node_location(slotted_page.id(), page_index),
                         rlp_node,
                     )))
                 }
                 PointerChange::Delete => {
-                    self.update_node_child(node, slotted_page, page_index, None, 0)?;
-                    let rlp_node = node.to_rlp_node();
-                    Ok(PointerChange::Update(Pointer::new(
+                    self.update_node_child(node, slotted_page, page_index, None, 0, deferred)?;
+                    let rlp_node = node.to_deferred_rlp_node(&self.executor);
+                    Ok(PointerChange::Update(Pointer::new_deferred(
                         node_location(slotted_page.id(), page_index),
                         rlp_node,
                     )))
@@ -744,6 +859,7 @@ impl StorageEngine {
                 page_index,
                 node,
                 common_prefix_length,
+                deferred,
             )
         }
     }
@@ -758,6 +874,7 @@ impl StorageEngine {
         page_index: u8,
         node: &mut Node,
         common_prefix_length: usize,
+        deferred: &mut DeferredChanges,
     ) -> Result<PointerChange, Error> {
         if changes.is_empty() {
             return Ok(PointerChange::None);
@@ -774,6 +891,7 @@ impl StorageEngine {
                 path_offset,
                 slotted_page,
                 page_index,
+                deferred,
             );
         }
 
@@ -787,20 +905,23 @@ impl StorageEngine {
         // 3. and add new cell pointer for the new leaf node (3 bytes)
         // when adding the new child, split the page.
         if slotted_page.num_free_bytes() < node_size_incr + new_node.size() + CELL_POINTER_SIZE {
+            deferred.partial_flush_aux(self, context, slotted_page);
             self.split_page(context, slotted_page)?;
             return Err(Error::PageSplit(0));
         }
 
-        let rlp_node = new_node.to_rlp_node();
+        let rlp_node = new_node.to_deferred_rlp_node(&self.executor);
 
         // Insert the new node and update the parent
-        let location = Location::for_cell(slotted_page.insert_value(&new_node)?);
-        node.set_child(0, Pointer::new(location, rlp_node))?;
+        let cell_index = slotted_page.insert_value(&new_node)?;
+        let location = Location::for_cell(cell_index);
+        node.set_child(0, Pointer::new_deferred(location, rlp_node))?;
         slotted_page.set_value(page_index, node)?;
+        deferred.set_value(slotted_page.id(), page_index, node.clone());
 
         if remaining_changes.is_empty() {
-            let rlp_node = node.to_rlp_node();
-            return Ok(PointerChange::Update(Pointer::new(
+            let rlp_node = node.to_deferred_rlp_node(&self.executor);
+            return Ok(PointerChange::Update(Pointer::new_deferred(
                 node_location(slotted_page.id(), page_index),
                 rlp_node,
             )));
@@ -813,6 +934,7 @@ impl StorageEngine {
             path_offset,
             slotted_page,
             page_index,
+            deferred,
         )
     }
 
@@ -824,6 +946,7 @@ impl StorageEngine {
         page_index: u8,
         new_child_pointer: Option<Pointer>,
         child_index: u8,
+        deferred: &mut DeferredChanges,
     ) -> Result<(), Error> {
         if let Some(new_child_pointer) = new_child_pointer {
             node.set_child(child_index, new_child_pointer)?;
@@ -832,6 +955,7 @@ impl StorageEngine {
         }
 
         slotted_page.set_value(page_index, node)?;
+        deferred.set_value(slotted_page.id(), page_index, node.clone());
         Ok(())
     }
 
@@ -845,6 +969,7 @@ impl StorageEngine {
         page_index: u8,
         node: &mut Node,
         common_prefix_length: usize,
+        deferred: &mut DeferredChanges,
     ) -> Result<PointerChange, Error> {
         // Partition changes by child index
         let mut remaining_changes = changes;
@@ -869,6 +994,7 @@ impl StorageEngine {
                 node,
                 common_prefix_length,
                 child_index,
+                deferred,
             );
             match result {
                 Err(Error::PageSplit(processed)) => {
@@ -884,7 +1010,7 @@ impl StorageEngine {
         assert!(handled_in_children == changes.len(), "all changes should be handled");
 
         // Check if the branch node should be deleted or merged
-        self.handle_branch_node_cleanup(context, slotted_page, page_index, node)
+        self.handle_branch_node_cleanup(context, slotted_page, page_index, node, deferred)
     }
 
     fn handle_child_node_traversal(
@@ -897,6 +1023,7 @@ impl StorageEngine {
         node: &mut Node,
         common_prefix_length: usize,
         child_index: u8,
+        deferred: &mut DeferredChanges,
     ) -> Result<(), Error> {
         // Get the child pointer for this index
         let child_pointer = node.child(child_index)?;
@@ -914,6 +1041,7 @@ impl StorageEngine {
                             path_offset + common_prefix_length as u8 + 1,
                             slotted_page,
                             child_cell_index,
+                            deferred,
                         )?
                     } else {
                         // Remote child node
@@ -923,6 +1051,7 @@ impl StorageEngine {
                             matching_changes,
                             path_offset + common_prefix_length as u8 + 1,
                             child_page_id,
+                            deferred,
                         )?
                     };
 
@@ -934,10 +1063,11 @@ impl StorageEngine {
                             page_index,
                             Some(new_child_pointer),
                             child_index,
+                            deferred,
                         )?;
                     }
                     PointerChange::Delete => {
-                        self.update_node_child(node, slotted_page, page_index, None, child_index)?;
+                        self.update_node_child(node, slotted_page, page_index, None, child_index, deferred)?;
                     }
                     PointerChange::None => {}
                 }
@@ -981,14 +1111,18 @@ impl StorageEngine {
                 if slotted_page.num_free_bytes() <
                     node_size_incr + new_node.size() + CELL_POINTER_SIZE
                 {
+                    deferred.partial_flush_aux(self, context, slotted_page);
                     self.split_page(context, slotted_page)?;
                     return Err(Error::PageSplit(0));
                 }
 
-                let rlp_node = new_node.to_rlp_node();
-                let location = Location::for_cell(slotted_page.insert_value(&new_node)?);
-                node.set_child(child_index, Pointer::new(location, rlp_node))?;
+                let rlp_node = new_node.to_deferred_rlp_node(&self.executor);
+                let new_node_cell_index = slotted_page.insert_value(&new_node)?;
+                deferred.set_value(slotted_page.id(), new_node_cell_index, new_node);
+                let location = Location::for_cell(new_node_cell_index);
+                node.set_child(child_index, Pointer::new_deferred(location, rlp_node))?;
                 slotted_page.set_value(page_index, node)?;
+                deferred.set_value(slotted_page.id(), page_index, node.clone());
 
                 // If there are more matching changes, recurse
                 if !matching_changes.is_empty() {
@@ -998,6 +1132,7 @@ impl StorageEngine {
                         path_offset + common_prefix_length as u8 + 1,
                         slotted_page,
                         location.cell_index().unwrap(),
+                        deferred,
                     )?;
 
                     match child_pointer_change {
@@ -1008,6 +1143,7 @@ impl StorageEngine {
                                 page_index,
                                 Some(new_child_pointer),
                                 child_index,
+                                deferred,
                             )?;
                         }
                         PointerChange::Delete => {
@@ -1017,6 +1153,7 @@ impl StorageEngine {
                                 page_index,
                                 None,
                                 child_index,
+                                deferred,
                             )?;
                         }
                         PointerChange::None => {}
@@ -1034,24 +1171,27 @@ impl StorageEngine {
         slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
         node: &Node,
+        deferred: &mut DeferredChanges,
     ) -> Result<PointerChange, Error> {
         let children = node.enumerate_children()?;
         if children.is_empty() {
             // Delete empty branch node
             slotted_page.delete_value(page_index)?;
+            deferred.delete_value(slotted_page.id(), page_index);
             // If we're the root node, orphan our page
             if page_index == 0 {
                 self.orphan_page(context, slotted_page.id())?;
+                deferred.orphan_page(slotted_page.id());
             }
             Ok(PointerChange::Delete)
         } else if children.len() == 1 {
             // Merge branch with its only child
             let (idx, ptr) = children[0];
-            self.merge_branch_with_only_child(context, slotted_page, page_index, node, idx, ptr)
+            self.merge_branch_with_only_child(context, slotted_page, page_index, node, idx, ptr, deferred)
         } else {
             // Normal branch node with multiple children
-            let rlp_node = node.to_rlp_node();
-            Ok(PointerChange::Update(Pointer::new(
+            let rlp_node = node.to_deferred_rlp_node(&self.executor);
+            Ok(PointerChange::Update(Pointer::new_deferred(
                 node_location(slotted_page.id(), page_index),
                 rlp_node,
             )))
@@ -1067,7 +1207,12 @@ impl StorageEngine {
         node: &Node,
         only_child_index: u8,
         only_child_node_pointer: &Pointer,
+        deferred: &mut DeferredChanges,
     ) -> Result<PointerChange, Error> {
+        deferred.partial_flush_aux(self, context, slotted_page); // TODO: instead of flushing,
+                                                                 // change the call to `get_value`
+                                                                 // to check `deferred` first
+
         // Get the child node
         let (mut only_child_node, child_slotted_page) =
             if let Some(cell_index) = only_child_node_pointer.location().cell_index() {
@@ -1075,6 +1220,7 @@ impl StorageEngine {
                 (slotted_page.get_value::<Node>(cell_index)?, None)
             } else {
                 // Child is on another page
+                deferred.partial_flush(self, context, only_child_node_pointer.location().page_id().expect("page_id should exist"));
                 let child_page = self.get_mut_clone(
                     context,
                     only_child_node_pointer.location().page_id().expect("page_id should exist"),
@@ -1090,7 +1236,7 @@ impl StorageEngine {
         only_child_node.set_prefix(new_nibbles)?;
 
         // Get the RLP node for the merged child
-        let rlp_node = only_child_node.to_rlp_node();
+        let rlp_node = only_child_node.to_deferred_rlp_node(&self.executor);
 
         let child_is_in_same_page = child_slotted_page.is_none();
 
@@ -1102,6 +1248,7 @@ impl StorageEngine {
                 only_child_node,
                 only_child_node_pointer,
                 rlp_node,
+                deferred,
             )
         } else {
             // Child is on another page
@@ -1112,6 +1259,7 @@ impl StorageEngine {
                 only_child_node,
                 child_slotted_page.unwrap(),
                 rlp_node,
+                deferred,
             )
         }
     }
@@ -1123,7 +1271,8 @@ impl StorageEngine {
         page_index: u8,
         only_child_node: Node,
         only_child_node_pointer: &Pointer,
-        rlp_node: RlpNode,
+        rlp_node: DeferredRlpNode,
+        deferred: &mut DeferredChanges,
     ) -> Result<PointerChange, Error> {
         let child_cell_index =
             only_child_node_pointer.location().cell_index().expect("cell index should exist");
@@ -1131,15 +1280,18 @@ impl StorageEngine {
         // Delete both nodes and insert the merged one
         slotted_page.delete_value(child_cell_index)?;
         slotted_page.delete_value(page_index)?;
+        deferred.delete_value(slotted_page.id(), child_cell_index);
+        deferred.delete_value(slotted_page.id(), page_index);
 
         let only_child_node_index = slotted_page.insert_value(&only_child_node)?;
+        deferred.set_value(slotted_page.id(), only_child_node_index, only_child_node);
 
         // If we are the root of the page, we must insert at index 0
         if page_index == 0 {
             assert_eq!(only_child_node_index, page_index);
         }
 
-        Ok(PointerChange::Update(Pointer::new(
+        Ok(PointerChange::Update(Pointer::new_deferred(
             node_location(slotted_page.id(), only_child_node_index),
             rlp_node,
         )))
@@ -1153,26 +1305,31 @@ impl StorageEngine {
         page_index: u8,
         only_child_node: Node,
         mut child_slotted_page: SlottedPageMut<'_>,
-        rlp_node: RlpNode,
+        rlp_node: DeferredRlpNode,
+        deferred: &mut DeferredChanges,
     ) -> Result<PointerChange, Error> {
         let branch_page_id = slotted_page.id();
 
         // Ensure the child page has enough space
         if child_slotted_page.num_free_bytes() < 200 {
+            deferred.partial_flush_aux(self, context, &mut child_slotted_page);
             self.split_page(context, &mut child_slotted_page)?;
             // Not returning Error::PageSplit because we're splitting the child page
         }
 
         // Delete ourselves and update the child
         slotted_page.delete_value(page_index)?;
+        deferred.delete_value(slotted_page.id(), page_index);
         child_slotted_page.set_value(0, &only_child_node)?;
+        deferred.set_value(child_slotted_page.id(), 0, only_child_node);
 
         // If we're the root node, orphan our page
         if page_index == 0 {
             self.orphan_page(context, branch_page_id)?;
+            deferred.orphan_page(slotted_page.id());
         }
 
-        Ok(PointerChange::Update(Pointer::new(node_location(child_slotted_page.id(), 0), rlp_node)))
+        Ok(PointerChange::Update(Pointer::new_deferred(node_location(child_slotted_page.id(), 0), rlp_node)))
     }
 
     // Split the page into two, moving the largest immediate subtrie of the root node to a new child
@@ -1222,7 +1379,7 @@ impl StorageEngine {
                 largest_child_index,
                 Pointer::new(
                     Location::for_page(child_slotted_page.id()),
-                    largest_child_pointer.rlp().clone(),
+                    largest_child_pointer.rlp().wait().clone(),
                 ),
             )?;
         }
@@ -1238,13 +1395,14 @@ impl StorageEngine {
         context: &mut TransactionContext,
         slotted_page: &mut SlottedPageMut<'_>,
         cell_index: u8,
+        deferred: &mut DeferredChanges,
     ) -> Result<(), Error> {
         if cell_index == 0 {
             // if we are a root node, deleting ourself will orphan our entire page and
             // all of our descendant pages. Instead of deleting each cell one-by-one
             // we can orphan our entire page, and recursively orphan all our descendant
             // pages as well.
-            return self.orphan_subtrie(context, slotted_page, cell_index);
+            return self.orphan_subtrie(context, slotted_page, cell_index, deferred);
         }
 
         let node: Node = slotted_page.get_value(cell_index)?;
@@ -1254,7 +1412,7 @@ impl StorageEngine {
 
             for (_, child_ptr) in children {
                 if let Some(cell_index) = child_ptr.location().cell_index() {
-                    self.delete_subtrie(context, slotted_page, cell_index)?
+                    self.delete_subtrie(context, slotted_page, cell_index, deferred)?
                 } else {
                     // the child is a root of another page, and that child will be
                     // deleted, essentially orphaning that page and all descendants of
@@ -1262,12 +1420,13 @@ impl StorageEngine {
                     let page_id = child_ptr.location().page_id().expect("page_id must exist");
                     let page = self.get_page(context, page_id)?;
                     let slotted_page = SlottedPage::try_from(page)?;
-                    self.orphan_subtrie(context, &slotted_page, 0)?
+                    self.orphan_subtrie(context, &slotted_page, 0, deferred)?
                 }
             }
         }
 
         slotted_page.delete_value(cell_index)?;
+        deferred.delete_value(slotted_page.id(), cell_index);
         Ok(())
     }
 
@@ -1278,6 +1437,7 @@ impl StorageEngine {
         context: &mut TransactionContext,
         slotted_page: &SlottedPage<'_>,
         cell_index: u8,
+        deferred: &mut DeferredChanges,
     ) -> Result<(), Error> {
         let node: Node = slotted_page.get_value(cell_index)?;
 
@@ -1286,7 +1446,7 @@ impl StorageEngine {
 
             for (_, child_ptr) in children {
                 if let Some(cell_index) = child_ptr.location().cell_index() {
-                    self.orphan_subtrie(context, slotted_page, cell_index)?;
+                    self.orphan_subtrie(context, slotted_page, cell_index, deferred)?;
                 } else {
                     // the child is a root of another page, and that child will be
                     // deleted, essentially orphaning that page and all descendants of
@@ -1296,13 +1456,14 @@ impl StorageEngine {
                         child_ptr.location().page_id().expect("page_id must exist"),
                     )?;
                     let child_slotted_page = SlottedPage::try_from(child_page)?;
-                    self.orphan_subtrie(context, &child_slotted_page, 0)?
+                    self.orphan_subtrie(context, &child_slotted_page, 0, deferred)?
                 }
             }
         }
 
         if cell_index == 0 {
             self.orphan_page(context, slotted_page.id())?;
+            deferred.orphan_page(slotted_page.id());
         }
 
         Ok(())
@@ -1847,7 +2008,7 @@ fn move_subtrie_nodes(
                 let new_location = move_subtrie_nodes(source_page, child_index, target_page)?;
                 // update the pointer in the parent node
                 updated_node
-                    .set_child(branch_index, Pointer::new(new_location, child_ptr.rlp().clone()))?;
+                    .set_child(branch_index, Pointer::new(new_location, child_ptr.rlp().wait().clone()))?;
             }
         }
     }
@@ -1954,6 +2115,7 @@ impl From<io::Error> for Error {
 
 #[cfg(test)]
 mod tests {
+    use alloy_trie::nodes::RlpNode;
     use super::*;
     use crate::{
         account::Account,
