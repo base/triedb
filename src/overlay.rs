@@ -181,7 +181,7 @@ impl OverlayState {
         // Find the range of entries that start with the prefix after applying offset
         for (i, (path, _)) in slice.iter().enumerate() {
             if path.len() >= self.prefix_offset {
-                let adjusted_path = path.slice(self.prefix_offset..);
+                let adjusted_path = &path.as_slice()[self.prefix_offset..];
                 if adjusted_path.len() >= prefix.len() && adjusted_path[..prefix.len()] == *prefix {
                     if start_idx.is_none() {
                         start_idx = Some(i);
