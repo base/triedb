@@ -246,7 +246,7 @@ impl PageManager {
     /// Syncs pages to the backing file.
     pub fn sync(&self) -> io::Result<()> {
         if cfg!(not(miri)) {
-            self.mmap.flush()
+            self.mmap.flush_async()
         } else {
             Ok(())
         }
