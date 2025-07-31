@@ -6,15 +6,16 @@ use crate::{
     context::TransactionContext,
     database::Database,
     node::TrieValue,
+    overlay::OverlayState,
     path::{AddressPath, StoragePath},
     storage::proofs::AccountProof,
 };
-use alloy_primitives::{StorageValue, B256};
-use alloy_trie::Nibbles;
+use alloy_primitives::{map::HashMap, StorageValue, B256};
+use alloy_trie::{BranchNodeCompact, Nibbles};
 pub use error::TransactionError;
 pub use manager::TransactionManager;
 use sealed::sealed;
-use std::{collections::HashMap, fmt::Debug, ops::Deref, sync::Arc};
+use std::{fmt::Debug, ops::Deref, sync::Arc};
 
 #[sealed]
 pub trait TransactionKind: Debug {}
@@ -55,7 +56,7 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
             committed: false,
             context,
             database,
-            pending_changes: HashMap::new(),
+            pending_changes: HashMap::default(),
             _marker: std::marker::PhantomData,
         }
     }
@@ -82,6 +83,16 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
 
     pub fn state_root(&self) -> B256 {
         self.context.root_node_hash
+    }
+
+    pub fn compute_root_with_overlay(
+        &self,
+        overlay_state: &OverlayState,
+    ) -> Result<(B256, HashMap<Nibbles, BranchNodeCompact>), TransactionError> {
+        self.database
+            .storage_engine
+            .compute_root_with_overlay(&self.context, overlay_state)
+            .map_err(|_| TransactionError::Generic)
     }
 
     pub fn get_account_with_proof(
@@ -192,6 +203,7 @@ impl<DB: Deref<Target = Database>> Transaction<DB, RW> {
 
 impl<DB: Deref<Target = Database>> Transaction<DB, RO> {
     pub fn commit(mut self) -> Result<(), TransactionError> {
+        println!("transaction_metrics: {:?}", self.context.transaction_metrics);
         let mut transaction_manager = self.database.transaction_manager.lock();
         transaction_manager.remove_tx(self.context.snapshot_id, false);
 
