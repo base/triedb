@@ -20,10 +20,11 @@ use alloy_primitives::{StorageKey, StorageValue, U256};
 use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::prelude::*;
-use std::{fs, io, path::Path, time::Duration};
+use std::{fs, hint::black_box, io, path::Path, sync::Arc, thread, time::Duration};
 use tempdir::TempDir;
 use triedb::{
     account::Account,
+    overlay::{OverlayStateMut, OverlayValue},
     path::{AddressPath, StoragePath},
     Database,
 };
@@ -79,6 +80,56 @@ fn bench_account_reads(c: &mut Criterion) {
                     assert!(a.is_some());
                 }
                 tx.commit().unwrap();
+            },
+        );
+    });
+    group.bench_function(BenchmarkId::new("eoa_reads_parallel", BATCH_SIZE), |b| {
+        b.iter_with_setup(
+            || {
+                let db_path = dir.path().join(&file_name);
+                Arc::new(Database::open(db_path.clone()).unwrap())
+            },
+            |db| {
+                let thread_count = 4;
+                // Divide addresses into 4 chunks
+                let addresses = addresses.clone();
+                let chunk_size = addresses.len() / thread_count;
+                let mut handles = Vec::new();
+
+                // Spawn 4 threads
+                for i in 0..thread_count {
+                    let start_idx = i * chunk_size;
+                    let end_idx = if i == thread_count {
+                        // Last thread handles any remaining addresses
+                        addresses.len()
+                    } else {
+                        (i + 1) * chunk_size
+                    };
+
+                    let thread_addresses = addresses[start_idx..end_idx].to_vec();
+                    let db_clone = Arc::clone(&db);
+
+                    let handle = thread::spawn(move || {
+                        // Each thread creates its own RO transaction
+                        let mut tx = db_clone.begin_ro().unwrap();
+
+                        // Read its chunk of addresses
+                        for addr in thread_addresses {
+                            let a = tx.get_account(addr.clone()).unwrap();
+                            assert!(a.is_some());
+                        }
+
+                        // Commit the transaction
+                        tx.commit().unwrap();
+                    });
+
+                    handles.push(handle);
+                }
+
+                // Wait for all threads to complete
+                for handle in handles {
+                    handle.join().unwrap();
+                }
             },
         );
     });
@@ -538,6 +589,89 @@ fn bench_storage_deletes(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_state_root_with_overlay(c: &mut Criterion) {
+    let mut group = c.benchmark_group("state_root_with_overlay");
+    let base_dir = get_base_database(
+        DEFAULT_SETUP_DB_EOA_SIZE,
+        DEFAULT_SETUP_DB_CONTRACT_SIZE,
+        DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT,
+    );
+    let file_name = base_dir.main_file_name.clone();
+
+    let mut rng = StdRng::seed_from_u64(SEED_CONTRACT);
+    // let total_storage_per_address = DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT;
+    let total_addresses = BATCH_SIZE;
+    let addresses: Vec<AddressPath> =
+        (0..total_addresses).map(|_| generate_random_address(&mut rng)).collect();
+    // let storage_paths_values = generate_storage_paths_values(&addresses, total_storage_per_address);
+
+    let mut account_overlay_mut = OverlayStateMut::new();
+    addresses.iter().enumerate().for_each(|(i, addr)| {
+        let new_account =
+            Account::new(i as u64, U256::from(i as u64), EMPTY_ROOT_HASH, KECCAK_EMPTY);
+        account_overlay_mut.insert(addr.clone().into(), Some(OverlayValue::Account(new_account)));
+    });
+    let account_overlay = account_overlay_mut.freeze();
+
+    // Build overlay state from storage paths and values
+    // let mut storage_overlay_mut = OverlayStateMut::new();
+
+    // for (storage_path, storage_value) in &storage_paths_values {
+    //     // Convert storage path to nibbles for overlay
+    //     let nibbles = storage_path.full_path();
+    //     storage_overlay_mut.insert(nibbles, Some(OverlayValue::Storage(*storage_value)));
+    // }
+
+    // // Freeze the mutable overlay to get an immutable one
+    // let storage_overlay = storage_overlay_mut.freeze();
+
+    group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+    group.measurement_time(Duration::from_secs(30));
+    group.bench_function(BenchmarkId::new("state_root_with_account_overlay", BATCH_SIZE), |b| {
+        b.iter_with_setup(
+            || {
+                let dir = TempDir::new("triedb_bench_state_root_with_account_overlay").unwrap();
+                copy_files(&base_dir, dir.path()).unwrap();
+                let db_path = dir.path().join(&file_name);
+                Database::open(db_path).unwrap()
+            },
+    |db| {
+                let tx = db.begin_ro().unwrap();
+
+                // Compute the root hash with the overlay
+                let _root_result = tx.compute_root_with_overlay(&account_overlay).unwrap();
+
+                tx.commit().unwrap();
+            },
+        );
+    });
+
+    // group.bench_function(BenchmarkId::new("state_root_with_storage_overlay", BATCH_SIZE), |b| {
+    //     b.iter_with_setup(
+    //         || {
+    //             let dir = TempDir::new("triedb_bench_state_root_with_storage_overlay").unwrap();
+    //             copy_files(&base_dir, dir.path()).unwrap();
+    //             let db_path = dir.path().join(&file_name);
+    //             Database::open(db_path).unwrap()
+    //         },
+    //         |db| {
+    //             black_box({
+    //                 for _ in 0..100 {
+    //                     let tx = db.begin_ro().unwrap();
+
+    //                     // Compute the root hash with the overlay
+    //                     let _root_result = tx.compute_root_with_overlay(&storage_overlay).unwrap();
+                        
+    //                     tx.commit().unwrap();
+    //                 }
+    //             })
+    //         },
+    //     );
+    // });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_account_reads,
@@ -550,5 +684,6 @@ criterion_group!(
     bench_storage_inserts,
     bench_storage_updates,
     bench_storage_deletes,
+    bench_state_root_with_overlay,
 );
 criterion_main!(benches);
