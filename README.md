@@ -162,19 +162,20 @@ block-beta
   columns 1
   block:flags:1
     columns 8
-    Type["Type (2 bits)"]
+    Reserved["Reserved (2 bits)"]
     PathLen["Path Prefix Len (6 bits)"]
   end
   PathNibbles["Path Prefix Nibbles (0-32 bytes)"]
   ChildrenBitmask["Children Bitmask (2 bytes)"]
+  ChildrenHashes["Children Hash Bitmask (2 bytes)"]
   block:c0
-    C0_RLP["Child0 RLP (33 bytes)"] C0_Location["Child0 Location (4 bytes)"]
+    C0_RLP["Child0 RLP (32 bytes)"] C0_Location["Child0 Location (4 bytes)"]
   end
   block:c7
-    C7_RLP["Child7 RLP (33 bytes)"] C7_Location["Child7 Location (4 bytes)"]
+    C7_RLP["Child7 RLP (32 bytes)"] C7_Location["Child7 Location (4 bytes)"]
   end
   block:cf
-    CF_RLP["ChildF RLP (33 bytes)"] CF_Location["ChildF Location (4 bytes)"]
+    CF_RLP["ChildF RLP (32 bytes)"] CF_Location["ChildF Location (4 bytes)"]
   end
   block:cx
     CBlank["Blank Child Slot"]
@@ -201,17 +202,13 @@ block-beta
 block-beta
   columns 1
   block:flags:1
-    Type["Type (2 bits)"] HasCode["Has Code (1 bit)"] HasStorage["Has Storage (1 bit)"] Reserved["Reserved (4 bits)"]
-  end
-  block:flags2:1
-    Reserved2["Reserved (1 bit)"]
-    PathLen["Path Prefix Len (7 bits)"]
+    HasCode["Has Code (1 bit)"] HasStorage["Has Storage (1 bit)"] PathLen["Path Prefix Len (6 bits)"]
   end
   PathNibbles["Path Prefix Nibbles (0-32 bytes)"]
   Nonce["Nonce RLP (1-9 bytes)"]
   Balance["Balance RLP (1-33 bytes)"]
   CodeHash["Code Hash (0 or 32 bytes)"]
-  StorageRoot["Storage Root RLP (0 or 33 bytes)"]
+  StorageRoot["Storage Root (0 or 32 bytes)"]
   StorageLocation["Storage Location (0 or 4 bytes)"]
 ```
 
@@ -243,9 +240,9 @@ block-beta
 block-beta
   columns 1
   block:flags:1
-    type["Type (2 bits)"] reserved["Reserved (2 bits)"] firstnibble["First Nibble (4 bits)"]
+    reserved["Reserved (1 bit)"] pathLen["Path Prefix Len (7 bits)"]
   end
-  pathnibbles["Remaining Path Nibbles (0-32 bytes)"]
+  pathnibbles["Path Nibbles (0-32 bytes)"]
   value["Value RLP (1-33 bytes)"]
 ```
 
