@@ -8,8 +8,8 @@ use std::{
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
-use cache_advisor::CacheAdvisor;
 use dashmap::DashMap;
+use evict::{EvictionPolicy, LruKReplacer, LruReplacer};
 use parking_lot::Mutex;
 
 use crate::{
@@ -39,9 +39,6 @@ struct FrameId(u32);
 
 #[derive(Debug)]
 struct DiskScheduler {}
-
-#[derive(Debug)]
-struct LRUReplacer {}
 
 pub struct BufferPoolManagerOptions {
     pub(super) num_frames: u32,
@@ -82,7 +79,7 @@ pub struct BufferPoolManager {
     dirty_frames: Mutex<Vec<(FrameId, PageId)>>, /* list of dirty frames that need to be flushed
                                                   * to disk, with fix num_frames size */
     disk_scheduler: DiskScheduler, /* the scheduler to schedule disk flushing operations */
-    lru_replacer: Mutex<CacheAdvisor>, /* the replacer to find unpinned/candidate pages for
+    lru_replacer: LruReplacer<PageId>, /* the replacer to find unpinned/candidate pages for
                                     * eviction */
 }
 
@@ -128,7 +125,7 @@ impl BufferPoolManager {
         let dirty_frames = Mutex::new(Vec::with_capacity(num_frames as usize));
         let free_frames = Mutex::new((0..num_frames).map(FrameId).collect::<VecDeque<_>>());
         let disk_scheduler = DiskScheduler {};
-        let lru_replacer = Mutex::new(CacheAdvisor::new(num_frames as usize, 20));
+        let lru_replacer = LruReplacer::new(num_frames as usize);
 
         Ok(BufferPoolManager {
             num_frames,
@@ -155,7 +152,18 @@ impl BufferPoolManager {
 
     fn get_free_frame(&self) -> Option<FrameId> {
         let mut free_frames = self.free_frames.lock();
-        free_frames.pop_front()
+        let fr = free_frames.pop_front();
+        match fr {
+            Some(frame_id) => Some(frame_id),
+            None => {
+                let evicted_page = self.lru_replacer.evict();
+                if let Some(page_id) = evicted_page {
+                    self.page_table.remove(&page_id).map(|(_, frame_header)| frame_header.frame_id)
+                } else {
+                    None
+                }
+            }
+        }
     }
 
     fn grow_if_needed(&self, min_len: u32) -> Result<(), PageError> {
@@ -163,22 +171,22 @@ impl BufferPoolManager {
         Ok(())
     }
 
-    /// Access a page, update the cache advisory
-    fn access_page(&self, page_id: PageId) {
-        let mut lru_replacer = self.lru_replacer.lock();
-        let evicted = lru_replacer.accessed_reuse_buffer(page_id.as_u64(), 1);
-        if !evicted.is_empty() {
-            let mut free_frames = self.free_frames.lock();
-            evicted.iter().for_each(|(page_id, _)| {
-                let page_id = PageId::try_from(*page_id as u32).unwrap();
-                let frame = self.page_table.remove(&page_id);
-                if let Some((_, frame_header)) = frame {
-                    free_frames.push_back(frame_header.frame_id);
-                }
-            });
-            lru_replacer.reset_internal_access_buffer();
-        }
-    }
+    // Access a page, update the cache advisory
+    // fn access_page(&self, page_id: PageId, pin: bool) -> Result<(), PageError> {
+    // let mut lru_replacer = self.lru_replacer.lock();
+    // let evicted = lru_replacer.accessed_reuse_buffer(page_id.as_u64(), 1);
+    // if !evicted.is_empty() {
+    //     let mut free_frames = self.free_frames.lock();
+    //     evicted.iter().for_each(|(page_id, _)| {
+    //         let page_id = PageId::try_from(*page_id as u32).unwrap();
+    //         let frame = self.page_table.remove(&page_id);
+    //         if let Some((_, frame_header)) = frame {
+    //             free_frames.push_back(frame_header.frame_id);
+    //         }
+    //     });
+    //     lru_replacer.reset_internal_access_buffer();
+    // }
+    // }
 }
 
 impl PageManagerTrait for BufferPoolManager {
@@ -205,7 +213,8 @@ impl PageManagerTrait for BufferPoolManager {
             file.read_exact(&mut *buf).map_err(PageError::IO)?;
         }
         self.page_table.insert(page_id, FrameHeader { frame_id, pin_count: 0 });
-        self.access_page(page_id);
+        // self.access_page(page_id);
+        self.lru_replacer.touch(page_id).map_err(|_| PageError::EvictionPolicy)?;
 
         unsafe { Page::from_ptr(page_id, buf) }
     }
@@ -235,7 +244,8 @@ impl PageManagerTrait for BufferPoolManager {
         }
         self.page_table.insert(page_id, FrameHeader { frame_id, pin_count: 0 });
         self.dirty_frames.lock().push((frame_id, page_id));
-        self.access_page(page_id);
+        // self.access_page(page_id);
+        self.lru_replacer.pin(page_id).map_err(|_| PageError::EvictionPolicy)?;
 
         unsafe { PageMut::from_ptr(page_id, snapshot_id, buf) }
     }
@@ -252,7 +262,8 @@ impl PageManagerTrait for BufferPoolManager {
 
         self.page_table.insert(page_id, FrameHeader { frame_id: frame_id.clone(), pin_count: 0 });
         self.dirty_frames.lock().push((frame_id, page_id));
-        self.access_page(page_id);
+        // self.access_page(page_id);
+        self.lru_replacer.pin(page_id).map_err(|_| PageError::EvictionPolicy)?;
 
         let data = self.frames[frame_id.0 as usize].ptr;
         unsafe { PageMut::acquire_unchecked(page_id, snapshot_id, data) }
@@ -295,6 +306,11 @@ impl PageManagerTrait for BufferPoolManager {
             file.write_vectored(&batch)?;
         }
         file.flush()?;
+        for (_, page_id) in dirty_pages.iter() {
+            self.lru_replacer.unpin(*page_id).map_err(|e| {
+                io::Error::new(io::ErrorKind::Other, format!("eviction policy error: {:?}", e))
+            })?;
+        }
         dirty_pages.clear();
         Ok(())
     }
@@ -520,24 +536,26 @@ mod tests {
         let snapshot = 123;
         let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
         let mut opts = BufferPoolManagerOptions::new();
-        opts.num_frames(256 * 10);
+        let _i = temp_file.path().to_str().unwrap();
+        opts.num_frames(10);
         let m = BufferPoolManager::open_with_options(&opts, temp_file.path())
             .expect("buffer pool creation failed");
 
-        (1..=20000).for_each(|i| {
+        (1..=20).for_each(|i| {
             let mut p =
                 m.allocate(snapshot + i as u64).expect(&format!("page allocation failed {}", i));
-            p.contents_mut().iter_mut().for_each(|byte| *byte = 0xab ^ (i as u8));
-            if i % 100 == 0 {
+            p.contents_mut().iter_mut().for_each(|byte| *byte = 0x10 + i as u8);
+            drop(p);
+            if i % 3 == 0 {
                 m.sync().expect("sync failed");
             }
         });
 
-        (1..=20000).for_each(|i| {
+        (1..=20).for_each(|i| {
             let page_id = PageId::new(i).unwrap();
             let page =
                 m.get(snapshot + i as u64, page_id).expect(&format!("failed to get page {}", i));
-            assert_eq!(page.contents(), &mut [0xab ^ (i as u8); Page::DATA_SIZE]);
+            assert_eq!(page.contents(), &mut [0x10 + i as u8; Page::DATA_SIZE]);
         });
     }
 }

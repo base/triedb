@@ -25,6 +25,7 @@ pub enum PageError {
     InvalidValue,
     InvalidPageContents(PageId),
     OutOfMemory,
+    EvictionPolicy,
     // TODO: add more errors here for other cases.
 }
 
