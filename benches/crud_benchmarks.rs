@@ -70,7 +70,7 @@ fn bench_account_reads(c: &mut Criterion) {
         b.iter_with_setup(
             || {
                 let db_path = dir.path().join(&file_name);
-                Database::create_new_with_buffer_pool(db_path.clone()).unwrap()
+                Database::open_with_buffer_pool(db_path.clone()).unwrap()
             },
             |db| {
                 let mut tx = db.begin_ro().unwrap();
@@ -107,7 +107,7 @@ fn bench_account_inserts(c: &mut Criterion) {
                 let dir = TempDir::new("triedb_bench_insert").unwrap();
                 copy_files(&base_dir, dir.path()).unwrap();
                 let db_path = dir.path().join(&file_name);
-                Database::create_new_with_buffer_pool(db_path).unwrap()
+                Database::open_with_buffer_pool(db_path).unwrap()
             },
             |db| {
                 let mut tx = db.begin_rw().unwrap();
@@ -145,7 +145,7 @@ fn bench_account_inserts_loop(c: &mut Criterion) {
                 let dir = TempDir::new("triedb_bench_insert_loop").unwrap();
                 copy_files(&base_dir, dir.path()).unwrap();
                 let db_path = dir.path().join(&file_name);
-                Database::create_new_with_buffer_pool(db_path).unwrap()
+                Database::open_with_buffer_pool(db_path).unwrap()
             },
             |db| {
                 for i in 0..10 {
@@ -191,7 +191,7 @@ fn bench_account_updates(c: &mut Criterion) {
         b.iter_with_setup(
             || {
                 let db_path = dir.path().join(&file_name);
-                Database::create_new_with_buffer_pool(db_path.clone()).unwrap()
+                Database::open_with_buffer_pool(db_path.clone()).unwrap()
             },
             |db| {
                 let mut tx = db.begin_rw().unwrap();
@@ -230,7 +230,7 @@ fn bench_account_deletes(c: &mut Criterion) {
                 let dir = TempDir::new("triedb_bench_delete").unwrap();
                 copy_files(&base_dir, dir.path()).unwrap();
                 let db_path = dir.path().join(&file_name);
-                Database::create_new_with_buffer_pool(db_path).unwrap()
+                Database::open_with_buffer_pool(db_path).unwrap()
             },
             |db| {
                 let mut tx = db.begin_rw().unwrap();
@@ -301,7 +301,7 @@ fn bench_mixed_operations(c: &mut Criterion) {
                 let dir = TempDir::new("triedb_bench_mixed").unwrap();
                 copy_files(&base_dir, dir.path()).unwrap();
                 let db_path = dir.path().join(&file_name);
-                Database::create_new_with_buffer_pool(db_path).unwrap()
+                Database::open_with_buffer_pool(db_path).unwrap()
             },
             |db| {
                 let mut tx = db.begin_rw().unwrap();
@@ -400,7 +400,7 @@ fn bench_storage_reads(c: &mut Criterion) {
         b.iter_with_setup(
             || {
                 let db_path = dir.path().join(&file_name);
-                Database::create_new_with_buffer_pool(db_path).unwrap()
+                Database::open_with_buffer_pool(db_path).unwrap()
             },
             |db| {
                 let mut tx = db.begin_ro().unwrap();
@@ -440,7 +440,7 @@ fn bench_storage_inserts(c: &mut Criterion) {
                 let dir = TempDir::new("triedb_bench_storage_insert").unwrap();
                 copy_files(&base_dir, dir.path()).unwrap();
                 let db_path = dir.path().join(&file_name);
-                Database::create_new_with_buffer_pool(db_path).unwrap()
+                Database::open_with_buffer_pool(db_path).unwrap()
             },
             |db| {
                 let mut tx = db.begin_rw().unwrap();
@@ -484,7 +484,7 @@ fn bench_storage_updates(c: &mut Criterion) {
                 let dir = TempDir::new("triedb_bench_storage_update").unwrap();
                 copy_files(&base_dir, dir.path()).unwrap();
                 let db_path = dir.path().join(&file_name);
-                Database::create_new_with_buffer_pool(db_path).unwrap()
+                Database::open_with_buffer_pool(db_path).unwrap()
             },
             |db| {
                 let mut tx = db.begin_rw().unwrap();
@@ -523,7 +523,7 @@ fn bench_storage_deletes(c: &mut Criterion) {
                 let dir = TempDir::new("triedb_bench_storage_delete").unwrap();
                 copy_files(&base_dir, dir.path()).unwrap();
                 let db_path = dir.path().join(&file_name);
-                Database::create_new_with_buffer_pool(db_path).unwrap()
+                Database::open_with_buffer_pool(db_path).unwrap()
             },
             |db| {
                 let mut tx = db.begin_rw().unwrap();

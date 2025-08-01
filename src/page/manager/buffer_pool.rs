@@ -93,7 +93,7 @@ impl BufferPoolManager {
         Self::open_with_options(&opts, path)
     }
 
-    pub(super) fn open_with_options(
+    pub fn open_with_options(
         opts: &BufferPoolManagerOptions,
         path: impl AsRef<Path>,
     ) -> Result<Self, PageError> {
