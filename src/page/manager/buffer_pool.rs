@@ -99,7 +99,12 @@ impl BufferPoolManager {
     ) -> Result<Self, PageError> {
         let path_cstr = CString::new(path.as_ref().to_string_lossy().as_bytes())
             .map_err(|_| PageError::InvalidValue)?;
-        let fd = unsafe { libc::open(path_cstr.as_ptr(), libc::O_RDWR | libc::O_CREAT, 0o644) };
+        // Use O_DIRECT on Linux for better performance, but not available on macOS
+        #[cfg(target_os = "linux")]
+        let flags = libc::O_RDWR | libc::O_CREAT | libc::O_DIRECT;
+        #[cfg(not(target_os = "linux"))]
+        let flags = libc::O_RDWR | libc::O_CREAT;
+        let fd = unsafe { libc::open(path_cstr.as_ptr(), flags, 0o644) };
         if fd == -1 {
             return Err(PageError::IO(io::Error::last_os_error()));
         }
