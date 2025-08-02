@@ -56,7 +56,7 @@ impl StorageEngine {
             page_manager,
             meta_manager: Mutex::new(meta_manager),
             alive_snapshot: AtomicU64::new(alive_snapshot),
-            contract_account_loc_cache: CacheManager::new(NonZeroUsize::new(1000).unwrap()),
+            contract_account_loc_cache: CacheManager::new(NonZeroUsize::new(10).unwrap()),
         }
     }
 
@@ -171,8 +171,7 @@ impl StorageEngine {
 
         // check the cache
         let nibbles = storage_path.get_address().to_nibbles();
-        let cache_reader = self.contract_account_loc_cache.read();
-        let cache_location = cache_reader.get(context.snapshot_id, nibbles);
+        let cache_location = self.contract_account_loc_cache.get(context.snapshot_id, nibbles);
         let (slotted_page, page_index, path_offset) = match cache_location {
             Some((page_id, page_index)) => {
                 context.transaction_metrics.inc_cache_storage_read_hit();
@@ -206,7 +205,6 @@ impl StorageEngine {
                 (slotted_page, 0, 0)
             }
         };
-        drop(cache_reader); // Release the cache reader
 
         match self.get_value_from_page(
             context,
@@ -247,8 +245,7 @@ impl StorageEngine {
                     original_path_slice.len() == ADDRESS_PATH_LENGTH
                 {
                     let original_path = Nibbles::from_nibbles_unchecked(original_path_slice);
-                    let mut cache_writer = self.contract_account_loc_cache.write();
-                    cache_writer.write(
+                    self.contract_account_loc_cache.insert(
                         context.snapshot_id,
                         original_path,
                         Some((slotted_page.id(), page_index)),
@@ -320,11 +317,11 @@ impl StorageEngine {
             changes = remaining_changes;
         }
         // invalidate the cache
-        let mut cache_writer = self.contract_account_loc_cache.write();
         changes.iter().for_each(|(path, _)| {
             if path.len() == STORAGE_PATH_LENGTH {
                 let address_path = AddressPath::new(path.slice(0..ADDRESS_PATH_LENGTH));
-                cache_writer.remove(context.snapshot_id, address_path.to_nibbles().clone());
+                self.contract_account_loc_cache
+                    .remove(context.snapshot_id, address_path.to_nibbles().clone());
             }
         });
 
@@ -2524,8 +2521,9 @@ mod tests {
             let read_account =
                 storage_engine.get_account(&mut context, address_path.clone()).unwrap().unwrap();
             assert_eq!(read_account, account);
-            let cache_reader = storage_engine.contract_account_loc_cache.read();
-            let cached_location = cache_reader.get(context.snapshot_id, address_path.to_nibbles());
+            let cached_location = storage_engine
+                .contract_account_loc_cache
+                .get(context.snapshot_id, address_path.to_nibbles());
             assert!(cached_location.is_none());
         }
         {
@@ -2583,9 +2581,10 @@ mod tests {
             assert_ne!(read_account.storage_root, EMPTY_ROOT_HASH);
 
             // the account should be cached
-            let cache_reader = storage_engine.contract_account_loc_cache.read();
-            let account_cache_location =
-                cache_reader.get(context.snapshot_id, address_path.to_nibbles()).unwrap();
+            let account_cache_location = storage_engine
+                .contract_account_loc_cache
+                .get(context.snapshot_id, address_path.to_nibbles())
+                .unwrap();
             assert_eq!(account_cache_location.0, PageId::new(1).unwrap());
             assert_eq!(account_cache_location.1, 2); // 0 is the branch page, 1 is the first EOA
                                                      // account, 2 is the this contract account
@@ -2672,9 +2671,9 @@ mod tests {
                 .unwrap();
 
             // the cache should be invalidated
-            let cache_reader = storage_engine.contract_account_loc_cache.read();
-            let account_cache_location =
-                cache_reader.get(context.snapshot_id, address_path.to_nibbles());
+            let account_cache_location = storage_engine
+                .contract_account_loc_cache
+                .get(context.snapshot_id, address_path.to_nibbles());
             assert!(account_cache_location.is_none());
         }
     }

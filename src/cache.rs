@@ -3,7 +3,7 @@ use alloy_trie::Nibbles;
 use std::{
     collections::HashMap,
     num::NonZeroUsize,
-    sync::{Arc, RwLock, RwLockReadGuard},
+    sync::{Arc, RwLock},
 };
 
 /// An entry in the versioned LRU cache with doubly-linked list indices.
@@ -115,7 +115,7 @@ impl VersionedLru {
                     .iter()
                     .position(|entry| entry.key == tail_key && entry.snapshot_id == smallest);
 
-                // Remove from entries hashmap
+                // Remove from `entries` hashmap
                 if let Some(evict_idx) = smallest_idx {
                     if let Some(versions) = self.entries.get_mut(&tail_key) {
                         versions.retain(|e| e.snapshot_id != smallest);
@@ -162,7 +162,7 @@ impl VersionedLru {
             self.tail = prev_idx;
         }
 
-        // Mark as removed (we could also compact the list, but this is simpler)
+        // Mark as removed
         self.lru[lru_idx].lru_prev = None;
         self.lru[lru_idx].lru_next = None;
     }
@@ -184,7 +184,7 @@ impl VersionedLru {
                 }
             }
 
-            // Remove obsolete entries from LRU list
+            // Remove from LRU list
             self.lru.retain(|entry| entry.snapshot_id >= min_id);
 
             // Rebuild LRU pointers after retention
@@ -215,68 +215,31 @@ impl CacheManager {
         CacheManager { cache: Arc::new(RwLock::new(VersionedLru::new(max_size.get()))) }
     }
 
-    /// Provides a reader handle to the cache.
-    /// Multiple readers can exist concurrently.
-    pub fn read(&self) -> Reader {
-        Reader { guard: self.cache.read().unwrap() }
+    /// Gets a value for the given key and snapshot ID and updates LRU state.
+    pub fn get(&self, snapshot_id: SnapshotId, key: &Nibbles) -> Option<(PageId, u8)> {
+        // Acquire write lock since we move the `Entry` to the front of the LRU list each time
+        // This is helpful because we'll want to cache an account on read to accelerate
+        // reading its contract state.
+        let mut guard = self.cache.write().unwrap();
+        guard.get(key, snapshot_id)
     }
 
-    /// Provides a writer handle to the cache.
-    /// This briefly acquires a lock to clone the cache, then releases it.
-    pub fn write(&self) -> Writer {
-        Writer { cache: Arc::clone(&self.cache) }
+    /// Inserts or updates an entry in the cache.
+    pub fn insert(&self, snapshot_id: SnapshotId, key: Nibbles, value: Option<(PageId, u8)>) {
+        let mut guard = self.cache.write().unwrap();
+        guard.set(key, snapshot_id, value);
+    }
+
+    /// Removes an entry from the cache by inserting a None value.
+    pub fn remove(&self, snapshot_id: SnapshotId, key: Nibbles) {
+        let mut guard = self.cache.write().unwrap();
+        guard.set(key, snapshot_id, None);
     }
 
     /// Sets the minimum snapshot ID for proactive cache purging.
     pub fn set_min_snapshot_id(&self, min_snapshot_id: SnapshotId) {
         let mut guard = self.cache.write().unwrap();
         guard.set_min_snapshot_id(min_snapshot_id);
-    }
-}
-
-/// A handle for reading from the cache.
-/// Dropping this struct releases the read lock.
-#[derive(Debug)]
-pub struct Reader<'a> {
-    guard: RwLockReadGuard<'a, VersionedLru>,
-}
-
-impl<'a> Reader<'a> {
-    /// Gets a value for the given key and snapshot ID without updating LRU state.
-    pub fn get(&self, snapshot_id: SnapshotId, key: &Nibbles) -> Option<(PageId, u8)> {
-        let versions = self.guard.entries.get(key)?;
-        versions
-            .iter()
-            .rev()
-            .find(|entry| entry.snapshot_id <= snapshot_id)
-            .and_then(|entry| entry.value)
-    }
-}
-
-/// A handle for writing to the cache.
-/// Modifications are made directly to the shared cache under write lock.
-#[derive(Debug)]
-pub struct Writer {
-    cache: Arc<RwLock<VersionedLru>>,
-}
-
-impl Writer {
-    /// Inserts or updates an entry in the cache.
-    pub fn write(&mut self, snapshot_id: SnapshotId, key: Nibbles, value: Option<(PageId, u8)>) {
-        let mut guard = self.cache.write().unwrap();
-        guard.set(key, snapshot_id, value);
-    }
-
-    /// Removes an entry from the cache by inserting a None value.
-    pub fn remove(&mut self, snapshot_id: SnapshotId, key: Nibbles) {
-        let mut guard = self.cache.write().unwrap();
-        guard.set(key, snapshot_id, None);
-    }
-
-    /// Gets a value and updates LRU state.
-    pub fn get(&mut self, snapshot_id: SnapshotId, key: &Nibbles) -> Option<(PageId, u8)> {
-        let mut guard = self.cache.write().unwrap();
-        guard.get(key, snapshot_id)
     }
 }
 
@@ -291,18 +254,15 @@ mod tests {
         let shared_cache = Arc::new(cache);
 
         // first writer
-        let mut writer1 = shared_cache.write();
-        writer1.write(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11)));
-        writer1.write(100, Nibbles::from_nibbles([2]), Some((PageId::new(12).unwrap(), 13)));
-        writer1.write(200, Nibbles::from_nibbles([1]), Some((PageId::new(20).unwrap(), 21)));
-        drop(writer1);
+        shared_cache.insert(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11)));
+        shared_cache.insert(100, Nibbles::from_nibbles([2]), Some((PageId::new(12).unwrap(), 13)));
+        shared_cache.insert(200, Nibbles::from_nibbles([1]), Some((PageId::new(20).unwrap(), 21)));
 
         // have some concurrent readers
         let cache_reader1 = Arc::clone(&shared_cache);
         let reader1 = thread::spawn(move || {
-            let reader = cache_reader1.read();
-            let val1 = reader.get(100, &Nibbles::from_nibbles([1]));
-            let val2 = reader.get(200, &Nibbles::from_nibbles([1]));
+            let val1 = cache_reader1.get(100, &Nibbles::from_nibbles([1]));
+            let val2 = cache_reader1.get(200, &Nibbles::from_nibbles([1]));
             assert_eq!(val1, Some((PageId::new(10).unwrap(), 11)));
             assert_eq!(val2, Some((PageId::new(20).unwrap(), 21)));
             thread::sleep(Duration::from_millis(50));
@@ -310,43 +270,48 @@ mod tests {
 
         let cache_reader2 = Arc::clone(&shared_cache);
         let reader2 = thread::spawn(move || {
-            let reader = cache_reader2.read();
-            let val = reader.get(100, &Nibbles::from_nibbles([2]));
+            let val = cache_reader2.get(100, &Nibbles::from_nibbles([2]));
             assert_eq!(val, Some((PageId::new(12).unwrap(), 13)));
             thread::sleep(Duration::from_millis(100));
         });
 
-        // writer2 will be blocked until concurrent readers are done
+        // writer2
         let cache_writer2 = Arc::clone(&shared_cache);
         let writer2 = thread::spawn(move || {
-            let mut writer = cache_writer2.write();
-            writer.write(101, Nibbles::from_nibbles([3]), Some((PageId::new(14).unwrap(), 15)));
-            writer.write(300, Nibbles::from_nibbles([1]), Some((PageId::new(30).unwrap(), 31)));
+            cache_writer2.insert(
+                101,
+                Nibbles::from_nibbles([3]),
+                Some((PageId::new(14).unwrap(), 15)),
+            );
+            cache_writer2.insert(
+                300,
+                Nibbles::from_nibbles([1]),
+                Some((PageId::new(30).unwrap(), 31)),
+            );
         });
 
         reader1.join().unwrap();
         reader2.join().unwrap();
         writer2.join().unwrap();
 
-        let final_reader = shared_cache.read();
         assert_eq!(
-            final_reader.get(100, &Nibbles::from_nibbles([1])),
+            shared_cache.get(100, &Nibbles::from_nibbles([1])),
             Some((PageId::new(10).unwrap(), 11))
         );
         assert_eq!(
-            final_reader.get(100, &Nibbles::from_nibbles([2])),
+            shared_cache.get(100, &Nibbles::from_nibbles([2])),
             Some((PageId::new(12).unwrap(), 13))
         );
         assert_eq!(
-            final_reader.get(101, &Nibbles::from_nibbles([3])),
+            shared_cache.get(101, &Nibbles::from_nibbles([3])),
             Some((PageId::new(14).unwrap(), 15))
         );
         assert_eq!(
-            final_reader.get(200, &Nibbles::from_nibbles([1])),
+            shared_cache.get(200, &Nibbles::from_nibbles([1])),
             Some((PageId::new(20).unwrap(), 21))
         );
         assert_eq!(
-            final_reader.get(300, &Nibbles::from_nibbles([1])),
+            shared_cache.get(300, &Nibbles::from_nibbles([1])),
             Some((PageId::new(30).unwrap(), 31))
         );
     }
@@ -356,41 +321,36 @@ mod tests {
         let cache = CacheManager::new(NonZeroUsize::new(10).unwrap());
         let shared_cache = Arc::new(cache);
 
-        let mut writer = shared_cache.write();
-        writer.write(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11)));
-        writer.write(200, Nibbles::from_nibbles([1]), Some((PageId::new(20).unwrap(), 21)));
-        writer.write(300, Nibbles::from_nibbles([1]), Some((PageId::new(30).unwrap(), 31)));
-        drop(writer);
+        shared_cache.insert(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11)));
+        shared_cache.insert(200, Nibbles::from_nibbles([1]), Some((PageId::new(20).unwrap(), 21)));
+        shared_cache.insert(300, Nibbles::from_nibbles([1]), Some((PageId::new(30).unwrap(), 31)));
 
-        let reader = shared_cache.read();
-
-        // given the exact same snapshot
+        // exact same snapshots
         assert_eq!(
-            reader.get(100, &Nibbles::from_nibbles([1])),
+            shared_cache.get(100, &Nibbles::from_nibbles([1])),
             Some((PageId::new(10).unwrap(), 11))
         );
         assert_eq!(
-            reader.get(200, &Nibbles::from_nibbles([1])),
+            shared_cache.get(200, &Nibbles::from_nibbles([1])),
             Some((PageId::new(20).unwrap(), 21))
         );
         assert_eq!(
-            reader.get(300, &Nibbles::from_nibbles([1])),
+            shared_cache.get(300, &Nibbles::from_nibbles([1])),
             Some((PageId::new(30).unwrap(), 31))
         );
 
-        // given different snapshots, but it should find the latest version <= target snapshot
+        // different snapshots, but it should find the latest version <= target snapshot
         assert_eq!(
-            reader.get(150, &Nibbles::from_nibbles([1])),
+            shared_cache.get(150, &Nibbles::from_nibbles([1])),
             Some((PageId::new(10).unwrap(), 11))
         );
         assert_eq!(
-            reader.get(250, &Nibbles::from_nibbles([1])),
+            shared_cache.get(250, &Nibbles::from_nibbles([1])),
             Some((PageId::new(20).unwrap(), 21))
         );
 
-        // given snapshot too small, since snapshot < earliest
-        assert_eq!(reader.get(50, &Nibbles::from_nibbles([1])), None);
-        drop(reader);
+        // snapshot too small, since snapshot < earliest
+        assert_eq!(shared_cache.get(50, &Nibbles::from_nibbles([1])), None);
     }
 
     #[test]
@@ -399,17 +359,13 @@ mod tests {
         let shared_cache = Arc::new(cache);
 
         // insert a value
-        let mut writer = shared_cache.write();
-        writer.write(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11)));
+        shared_cache.insert(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11)));
 
         // invalidate it
-        writer.write(100, Nibbles::from_nibbles([1]), None);
-        drop(writer);
+        shared_cache.insert(100, Nibbles::from_nibbles([1]), None);
 
         // try reading it
-        let reader = shared_cache.read();
-        assert_eq!(reader.get(100, &Nibbles::from_nibbles([1])), None);
-        drop(reader);
+        assert_eq!(shared_cache.get(100, &Nibbles::from_nibbles([1])), None);
     }
 
     #[test]
@@ -418,26 +374,22 @@ mod tests {
         let shared_cache = Arc::new(cache);
 
         // insert entries with different snapshots
-        let mut writer = shared_cache.write();
-        writer.write(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11)));
-        writer.write(200, Nibbles::from_nibbles([1]), Some((PageId::new(20).unwrap(), 21)));
-        writer.write(300, Nibbles::from_nibbles([1]), Some((PageId::new(30).unwrap(), 31)));
-        drop(writer);
+        shared_cache.insert(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11)));
+        shared_cache.insert(200, Nibbles::from_nibbles([1]), Some((PageId::new(20).unwrap(), 21)));
+        shared_cache.insert(300, Nibbles::from_nibbles([1]), Some((PageId::new(30).unwrap(), 31)));
 
         // set minimum snapshot ID to 250
         shared_cache.set_min_snapshot_id(250);
-        let reader = shared_cache.read();
 
         // purged the entries below min snapshot
-        assert_eq!(reader.get(100, &Nibbles::from_nibbles([1])), None);
-        assert_eq!(reader.get(200, &Nibbles::from_nibbles([1])), None);
+        assert_eq!(shared_cache.get(100, &Nibbles::from_nibbles([1])), None);
+        assert_eq!(shared_cache.get(200, &Nibbles::from_nibbles([1])), None);
 
         // only keep entries above min snapshot
         assert_eq!(
-            reader.get(300, &Nibbles::from_nibbles([1])),
+            shared_cache.get(300, &Nibbles::from_nibbles([1])),
             Some((PageId::new(30).unwrap(), 31))
         );
-        drop(reader);
     }
 
     #[test]
@@ -445,38 +397,35 @@ mod tests {
         let cache = CacheManager::new(NonZeroUsize::new(4).unwrap());
         let shared_cache = Arc::new(cache);
 
-        let mut writer = shared_cache.write();
         // multiple versions of key [1]
-        writer.write(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11)));
-        writer.write(200, Nibbles::from_nibbles([1]), Some((PageId::new(20).unwrap(), 21)));
-        writer.write(300, Nibbles::from_nibbles([1]), Some((PageId::new(30).unwrap(), 31)));
+        shared_cache.insert(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11)));
+        shared_cache.insert(200, Nibbles::from_nibbles([1]), Some((PageId::new(20).unwrap(), 21)));
+        shared_cache.insert(300, Nibbles::from_nibbles([1]), Some((PageId::new(30).unwrap(), 31)));
 
         // one entry for key [2]
-        writer.write(150, Nibbles::from_nibbles([2]), Some((PageId::new(15).unwrap(), 16)));
+        shared_cache.insert(150, Nibbles::from_nibbles([2]), Some((PageId::new(15).unwrap(), 16)));
 
         // since the cache is full, should evict oldest sibling of tail entry
-        writer.write(400, Nibbles::from_nibbles([3]), Some((PageId::new(40).unwrap(), 41)));
-        drop(writer);
+        shared_cache.insert(400, Nibbles::from_nibbles([3]), Some((PageId::new(40).unwrap(), 41)));
 
-        let reader = shared_cache.read();
-        // the oldest sibling (snapshot 100) should be evicted, NOT the tail entry
-        assert_eq!(reader.get(100, &Nibbles::from_nibbles([1])), None);
+        // snapshot 100 should be evicted
+        assert_eq!(shared_cache.get(100, &Nibbles::from_nibbles([1])), None);
 
-        // test the rest should exist
+        // rest should exist
         assert_eq!(
-            reader.get(200, &Nibbles::from_nibbles([1])),
+            shared_cache.get(200, &Nibbles::from_nibbles([1])),
             Some((PageId::new(20).unwrap(), 21))
         );
         assert_eq!(
-            reader.get(300, &Nibbles::from_nibbles([1])),
+            shared_cache.get(300, &Nibbles::from_nibbles([1])),
             Some((PageId::new(30).unwrap(), 31))
         );
         assert_eq!(
-            reader.get(150, &Nibbles::from_nibbles([2])),
+            shared_cache.get(150, &Nibbles::from_nibbles([2])),
             Some((PageId::new(15).unwrap(), 16))
         );
         assert_eq!(
-            reader.get(400, &Nibbles::from_nibbles([3])),
+            shared_cache.get(400, &Nibbles::from_nibbles([3])),
             Some((PageId::new(40).unwrap(), 41))
         );
     }
