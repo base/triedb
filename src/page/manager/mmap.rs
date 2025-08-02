@@ -1,5 +1,5 @@
 use crate::{
-    page::{Page, PageError, PageId, PageManagerOptions, PageMut},
+    page::{Page, PageError, PageId, PageManagerOptions, PageManagerTrait, PageMut},
     snapshot::SnapshotId,
 };
 use memmap2::{Advice, MmapOptions, MmapRaw};
@@ -104,16 +104,6 @@ impl PageManager {
         })
     }
 
-    /// Returns the number of pages currently stored in the file.
-    pub fn size(&self) -> u32 {
-        self.page_count.load(Ordering::Relaxed)
-    }
-
-    /// Returns the maximum number of pages that can be allocated to the file.
-    pub fn capacity(&self) -> u32 {
-        (self.mmap.len() / Page::SIZE).min(u32::MAX as usize) as u32
-    }
-
     /// Grows the size of the underlying file to make room for additional pages.
     ///
     /// This will increase the file size by a constant factor of 1024 pages, or a relative factor
@@ -183,9 +173,21 @@ impl PageManager {
             }
         }
     }
+}
+
+impl PageManagerTrait for PageManager {
+    /// Returns the number of pages currently stored in the file.
+    fn size(&self) -> u32 {
+        self.page_count.load(Ordering::Relaxed)
+    }
+
+    /// Returns the maximum number of pages that can be allocated to the file.
+    fn capacity(&self) -> u32 {
+        (self.mmap.len() / Page::SIZE).min(u32::MAX as usize) as u32
+    }
 
     /// Retrieves a page from the memory mapped file.
-    pub fn get(&self, _snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'_>, PageError> {
+    fn get(&self, _snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'_>, PageError> {
         if page_id > self.page_count.load(Ordering::Relaxed) {
             return Err(PageError::PageNotFound(page_id));
         }
@@ -200,11 +202,7 @@ impl PageManager {
     }
 
     /// Retrieves a mutable page from the memory mapped file.
-    pub fn get_mut(
-        &self,
-        snapshot_id: SnapshotId,
-        page_id: PageId,
-    ) -> Result<PageMut<'_>, PageError> {
+    fn get_mut(&self, snapshot_id: SnapshotId, page_id: PageId) -> Result<PageMut<'_>, PageError> {
         if page_id > self.page_count.load(Ordering::Relaxed) {
             return Err(PageError::PageNotFound(page_id));
         }
@@ -221,7 +219,7 @@ impl PageManager {
     /// Adds a new page.
     ///
     /// Returns an error if the memory map is not large enough.
-    pub fn allocate(&self, snapshot_id: SnapshotId) -> Result<PageMut<'_>, PageError> {
+    fn allocate(&self, snapshot_id: SnapshotId) -> Result<PageMut<'_>, PageError> {
         let (page_id, new_count) = self.next_page_id().ok_or(PageError::PageLimitReached)?;
         let new_len = new_count as usize * Page::SIZE;
 
@@ -244,7 +242,7 @@ impl PageManager {
     }
 
     /// Syncs pages to the backing file.
-    pub fn sync(&self) -> io::Result<()> {
+    fn sync(&self) -> io::Result<()> {
         if cfg!(not(miri)) {
             self.mmap.flush()
         } else {
@@ -253,8 +251,8 @@ impl PageManager {
     }
 
     /// Syncs and closes the backing file.
-    pub fn close(self) -> io::Result<()> {
-        self.sync()
+    fn close(self: Box<Self>) -> io::Result<()> {
+        (*self).sync()
     }
 }
 
