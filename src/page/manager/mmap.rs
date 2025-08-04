@@ -251,7 +251,7 @@ impl PageManagerTrait for PageManager {
     }
 
     /// Syncs and closes the backing file.
-    fn close(self: Box<Self>) -> io::Result<()> {
+    fn close(&self) -> io::Result<()> {
         self.sync()
     }
 }

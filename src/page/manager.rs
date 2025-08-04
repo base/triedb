@@ -26,7 +26,7 @@ pub enum PageError {
     // TODO: add more errors here for other cases.
 }
 
-pub trait PageManagerTrait: Send + Sync + std::fmt::Debug + 'static {
+pub trait PageManagerTrait: Send + Sync + std::fmt::Debug {
     /// Retrieves a read-only page from the page manager
     fn get(&self, snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'_>, PageError>;
 
@@ -46,5 +46,5 @@ pub trait PageManagerTrait: Send + Sync + std::fmt::Debug + 'static {
     fn sync(&self) -> io::Result<()>;
 
     /// Syncs and closes the page manager
-    fn close(self: Box<Self>) -> io::Result<()>;
+    fn close(&self) -> io::Result<()>;
 }
