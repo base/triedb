@@ -9,8 +9,8 @@ use crate::{
         TrieValue,
     },
     page::{
-        Page, PageError, PageId, PageManager, PageMut, SlottedPage, SlottedPageMut,
-        CELL_POINTER_SIZE,
+        Page, PageError, PageId, PageManagerTrait, PageMut, SlottedPage,
+        SlottedPageMut, CELL_POINTER_SIZE,
     },
     path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH, STORAGE_PATH_LENGTH},
     pointer::Pointer,
@@ -34,7 +34,7 @@ use std::{
 /// which could be memory-mapped files, in-memory storage, or other implementations.
 #[derive(Debug)]
 pub struct StorageEngine {
-    pub(crate) page_manager: PageManager,
+    pub(crate) page_manager: Box<dyn PageManagerTrait + Send + Sync>,
     pub(crate) meta_manager: Mutex<MetadataManager>,
     pub(crate) alive_snapshot: AtomicU64,
 }
@@ -47,10 +47,10 @@ enum PointerChange {
 }
 
 impl StorageEngine {
-    pub fn new(page_manager: PageManager, meta_manager: MetadataManager) -> Self {
+    pub fn new(page_manager: impl PageManagerTrait, meta_manager: MetadataManager) -> Self {
         let alive_snapshot = meta_manager.active_slot().snapshot_id();
         Self {
-            page_manager,
+            page_manager: Box::new(page_manager),
             meta_manager: Mutex::new(meta_manager),
             alive_snapshot: AtomicU64::new(alive_snapshot),
         }
