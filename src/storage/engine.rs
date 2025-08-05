@@ -5,7 +5,7 @@ use crate::{
     meta::{MetadataManager, OrphanPage},
     node::{
         Node, NodeError,
-        NodeKind::{AccountLeaf, Branch, StorageLeaf},
+        NodeKind::{AccountLeaf, Branch},
         TrieValue,
     },
     page::{

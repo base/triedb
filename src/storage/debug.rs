@@ -1,6 +1,10 @@
 use crate::{
     context::TransactionContext,
-    node::{Node, Node::AccountLeaf, TrieValue},
+    node::{
+        Node,
+        NodeKind::{AccountLeaf, Branch, StorageLeaf},
+        TrieValue,
+    },
     page::{Page, PageId, PageManager, SlottedPage},
     pointer::Pointer,
     snapshot::SnapshotId,
@@ -119,8 +123,8 @@ impl<'a> StorageDebugger<'a> {
     ) -> Result<(), Error> {
         let node: Node = slotted_page.get_value(cell_index)?;
 
-        match node {
-            Node::AccountLeaf { ref storage_root, .. } => {
+        match node.kind() {
+            AccountLeaf { ref storage_root, .. } => {
                 Self::write_node_value(&node, slotted_page.id(), buf, &indent)?;
                 let mut new_indent = indent.clone();
                 new_indent.push('\t');
@@ -149,7 +153,7 @@ impl<'a> StorageDebugger<'a> {
                 }
             }
 
-            Node::Branch { prefix: _, ref children } => {
+            Branch { ref children } => {
                 Self::write_node_value(&node.clone(), slotted_page.id(), buf, &indent)?;
                 for child in children.iter().flatten() {
                     let mut new_indent = indent.clone();
@@ -176,7 +180,7 @@ impl<'a> StorageDebugger<'a> {
                 }
                 Ok(())
             }
-            Node::StorageLeaf { prefix: _, value_rlp: _ } => {
+            StorageLeaf { .. } => {
                 Self::write_node_value(&node, slotted_page.id(), buf, &indent)?;
                 Ok(())
             }
@@ -256,11 +260,11 @@ impl<'a> StorageDebugger<'a> {
             return Ok(());
         }
 
-        let (child_pointer, new_path_offset) = match node {
+        let (child_pointer, new_path_offset) = match node.kind() {
             AccountLeaf { ref storage_root, .. } => {
                 (storage_root.as_ref(), path_offset + common_prefix_length)
             }
-            Node::Branch { ref children, .. } => (
+            Branch { ref children } => (
                 children[remaining_path[0] as usize].as_ref(),
                 path_offset + common_prefix_length + 1,
             ),
@@ -310,30 +314,29 @@ impl<'a> StorageDebugger<'a> {
         buf: &mut W,
         indent: &str,
     ) -> Result<(), Error> {
-        match &node {
-            Node::Branch { prefix, children } => {
+        let prefix = node.prefix();
+        match node.kind() {
+            Branch { ref children } => {
                 writeln!(
                     buf,
-                    "{}Branch Node:  Page ID: {}  Children: {:?}, Prefix: {}",
+                    "{}Branch Node:  Page ID: {}  Children: [{}], Prefix: {}",
                     indent,
                     page_id,
-                    children
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, child)| child.is_some())
-                        .map(|(i, _)| i.to_string())
-                        .collect::<Vec<_>>(),
+                    children.iter().enumerate().filter(|(_, child)| child.is_some()).fold(
+                        String::new(),
+                        |mut s, (i, _)| {
+                            if !s.is_empty() {
+                                s.push_str(", ")
+                            };
+                            s.push_str(&i.to_string());
+                            s
+                        }
+                    ),
                     alloy_primitives::hex::encode(prefix.pack())
                 )?;
                 Ok(())
             }
-            Node::AccountLeaf {
-                prefix,
-                nonce_rlp: _,
-                balance_rlp: _,
-                code_hash: _,
-                storage_root: _,
-            } => {
+            AccountLeaf { .. } => {
                 match node.value() {
                     Ok(TrieValue::Account(acct)) => {
                         writeln!(
@@ -349,7 +352,7 @@ impl<'a> StorageDebugger<'a> {
                 };
                 Ok(())
             }
-            Node::StorageLeaf { prefix, value_rlp: _ } => {
+            StorageLeaf { .. } => {
                 match node.value() {
                     Ok(TrieValue::Storage(strg)) => {
                         let str_prefix = alloy_primitives::hex::encode(prefix.pack());
@@ -410,12 +413,12 @@ impl<'a> StorageDebugger<'a> {
         stats.node_size_in_bytes.update_stats(node.size());
         stats.path_prefix_length.update_stats(node.prefix().len());
 
-        match node {
-            Node::AccountLeaf { storage_root, .. } => {
+        match node.kind() {
+            AccountLeaf { ref storage_root, .. } => {
                 //Note: direct child is not counted as part of stats.num_children
                 if let Some(direct_child) = storage_root {
                     let (new_slotted_page, cell_index) =
-                        self.get_slotted_page_and_index(context, &direct_child, slotted_page)?;
+                        self.get_slotted_page_and_index(context, direct_child, slotted_page)?;
                     //if we move to a new page, update relevent stats
                     if new_slotted_page.id() != slotted_page.id() {
                         let occupied_bytes = new_slotted_page.num_occupied_bytes();
@@ -449,16 +452,16 @@ impl<'a> StorageDebugger<'a> {
                 }
             }
 
-            Node::Branch { children, .. } => {
+            Branch { ref children } => {
                 //update num children per branch
-                let child_iter = children.into_iter().flatten();
+                let child_iter = children.iter().flatten();
                 let num_children = child_iter.clone().count();
                 stats.num_children_per_branch.update_stats(num_children);
 
                 for child in child_iter {
                     //check if child is on same page
                     let (new_slotted_page, cell_index) =
-                        self.get_slotted_page_and_index(context, &child, slotted_page)?;
+                        self.get_slotted_page_and_index(context, child, slotted_page)?;
                     //update page depth if we move to a new page
                     if new_slotted_page.id() != slotted_page.id() {
                         let occupied_bytes = new_slotted_page.num_occupied_bytes();
@@ -487,7 +490,7 @@ impl<'a> StorageDebugger<'a> {
                 }
                 Ok(())
             }
-            Node::StorageLeaf { .. } => {
+            StorageLeaf { .. } => {
                 stats.depth_of_trie_in_pages.update_stats(page_depth);
                 stats.depth_of_trie_in_nodes.update_stats(node_depth);
                 Ok(())
@@ -569,8 +572,8 @@ impl<'a> StorageDebugger<'a> {
         let slotted_page = SlottedPage::try_from(page)?;
         let node: Node = slotted_page.get_value(cell_index)?;
 
-        let result = match node {
-            Node::AccountLeaf { ref storage_root, .. } => {
+        let result = match node.kind() {
+            AccountLeaf { ref storage_root, .. } => {
                 if let Some(direct_child) = storage_root {
                     let (new_slotted_page, new_cell_index) =
                         self.get_slotted_page_and_index(context, direct_child, slotted_page)?;
@@ -599,7 +602,7 @@ impl<'a> StorageDebugger<'a> {
                     Ok(())
                 }
             }
-            Node::Branch { ref children, .. } => {
+            Branch { ref children } => {
                 for child in children.iter().flatten() {
                     let (new_slotted_page, new_cell_index) =
                         self.get_slotted_page_and_index(context, child, slotted_page)?;
@@ -626,7 +629,7 @@ impl<'a> StorageDebugger<'a> {
                 }
                 Ok(())
             }
-            Node::StorageLeaf { .. } => Ok(()),
+            StorageLeaf { .. } => Ok(()),
         };
 
         // Remove this node from visited set before returning (backtrack)
