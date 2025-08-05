@@ -28,7 +28,7 @@ pub enum PageError {
 
 pub trait PageManagerTrait: Send + Sync + std::fmt::Debug {
     /// Retrieves a read-only page from the page manager
-    fn get(&self, snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'_>, PageError>;
+    fn get(&self, page_id: PageId) -> Result<Page<'_>, PageError>;
 
     /// Retrieves a mutable page from the page manager
     fn get_mut(&self, snapshot_id: SnapshotId, page_id: PageId) -> Result<PageMut<'_>, PageError>;

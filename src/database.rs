@@ -468,7 +468,7 @@ mod tests {
             assert_eq!(
                 db.storage_engine
                     .page_manager
-                    .get(1, *page_id)
+                    .get(*page_id)
                     .unwrap_or_else(|err| panic!("page {page_id} not found: {err:?}"))
                     .snapshot_id(),
                 1
@@ -497,7 +497,7 @@ mod tests {
             let page = db
                 .storage_engine
                 .page_manager
-                .get(1, *page_id)
+                .get(*page_id)
                 .unwrap_or_else(|err| panic!("page {page_id} not found: {err:?}"));
             if old_page_ids.contains(page_id) {
                 assert_eq!(page.snapshot_id(), 1);
