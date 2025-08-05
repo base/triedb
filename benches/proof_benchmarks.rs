@@ -7,6 +7,7 @@ use benchmark_common::{
 };
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::prelude::*;
+use std::time::Duration;
 use triedb::{path::AddressPath, Database};
 
 fn bench_account_get_proof(c: &mut Criterion) {
@@ -23,6 +24,7 @@ fn bench_account_get_proof(c: &mut Criterion) {
         (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+    group.measurement_time(Duration::from_secs(30));
     group.bench_function(BenchmarkId::new("account_get_proof", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {
@@ -60,6 +62,7 @@ fn bench_storage_get_proof(c: &mut Criterion) {
     let storage_paths_values = generate_storage_paths_values(&addresses, total_storage_per_address);
 
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
+    group.measurement_time(Duration::from_secs(30));
     group.bench_function(BenchmarkId::new("storage_get_proof", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {
