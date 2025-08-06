@@ -3,17 +3,17 @@ use alloy_trie::Nibbles;
 use std::{
     collections::HashMap,
     num::NonZeroUsize,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock, Weak},
 };
 
-/// An entry in the versioned LRU cache with doubly-linked list indices.
+/// An entry in the versioned LRU cache.
 #[derive(Debug, Clone)]
 struct Entry {
     snapshot_id: SnapshotId,
     key: Nibbles,
     value: Option<(PageId, u8)>,
-    lru_prev: Option<usize>,
-    lru_next: Option<usize>,
+    lru_prev: Option<Weak<Mutex<Entry>>>,
+    lru_next: Option<Arc<Mutex<Entry>>>,
 }
 
 impl Entry {
@@ -32,48 +32,46 @@ struct VersionedLru {
     // Sorted by snapshot_id
     entries: HashMap<Nibbles, Vec<Entry>>,
 
-    // Doubly-linked list of entries
-    lru: Vec<Entry>,
-    head: Option<usize>,
-    tail: Option<usize>,
+    // Keep track of the head and tail
+    head: Option<Arc<Mutex<Entry>>>,
+    tail: Option<Weak<Mutex<Entry>>>,
     capacity: usize,
+    size: usize,
 
     // Proactively purge obsolete entries and free up cache space
     min_snapshot_id: Option<SnapshotId>,
+
+    // Track highest snapshot_id that was ever evicted to maintain temporal coherence
+    max_evicted_version: SnapshotId,
 }
 
 impl VersionedLru {
     fn new(capacity: usize) -> Self {
         Self {
             entries: HashMap::new(),
-            lru: Vec::new(),
             head: None,
             tail: None,
             capacity,
+            size: 0,
             min_snapshot_id: None,
+            max_evicted_version: 0,
         }
     }
 
     /// Finds the entry matching the key via `entries` with the largest snapshot_id <=
     /// target_snapshot_id. If the entry is found, it is moved to the front of the LRU list.
     fn get(&mut self, key: &Nibbles, target_snapshot_id: SnapshotId) -> Option<(PageId, u8)> {
-        let versions = self.entries.get(key)?;
+        self.purge(key);
 
+        // Get entry
+        let versions = self.entries.get(key)?;
         let entry_idx =
             versions.iter().rposition(|entry| entry.snapshot_id <= target_snapshot_id)?;
-
         let entry = &versions[entry_idx];
+
+        // Find the entry in LRU list and move to front
         if let Some(value) = entry.value {
-            // Find the entry and move to front
-            let snapshot_id = entry.snapshot_id;
-            if let Some(lru_idx) = self
-                .lru
-                .iter()
-                .position(|entry| &entry.key == key && entry.snapshot_id == snapshot_id)
-            {
-                self.remove(lru_idx);
-                self.add_to_front(lru_idx);
-            }
+            self.update_position(key, entry.snapshot_id);
             Some(value)
         } else {
             None
@@ -84,47 +82,51 @@ impl VersionedLru {
     /// If the cache is full, evicts the tail entry and removes it from `entries`, and pops it from
     /// the linked list.
     fn set(&mut self, key: Nibbles, snapshot_id: SnapshotId, value: Option<(PageId, u8)>) {
-        let new_entry = Entry::new(snapshot_id, key.clone(), value);
+        // Prevent insertion of entries older than max_evicted_version to maintain temporal
+        // coherence
+        if snapshot_id < self.max_evicted_version {
+            return;
+        }
 
-        // Add to `entries`
+        // Make entry and find appropriate position
         let versions = self.entries.entry(key.clone()).or_default();
-        versions.push(new_entry.clone());
-        versions.sort_by_key(|e| e.snapshot_id);
+        let entry = Entry::new(snapshot_id, key.clone(), value);
+        let pos = versions
+            .binary_search_by_key(&snapshot_id, |e| e.snapshot_id)
+            .unwrap_or_else(|pos| pos);
 
-        // Add to linked list
-        let lru_idx = self.lru.len();
-        self.lru.push(new_entry);
-        self.add_to_front(lru_idx);
+        if pos < versions.len() && versions[pos].snapshot_id == snapshot_id {
+            // existing entry, update it and move to front
+            versions[pos] = entry;
+            self.update_position(&key, snapshot_id);
+        } else {
+            // new entry
+            versions.insert(pos, entry.clone());
+            self.add_to_front(Arc::new(Mutex::new(entry.clone())));
+            self.size += 1;
+        }
+        self.purge(&key);
 
-        // Cache full - evict smallest snapshot_id entry
-        if self.lru.len() > self.capacity && self.tail.is_some() {
-            let tail_idx = self.tail.unwrap();
-            let tail_key = self.lru[tail_idx].key.clone();
+        // Cache full - evict oldest entry (tail)
+        if self.size > self.capacity && self.tail.is_some() {
+            if let Some(weak) = &self.tail {
+                if let Some(entry) = weak.upgrade() {
+                    let key = entry.lock().unwrap().key.clone();
+                    let snapshot = entry.lock().unwrap().snapshot_id;
 
-            // Find smallest snapshot_id for this key
-            let smallest = if let Some(versions) = self.entries.get(&tail_key) {
-                versions.iter().map(|e| e.snapshot_id).min()
-            } else {
-                None
-            };
+                    // Track max evicted version for temporal coherence
+                    self.max_evicted_version = self.max_evicted_version.max(snapshot);
 
-            // Find the LRU index of the smallest snapshot_id
-            if let Some(smallest) = smallest {
-                let smallest_idx = self
-                    .lru
-                    .iter()
-                    .position(|entry| entry.key == tail_key && entry.snapshot_id == smallest);
-
-                // Remove from `entries` hashmap
-                if let Some(evict_idx) = smallest_idx {
-                    if let Some(versions) = self.entries.get_mut(&tail_key) {
-                        versions.retain(|e| e.snapshot_id != smallest);
+                    // Remove from `entries` hashmap
+                    if let Some(versions) = self.entries.get_mut(&key) {
+                        versions.retain(|e| e.snapshot_id != snapshot);
                         if versions.is_empty() {
-                            self.entries.remove(&tail_key);
+                            self.entries.remove(&key);
                         }
                     }
 
-                    self.remove(evict_idx);
+                    self.remove(entry);
+                    self.size -= 1;
                 }
             }
         }
@@ -133,73 +135,87 @@ impl VersionedLru {
     //////////////////////////////
     //// Helpers
     //////////////////////////////
-    fn add_to_front(&mut self, lru_idx: usize) {
-        self.lru[lru_idx].lru_prev = None;
-        self.lru[lru_idx].lru_next = self.head;
-
-        if let Some(old_head_idx) = self.head {
-            self.lru[old_head_idx].lru_prev = Some(lru_idx);
-        } else {
-            self.tail = Some(lru_idx);
+    fn get_entry(&self, key: &Nibbles, snapshot_id: SnapshotId) -> Option<Arc<Mutex<Entry>>> {
+        let mut current = self.head.clone();
+        while let Some(entry) = current {
+            let guard = entry.lock().unwrap();
+            if &guard.key == key && guard.snapshot_id == snapshot_id {
+                drop(guard);
+                return Some(entry);
+            }
+            current = guard.lru_next.clone();
         }
-
-        self.head = Some(lru_idx);
+        None
     }
 
-    fn remove(&mut self, lru_idx: usize) {
-        let prev_idx = self.lru[lru_idx].lru_prev;
-        let next_idx = self.lru[lru_idx].lru_next;
+    /// Update head pointer and `Entry`'s pointers
+    fn add_to_front(&mut self, entry: Arc<Mutex<Entry>>) {
+        let mut guard = entry.lock().unwrap();
+        guard.lru_prev = None;
+        guard.lru_next = self.head.clone();
+        drop(guard);
 
-        if let Some(prev) = prev_idx {
-            self.lru[prev].lru_next = next_idx;
+        if let Some(old_head) = &self.head {
+            old_head.lock().unwrap().lru_prev = Some(Arc::downgrade(&entry));
         } else {
-            self.head = next_idx;
+            self.tail = Some(Arc::downgrade(&entry));
         }
 
-        if let Some(next) = next_idx {
-            self.lru[next].lru_prev = prev_idx;
-        } else {
-            self.tail = prev_idx;
-        }
-
-        // Mark as removed
-        self.lru[lru_idx].lru_prev = None;
-        self.lru[lru_idx].lru_next = None;
+        self.head = Some(entry);
     }
 
+    /// Remove an entry from LRU
+    fn remove(&mut self, entry: Arc<Mutex<Entry>>) {
+        let (prev, next) = {
+            let entry_guard = entry.lock().unwrap();
+            (entry_guard.lru_prev.clone(), entry_guard.lru_next.clone())
+        };
+
+        if let Some(weak) = &prev {
+            if let Some(prev_entry) = weak.upgrade() {
+                prev_entry.lock().unwrap().lru_next = next.clone();
+            }
+        } else {
+            self.head = next.clone();
+        }
+
+        if let Some(next_entry) = &next {
+            next_entry.lock().unwrap().lru_prev = prev.clone();
+        } else {
+            self.tail = prev;
+        }
+
+        let mut guard = entry.lock().unwrap();
+        guard.lru_prev = None;
+        guard.lru_next = None;
+    }
+
+    /// Purging is done lazily in `get` and `set` methods
     fn set_min_snapshot_id(&mut self, min_snapshot_id: SnapshotId) {
         self.min_snapshot_id = Some(min_snapshot_id);
+    }
 
-        // Purge obsolete entries
+    /// Finds the first entry with snapshot id less than min_id and removes it from the list
+    fn purge(&mut self, key: &Nibbles) {
         if let Some(min_id) = self.min_snapshot_id {
-            let keys_to_update: Vec<Nibbles> = self.entries.keys().cloned().collect();
-
-            for key in keys_to_update {
-                if let Some(versions) = self.entries.get_mut(&key) {
-                    versions.retain(|entry| entry.snapshot_id >= min_id);
-
-                    if versions.is_empty() {
-                        self.entries.remove(&key);
-                    }
+            if let Some(versions) = self.entries.get_mut(key) {
+                if let Some(idx) = versions.iter().position(|e| e.snapshot_id >= min_id) {
+                    versions.drain(0..idx);
                 }
             }
+        }
+    }
 
-            // Remove from LRU list
-            self.lru.retain(|entry| entry.snapshot_id >= min_id);
-
-            // Rebuild LRU pointers after retention
-            self.head = None;
-            self.tail = None;
-
-            for i in 0..self.lru.len() {
-                self.lru[i].lru_prev = if i > 0 { Some(i - 1) } else { None };
-                self.lru[i].lru_next = if i < self.lru.len() - 1 { Some(i + 1) } else { None };
+    /// Updates the position of an entry in the LRU
+    fn update_position(&mut self, key: &Nibbles, snapshot_id: SnapshotId) {
+        if let Some(lru_entry) = self.get_entry(key, snapshot_id) {
+            if let Some(head) = &self.head {
+                if Arc::ptr_eq(head, &lru_entry) {
+                    return;
+                }
             }
-
-            if !self.lru.is_empty() {
-                self.head = Some(0);
-                self.tail = Some(self.lru.len() - 1);
-            }
+            self.remove(lru_entry.clone());
+            self.add_to_front(lru_entry);
         }
     }
 }
@@ -427,6 +443,35 @@ mod tests {
         assert_eq!(
             shared_cache.get(400, &Nibbles::from_nibbles([3])),
             Some((PageId::new(40).unwrap(), 41))
+        );
+    }
+
+    #[test]
+    fn test_temporal_coherence() {
+        let cache = CacheManager::new(NonZeroUsize::new(2).unwrap());
+        let shared_cache = Arc::new(cache);
+
+        // insert entries
+        shared_cache.insert(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11)));
+        shared_cache.insert(200, Nibbles::from_nibbles([2]), Some((PageId::new(20).unwrap(), 21)));
+
+        // this should evict snapshot 100, setting max_evicted_version to 100
+        shared_cache.insert(300, Nibbles::from_nibbles([3]), Some((PageId::new(30).unwrap(), 31)));
+
+        // this should be rejected since it's older than max_evicted_version
+        shared_cache.insert(50, Nibbles::from_nibbles([4]), Some((PageId::new(5).unwrap(), 6)));
+
+        // should not be retrievable
+        assert_eq!(shared_cache.get(50, &Nibbles::from_nibbles([4])), None);
+
+        // rest should still work
+        assert_eq!(
+            shared_cache.get(200, &Nibbles::from_nibbles([2])),
+            Some((PageId::new(20).unwrap(), 21))
+        );
+        assert_eq!(
+            shared_cache.get(300, &Nibbles::from_nibbles([3])),
+            Some((PageId::new(30).unwrap(), 31))
         );
     }
 }
