@@ -152,6 +152,10 @@ impl Node {
         &self.0.kind
     }
 
+    pub fn into_kind(self) -> NodeKind {
+        self.0.kind
+    }
+
     /// Returns whether the [Node] type supports children.
     pub const fn has_children(&self) -> bool {
         matches!(self.kind(), NodeKind::Branch { .. } | NodeKind::AccountLeaf { .. })
@@ -567,17 +571,17 @@ impl Encodable for Node {
                 let mut buf = [0u8; 110]; // max RLP length for an account: 2 bytes for list length, 9 for nonce, 33 for
                                           // balance, 33 for storage root, 33 for code hash
                 let mut value_rlp = buf.as_mut();
-                let storage_root_rlp =
-                    storage_root.as_ref().map(|p| p.rlp().as_slice()).unwrap_or(&EMPTY_ROOT_RLP);
-                let len = 2 + nonce_rlp.len() + balance_rlp.len() + storage_root_rlp.len() + 33;
-                value_rlp.put_u8(0xf8);
-                value_rlp.put_u8((len - 2) as u8);
-                value_rlp.put_slice(nonce_rlp);
-                value_rlp.put_slice(balance_rlp);
-                value_rlp.put_slice(storage_root_rlp);
-                value_rlp.put_u8(0xa0);
-                value_rlp.put_slice(code_hash.as_slice());
-                LeafNodeRef { key: prefix, value: &buf[..len] }.encode(out);
+                let storage_root_hash = storage_root
+                    .as_ref()
+                    .map_or(EMPTY_ROOT_HASH, |p| p.rlp().as_hash().unwrap_or(EMPTY_ROOT_HASH));
+                let account_rlp_length = encode_account_leaf(
+                    nonce_rlp,
+                    balance_rlp,
+                    code_hash,
+                    &storage_root_hash,
+                    &mut value_rlp,
+                );
+                LeafNodeRef { key: prefix, value: &buf[..account_rlp_length] }.encode(out);
             }
             NodeKind::Branch { ref children } => {
                 if prefix.is_empty() {
@@ -632,6 +636,26 @@ impl Encodable for Node {
             }
         }
     }
+}
+
+pub fn encode_account_leaf(
+    nonce_rlp: &ArrayVec<u8, 9>,
+    balance_rlp: &ArrayVec<u8, 33>,
+    code_hash: &B256,
+    storage_root: &B256,
+    out: &mut dyn BufMut,
+) -> usize {
+    let len = 2 + nonce_rlp.len() + balance_rlp.len() + 33 * 2;
+    out.put_u8(0xf8);
+    out.put_u8((len - 2) as u8);
+    out.put_slice(nonce_rlp);
+    out.put_slice(balance_rlp);
+    out.put_u8(0xa0);
+    out.put_slice(storage_root.as_slice());
+    out.put_u8(0xa0);
+    out.put_slice(code_hash.as_slice());
+
+    len
 }
 
 pub fn encode_branch(children: &[Option<Pointer>], out: &mut dyn BufMut) -> usize {

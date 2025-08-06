@@ -11,8 +11,9 @@ use alloy_primitives::{
     map::{B256Map, HashMap},
     B256, U256,
 };
-use alloy_rlp::encode;
+use alloy_rlp::{encode, encode_fixed_size};
 use alloy_trie::{BranchNodeCompact, HashBuilder, Nibbles, TrieAccount};
+use arrayvec::ArrayVec;
 
 #[derive(Debug, Default)]
 struct Stats {
@@ -792,21 +793,21 @@ impl StorageEngine {
     #[inline]
     pub fn encode_trie_value(&self, trie_value: &TrieValue) -> Result<Vec<u8>, Error> {
         let rlp_encoded = match trie_value {
-            TrieValue::Account(account) => self.encode_account(account)?,
-            TrieValue::Storage(storage_value) => self.encode_storage(storage_value)?,
+            TrieValue::Account(account) => self.encode_account(account)?.to_vec(),
+            TrieValue::Storage(storage_value) => self.encode_storage(storage_value)?.to_vec(),
         };
         Ok(rlp_encoded)
     }
 
     #[inline]
-    pub fn encode_account(&self, account: &Account) -> Result<Vec<u8>, Error> {
-        let trie_account = TrieAccount {
+    pub fn encode_account(&self, account: &Account) -> Result<ArrayVec<u8, 110>, Error> {
+        let trie_account = Account {
             nonce: account.nonce,
             balance: account.balance,
             storage_root: account.storage_root,
             code_hash: account.code_hash,
         };
-        Ok(encode(trie_account))
+        Ok(encode_fixed_size(&trie_account))
     }
 
     #[inline]
@@ -814,19 +815,19 @@ impl StorageEngine {
         &self,
         account: &Account,
         root: B256,
-    ) -> Result<Vec<u8>, Error> {
-        let trie_account = TrieAccount {
+    ) -> Result<ArrayVec<u8, 110>, Error> {
+        let trie_account = Account {
             nonce: account.nonce,
             balance: account.balance,
             storage_root: root,
             code_hash: account.code_hash,
         };
-        Ok(encode(trie_account))
+        Ok(encode_fixed_size(&trie_account))
     }
 
     #[inline]
-    pub fn encode_storage(&self, storage_value: &U256) -> Result<Vec<u8>, Error> {
-        Ok(encode(storage_value))
+    pub fn encode_storage(&self, storage_value: &U256) -> Result<ArrayVec<u8, 33>, Error> {
+        Ok(encode_fixed_size(storage_value))
     }
 }
 

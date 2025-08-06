@@ -1,9 +1,10 @@
 use alloy_primitives::{B256, U256};
+use alloy_rlp::{MaxEncodedLen, RlpEncodable};
 use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
 use proptest::prelude::*;
 use proptest_derive::Arbitrary;
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Arbitrary)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Arbitrary, RlpEncodable)]
 pub struct Account {
     pub nonce: u64,
     pub balance: U256,
@@ -18,6 +19,16 @@ impl Account {
         Self { nonce, balance, storage_root, code_hash }
     }
 }
+
+/// This is the maximum possible RLP-encoded length of an account.
+///
+/// This value is derived from the maximum possible length of an account, which is the largest
+/// case. An account is encoded as a list of 4 elements, with 3 of these represnting 32 byte values
+/// and the nonce being an 8 byte value. Each element has 1 extra byte of encoding overhead.
+/// The list also has 2 bytes of encoding overhead. The total length is `2 + 3*33 + 9 = 110`.
+const MAX_RLP_ENCODED_LEN: usize = 2 + 3*33 + 9;
+
+unsafe impl MaxEncodedLen<MAX_RLP_ENCODED_LEN> for Account {}
 
 #[cfg(test)]
 mod tests {
