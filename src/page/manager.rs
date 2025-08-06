@@ -5,6 +5,7 @@ use crate::{
     snapshot::SnapshotId,
 };
 
+pub(super) mod buffer_pool;
 pub(super) mod cache_evict;
 pub(super) mod mmap;
 pub(super) mod options;
@@ -24,6 +25,8 @@ pub enum PageError {
     IO(std::io::Error),
     InvalidValue,
     InvalidPageContents(PageId),
+    OutOfMemory,
+    EvictionPolicy,
     // TODO: add more errors here for other cases.
 }
 
