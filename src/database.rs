@@ -1,5 +1,6 @@
 use crate::{
     context::TransactionContext,
+    executor::threadpool,
     meta::{MetadataManager, OpenMetadataError},
     metrics::DatabaseMetrics,
     page::{PageError, PageId, PageManager},
@@ -8,9 +9,11 @@ use crate::{
 };
 use alloy_primitives::B256;
 use parking_lot::Mutex;
+use rayon::ThreadPoolBuildError;
 use std::{
     fs::File,
     io,
+    num::NonZero,
     ops::Deref,
     path::{Path, PathBuf},
 };
@@ -30,6 +33,7 @@ pub struct DatabaseOptions {
     wipe: bool,
     meta_path: Option<PathBuf>,
     max_pages: u32,
+    num_threads: Option<NonZero<usize>>,
 }
 
 #[derive(Debug)]
@@ -42,6 +46,7 @@ pub enum Error {
 pub enum OpenError {
     PageError(PageError),
     MetadataError(OpenMetadataError),
+    ThreadPoolError(ThreadPoolBuildError),
     IO(io::Error),
 }
 
@@ -83,6 +88,16 @@ impl DatabaseOptions {
     /// Sets the maximum number of pages that can be allocated.
     pub fn max_pages(&mut self, max_pages: u32) -> &mut Self {
         self.max_pages = max_pages;
+        self
+    }
+
+    /// Sets the maximum number of threads used to CPU-intensive computations (like hashing).
+    ///
+    /// By default, the number of threads is selected automatically based on the number of
+    /// available CPUs on the system. The algorithm for deciding the default number is not
+    /// specified and may change in the future.
+    pub fn num_threads(&mut self, num_threads: NonZero<usize>) -> &mut Self {
+        self.num_threads = Some(num_threads);
         self
     }
 
@@ -144,7 +159,12 @@ impl Database {
             .open(db_path)
             .map_err(OpenError::PageError)?;
 
-        Ok(Self::new(StorageEngine::new(page_manager, meta_manager)))
+        let thread_pool = threadpool::builder()
+            .num_threads(opts.num_threads.map(NonZero::get).unwrap_or(0))
+            .build()
+            .map_err(OpenError::ThreadPoolError)?;
+
+        Ok(Self::new(StorageEngine::new(page_manager, meta_manager, thread_pool)))
     }
 
     pub fn new(storage_engine: StorageEngine) -> Self {
