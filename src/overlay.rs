@@ -150,6 +150,11 @@ impl OverlayState {
         }
     }
 
+    #[inline]
+    pub fn first(&self) -> Option<(&[u8], &Option<OverlayValue>)> {
+        self.get(0)
+    }
+
     /// Returns the effective slice of data for this overlay, respecting bounds.
     pub fn effective_slice(&self) -> &[(Nibbles, Option<OverlayValue>)] {
         &self.data[self.start_idx..self.end_idx]
