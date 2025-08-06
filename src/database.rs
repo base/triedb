@@ -9,7 +9,6 @@ use crate::{
 use alloy_primitives::B256;
 use parking_lot::Mutex;
 use std::{
-    collections::HashSet,
     fs::File,
     io,
     ops::Deref,
@@ -170,30 +169,14 @@ impl Database {
 
     pub fn root_page_info(
         &self,
-        mut buf: impl io::Write,
+        buf: impl io::Write,
         file_path: impl AsRef<Path>,
     ) -> Result<(), OpenError> {
-        let db_file_path = file_path.as_ref();
-
-        let mut meta_file_path = db_file_path.to_path_buf();
-        meta_file_path.as_mut_os_string().push(".meta");
-        let mut meta_manager =
-            MetadataManager::open(meta_file_path).map_err(OpenError::MetadataError)?;
-
-        let page_count = meta_manager.active_slot().page_count();
-        let active_slot = meta_manager.active_slot();
-        let root_node_page_id = active_slot.root_node_page_id();
-        let orphaned_page_list = meta_manager.orphan_pages().iter().collect::<Vec<_>>();
-
-        writeln!(buf, "Root Node Page ID: {root_node_page_id:?}").map_err(OpenError::IO)?;
-
-        //root subtrie pageID
-        writeln!(buf, "Total Page Count: {page_count:?}").map_err(OpenError::IO)?;
-
-        //orphaned pages list (grouped by page)
-        writeln!(buf, "Orphaned Pages: {orphaned_page_list:?}").map_err(OpenError::IO)?;
-
-        Ok(())
+        self.storage_engine.debugger().root_page_info(buf, file_path).map_err(|e| match e {
+            engine::Error::IO(io_err) => OpenError::IO(io_err),
+            engine::Error::PageError(page_err) => OpenError::PageError(page_err),
+            _ => OpenError::IO(io::Error::other("Root page info failed")),
+        })
     }
 
     pub fn print_statistics(&self, buf: impl io::Write) -> Result<(), Error> {
@@ -201,103 +184,19 @@ impl Database {
         self.storage_engine.debugger().debug_statistics(&context, buf).map_err(Error::EngineError)
     }
 
-    /// This check verifies:
-    /// 1. All pages are correctly classified as reachable, orphaned, or unreachable
-    /// 2. No pages are both reachable and orphaned (data integrity violation)
-    /// 3. No pages are unreachable (memory leak)
-    /// 4. Snapshot ID consistency: each child page's snapshot ID must be <= parent's snapshot ID
-    /// 5. No cycles exist in the trie structure (prevents infinite recursion)
     pub fn consistency_check(
         &self,
-        mut buf: impl io::Write,
+        buf: impl io::Write,
         file_path: impl AsRef<Path>,
     ) -> Result<(), OpenError> {
-        let db_file_path = file_path.as_ref();
-
-        let mut meta_file_path = db_file_path.to_path_buf();
-        meta_file_path.as_mut_os_string().push(".meta");
-        let mut meta_manager = match MetadataManager::open(&meta_file_path) {
-            Ok(manager) => manager,
-            Err(OpenMetadataError::Corrupted) => {
-                writeln!(buf, "Metadata file corruption detected: {meta_file_path:?}",)
-                    .map_err(OpenError::IO)?;
-
-                // Provide additional debugging information
-                if let Ok(file_meta) = std::fs::metadata(&meta_file_path) {
-                    writeln!(buf, "File size: {} bytes", file_meta.len()).map_err(OpenError::IO)?;
-                    if let Ok(modified) = file_meta.modified() {
-                        writeln!(buf, "Last modified: {modified:?}").map_err(OpenError::IO)?;
-                    }
-                }
-                return Err(OpenError::MetadataError(OpenMetadataError::Corrupted));
-            }
-            Err(e) => return Err(OpenError::MetadataError(e)),
-        };
-
-        let context = self.storage_engine.read_context();
-        let active_slot_page_id = meta_manager.active_slot().root_node_page_id();
-
-        // Get all pages reachable from the committed state
-        let mut reachable_pages = self
-            .storage_engine
+        self.storage_engine
             .debugger()
-            .consistency_check(active_slot_page_id, &context)
-            .map_err(|_| OpenError::IO(io::Error::other("Failed to check active slot")))?;
-
-        // Also account for dirty pages that haven't been committed yet
-        let dirty_pages = self
-            .storage_engine
-            .debugger()
-            .get_dirty_pages()
-            .map_err(|_| OpenError::IO(io::Error::other("Failed to get dirty pages")))?;
-        reachable_pages.extend(&dirty_pages);
-
-        let orphaned_pages = meta_manager
-            .orphan_pages()
-            .iter()
-            .map(|orphan| orphan.page_id())
-            .collect::<HashSet<_>>();
-
-        let reachable_orphaned_pages: HashSet<PageId> =
-            orphaned_pages.intersection(&reachable_pages).cloned().collect();
-
-        let page_count = self.storage_engine.size();
-
-        let all_pages: HashSet<PageId> = (1..page_count)
-            .map(|id| PageId::new(id).unwrap()) // Unwrap Option from new()
-            .collect();
-
-        let mut reachable_or_orphaned: HashSet<PageId> = reachable_pages.into_iter().collect();
-        reachable_or_orphaned.extend(&orphaned_pages);
-
-        // Unreachable pages = all_pages - reachable_or_orphaned
-        let unreachable_pages: HashSet<PageId> =
-            all_pages.difference(&reachable_or_orphaned).cloned().collect();
-
-        // Check for errors and flag them
-        let mut has_errors = false;
-
-        if !reachable_orphaned_pages.is_empty() {
-            writeln!(buf, "ERROR: Reachable Orphaned Pages: {reachable_orphaned_pages:?}")
-                .map_err(OpenError::IO)?;
-            has_errors = true;
-        }
-
-        if !unreachable_pages.is_empty() {
-            writeln!(buf, "ERROR: Unreachable Pages: {unreachable_pages:?}")
-                .map_err(OpenError::IO)?;
-            has_errors = true;
-        }
-
-        if has_errors {
-            return Err(OpenError::IO(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Database consistency check failed: inconsistencies detected",
-            )));
-        }
-
-        writeln!(buf, "Consistency check passed: database is consistent").map_err(OpenError::IO)?;
-        Ok(())
+            .database_consistency_check(buf, file_path, &self.storage_engine)
+            .map_err(|e| match e {
+                engine::Error::IO(io_err) => OpenError::IO(io_err),
+                engine::Error::PageError(page_err) => OpenError::PageError(page_err),
+                _ => OpenError::IO(io::Error::other("Consistency check failed")),
+            })
     }
 
     pub fn begin_ro(&self) -> Result<Transaction<&Self, RO>, TransactionError> {

@@ -1,5 +1,6 @@
 use crate::{
     context::TransactionContext,
+    meta::{MetadataManager, OpenMetadataError},
     node::{
         Node,
         NodeKind::{AccountLeaf, Branch, StorageLeaf},
@@ -8,10 +9,13 @@ use crate::{
     page::{Page, PageId, PageManager, SlottedPage},
     pointer::Pointer,
     snapshot::SnapshotId,
-    storage::{engine::Error, value::Value},
+    storage::{
+        engine::{Error, StorageEngine},
+        value::Value,
+    },
 };
 use alloy_trie::{nybbles, Nibbles};
-use std::{collections::HashSet, fmt::Debug, io};
+use std::{collections::HashSet, fmt::Debug, io, path::Path};
 
 #[derive(Default)]
 pub struct DebugPage {
@@ -498,6 +502,99 @@ impl<'a> StorageDebugger<'a> {
         }
     }
 
+    /// This check verifies:
+    /// 1. All pages are correctly classified as reachable, orphaned, or unreachable
+    /// 2. No pages are both reachable and orphaned (data integrity violation)
+    /// 3. No pages are unreachable (memory leak)
+    /// 4. Snapshot ID consistency: each child page's snapshot ID must be <= parent's snapshot ID
+    /// 5. No cycles exist in the trie structure (prevents infinite recursion)
+    pub fn database_consistency_check<W: io::Write>(
+        &self,
+        mut buf: W,
+        file_path: impl AsRef<Path>,
+        storage_engine: &StorageEngine,
+    ) -> Result<(), Error> {
+        let db_file_path = file_path.as_ref();
+
+        let mut meta_file_path = db_file_path.to_path_buf();
+        meta_file_path.as_mut_os_string().push(".meta");
+        let mut meta_manager = match MetadataManager::open(&meta_file_path) {
+            Ok(manager) => manager,
+            Err(OpenMetadataError::Corrupted) => {
+                writeln!(buf, "Metadata file corruption detected: {meta_file_path:?}")
+                    .map_err(Error::IO)?;
+
+                // Provide additional debugging information
+                if let Ok(file_meta) = std::fs::metadata(&meta_file_path) {
+                    writeln!(buf, "File size: {} bytes", file_meta.len()).map_err(Error::IO)?;
+                    if let Ok(modified) = file_meta.modified() {
+                        writeln!(buf, "Last modified: {modified:?}").map_err(Error::IO)?;
+                    }
+                }
+                return Err(Error::IO(io::Error::other("Metadata file corrupted")));
+            }
+            Err(e) => {
+                return Err(Error::IO(io::Error::other(format!("Failed to open metadata: {e:?}"))))
+            }
+        };
+
+        let context = storage_engine.read_context();
+        let active_slot_page_id = meta_manager.active_slot().root_node_page_id();
+
+        // Get all pages reachable from the committed state
+        let mut reachable_pages = self.consistency_check(active_slot_page_id, &context)?;
+
+        // Also account for dirty pages that haven't been committed yet
+        let dirty_pages = self.get_dirty_pages()?;
+        reachable_pages.extend(&dirty_pages);
+
+        let orphaned_pages = meta_manager
+            .orphan_pages()
+            .iter()
+            .map(|orphan| orphan.page_id())
+            .collect::<HashSet<_>>();
+
+        let reachable_orphaned_pages: HashSet<PageId> =
+            orphaned_pages.intersection(&reachable_pages).cloned().collect();
+
+        let page_count = storage_engine.size();
+
+        let all_pages: HashSet<PageId> = (1..page_count)
+            .map(|id| PageId::new(id).unwrap()) // Unwrap Option from new()
+            .collect();
+
+        let mut reachable_or_orphaned: HashSet<PageId> = reachable_pages.into_iter().collect();
+        reachable_or_orphaned.extend(&orphaned_pages);
+
+        // Unreachable pages = all_pages - reachable_or_orphaned
+        let unreachable_pages: HashSet<PageId> =
+            all_pages.difference(&reachable_or_orphaned).cloned().collect();
+
+        // Check for errors and flag them
+        let mut has_errors = false;
+
+        if !reachable_orphaned_pages.is_empty() {
+            writeln!(buf, "ERROR: Reachable Orphaned Pages: {reachable_orphaned_pages:?}")
+                .map_err(Error::IO)?;
+            has_errors = true;
+        }
+
+        if !unreachable_pages.is_empty() {
+            writeln!(buf, "ERROR: Unreachable Pages: {unreachable_pages:?}").map_err(Error::IO)?;
+            has_errors = true;
+        }
+
+        if has_errors {
+            return Err(Error::IO(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Database consistency check failed: inconsistencies detected",
+            )));
+        }
+
+        writeln!(buf, "Consistency check passed: database is consistent").map_err(Error::IO)?;
+        Ok(())
+    }
+
     /// Traverses the trie from the given root node page id and returns a list of all reachable
     /// PageIds.
     ///
@@ -677,5 +774,35 @@ impl<'a> StorageDebugger<'a> {
     /// Helper function to get a page from the page manager.
     fn get_page(&self, context: &TransactionContext, page_id: PageId) -> Result<Page<'_>, Error> {
         self.page_manager.get(context.snapshot_id, page_id).map_err(Error::PageError)
+    }
+
+    /// Prints information about the root page and database metadata.
+    ///
+    /// This includes:
+    /// - Root Node Page ID
+    /// - Total Page Count
+    /// - List of Orphaned Pages
+    pub fn root_page_info<W: io::Write>(
+        &self,
+        mut buf: W,
+        file_path: impl AsRef<Path>,
+    ) -> Result<(), Error> {
+        let db_file_path = file_path.as_ref();
+
+        let mut meta_file_path = db_file_path.to_path_buf();
+        meta_file_path.as_mut_os_string().push(".meta");
+        let mut meta_manager = MetadataManager::open(meta_file_path)
+            .map_err(|e| Error::IO(io::Error::other(format!("Failed to open metadata: {e:?}"))))?;
+
+        let page_count = meta_manager.active_slot().page_count();
+        let active_slot = meta_manager.active_slot();
+        let root_node_page_id = active_slot.root_node_page_id();
+        let orphaned_page_list = meta_manager.orphan_pages().iter().collect::<Vec<_>>();
+
+        writeln!(buf, "Root Node Page ID: {root_node_page_id:?}").map_err(Error::IO)?;
+        writeln!(buf, "Total Page Count: {page_count:?}").map_err(Error::IO)?;
+        writeln!(buf, "Orphaned Pages: {orphaned_page_list:?}").map_err(Error::IO)?;
+
+        Ok(())
     }
 }
