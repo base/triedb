@@ -5,6 +5,7 @@ use crate::{
     snapshot::SnapshotId,
 };
 
+pub(super) mod cache_evict;
 pub(super) mod mmap;
 pub(super) mod options;
 
