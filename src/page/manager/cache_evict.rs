@@ -4,6 +4,7 @@ use evict::{EvictResult, EvictionPolicy, LruReplacer};
 
 use crate::page::PageId;
 
+// TODO: Temporarily use LruReplacer as the eviction policy, replace with a better eviction policy
 pub(crate) struct CacheEvict(LruReplacer<PageId>);
 
 impl fmt::Debug for CacheEvict {
