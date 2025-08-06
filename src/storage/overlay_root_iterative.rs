@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::{
     account::Account,
     context::TransactionContext,
-    node::{Node, NodeKind, TrieValue},
+    node::{encode_account_leaf, Node, NodeKind, TrieValue},
     overlay::{OverlayState, OverlayValue},
     page::SlottedPage,
     pointer::Pointer,
@@ -13,7 +13,8 @@ use alloy_primitives::{
     map::{B256Map, HashMap},
     B256,
 };
-use alloy_trie::{BranchNodeCompact, HashBuilder, Nibbles};
+use alloy_trie::{BranchNodeCompact, HashBuilder, Nibbles, EMPTY_ROOT_HASH};
+use arrayvec::ArrayVec;
 
 #[derive(Debug)]
 enum TriePosition<'a> {
@@ -124,10 +125,7 @@ impl StorageEngine {
         // This applies any overlay state to the trie, taking precedence over the trie's own values.
         // Whenever a branch or leaf is known to be the final unchanged value, we can add it to the
         // hash builder.
-        while !stack.is_empty() {
-            let (position, overlay) = stack.pop().unwrap();
-            println!("Processing position: {:?}", position);
-
+        while let Some((position, overlay)) = stack.pop() {
             match position {
                 TriePosition::None => {
                     // No trie position, process whatever is in the overlay
@@ -140,7 +138,7 @@ impl StorageEngine {
                 TriePosition::Pointer(path, page, pointer, can_add_by_hash) => {
                     if overlay.is_empty() && can_add_by_hash && pointer.rlp().as_hash().is_some() {
                         // No overlay, just add the pointer by hash
-                        println!("Adding pointer: {:?}", path);
+                        // println!("Adding pointer: {:?}", path);
                         hash_builder.add_branch(path, pointer.rlp().as_hash().unwrap(), true);
                     } else {
                         // We have an overlay, need to process the child
@@ -157,22 +155,6 @@ impl StorageEngine {
                     }
                 }
                 TriePosition::Node(path, page, node) => {
-                    // First check if the node is invalidated by the overlay
-                    let first_overlay_item = overlay.iter().next();
-                    if let Some((overlay_path, Some(OverlayValue::Hash(_)))) = first_overlay_item {
-                        if path.has_prefix(overlay_path) {
-                            // the overlay invalidates the current node, so just add this and skip
-                            // the rest of the db traversal
-                            self.add_overlay_to_hash_builder(
-                                hash_builder,
-                                &overlay,
-                                storage_branch_updates,
-                            );
-                            continue;
-                        }
-                    }
-
-                    // Otherwise, process the overlay and node
                     let (pre_overlay, overlay, post_overlay) = overlay.sub_slice_by_prefix(&path);
                     self.add_overlay_to_hash_builder(
                         hash_builder,
@@ -188,12 +170,9 @@ impl StorageEngine {
                         continue;
                     }
 
-                    match node.kind() {
-                        NodeKind::Branch { .. } => {
-                            let first_overlay_item = overlay.iter().next();
-                            if let Some((overlay_path, Some(OverlayValue::Hash(_)))) =
-                                first_overlay_item
-                            {
+                    match node.into_kind() {
+                        NodeKind::Branch { children } => {
+                            if let Some((overlay_path, Some(OverlayValue::Hash(_)))) = overlay.first() {
                                 if overlay_path == &path {
                                     // the overlay invalidates the current node, so just add this
                                     // and skip the rest of the db traversal
@@ -206,23 +185,25 @@ impl StorageEngine {
                                 }
                             }
                             self.process_branch_node_with_overlay(
-                                &overlay, &path, &node, page, stack,
+                                &overlay, &path, children, page, stack,
                             )?;
                         }
-                        NodeKind::AccountLeaf { .. } => {
+                        NodeKind::AccountLeaf { nonce_rlp, balance_rlp, code_hash, storage_root } => {
                             self.process_account_leaf_with_overlay(
                                 context,
                                 &overlay,
                                 hash_builder,
                                 path,
-                                &node,
                                 page,
                                 storage_branch_updates,
+                                nonce_rlp,
+                                balance_rlp,
+                                code_hash,
+                                storage_root,
                             )?;
                         }
-                        NodeKind::StorageLeaf { .. } => {
-                            let first_overlay_item = overlay.iter().next();
-                            if let Some((overlay_path, _)) = first_overlay_item {
+                        NodeKind::StorageLeaf { value_rlp } => {
+                            if let Some((overlay_path, _)) = overlay.first() {
                                 if overlay_path == &path {
                                     // the overlay invalidates the current node, so just add this
                                     // and skip the rest of the db traversal
@@ -235,9 +216,8 @@ impl StorageEngine {
                                 }
                             }
                             // Leaf node, add it to the hash builder
-                            let encoded = self.encode_trie_value(&node.value().unwrap())?;
-                            println!("Adding storage leaf: {:?}", path);
-                            hash_builder.add_leaf(path, &encoded);
+                            // println!("Adding storage leaf: {:?}", path);
+                            hash_builder.add_leaf(path, &value_rlp);
                         }
                     }
                 }
@@ -246,11 +226,12 @@ impl StorageEngine {
         Ok(())
     }
 
+    #[inline(never)]
     fn process_branch_node_with_overlay<'a>(
         &'a self,
         overlay: &OverlayState,
         path: &Nibbles,
-        node: &Node,
+        mut children: [Option<Pointer>; 16],
         current_page: Arc<SlottedPage<'a>>,
         stack: &mut TraversalStack<'a>,
     ) -> Result<(), Error> {
@@ -261,7 +242,7 @@ impl StorageEngine {
             let mut child_path = path.clone();
             child_path.push(i);
             let child_overlay = overlay.sub_slice_for_prefix(&child_path);
-            let child_pointer = node.child(i as u8).unwrap();
+            let child_pointer = children[i as usize].take();
 
             if child_pointer.is_some() && child_overlay.is_empty() {
                 minimum_possible_child_count += 1;
@@ -280,13 +261,13 @@ impl StorageEngine {
         }
         let can_add_by_hash = minimum_possible_child_count > 1;
 
-        println!("Iterating over children of branch: {:?}", path);
+        // println!("Iterating over children of branch: {:?}", path);
         for (child_path, child_pointer, child_overlay) in child_data.into_iter().rev() {
             match child_pointer {
                 Some(pointer) => {
                     stack.push_pointer(
                         child_path,
-                        pointer.clone(),
+                        pointer,
                         current_page.clone(),
                         can_add_by_hash,
                         child_overlay,
@@ -305,48 +286,51 @@ impl StorageEngine {
         Ok(())
     }
 
+    #[inline(never)]
     fn process_account_leaf_with_overlay<'a>(
         &'a self,
         context: &TransactionContext,
         overlay: &OverlayState,
         hash_builder: &mut HashBuilder,
         path: Nibbles,
-        node: &Node,
         current_page: Arc<SlottedPage<'a>>,
         storage_branch_updates: &mut B256Map<HashMap<Nibbles, BranchNodeCompact>>,
+        mut nonce_rlp: ArrayVec<u8, 9>,
+        mut balance_rlp: ArrayVec<u8, 33>,
+        mut code_hash: B256,
+        storage_root: Option<Pointer>,
     ) -> Result<(), Error> {
-        let original_account = match node.value() {
-            Ok(TrieValue::Account(account)) => account,
-            _ => panic!("node is not an account leaf"),
-        };
-        let storage_root = match node.kind() {
-            NodeKind::AccountLeaf { storage_root, .. } => storage_root,
-            _ => panic!("node is not an account leaf"),
-        };
-
         let overlayed_account = overlay.lookup(&path);
-        let account = match overlayed_account {
+        match overlayed_account {
             Some(None) => {
                 // The account is removed in the overlay
-                println!("Not adding removed account: {:?}", path);
+                // println!("Not adding removed account: {:?}", path);
                 return Ok(());
             }
             Some(Some(OverlayValue::Account(overlayed_account))) => {
                 // The account is updated in the overlay
-                overlayed_account
+                nonce_rlp = alloy_rlp::encode_fixed_size(&overlayed_account.nonce);
+                balance_rlp = alloy_rlp::encode_fixed_size(&overlayed_account.balance);
+                code_hash = overlayed_account.code_hash;
             }
             _ => {
                 // The account is not updated in the overlay
-                &original_account
             }
         };
 
         let has_storage_overlays = overlay.iter().any(|(path, _)| path.len() > 64);
         if !has_storage_overlays {
-            let rlp_encoded =
-                self.encode_account_with_root(account, original_account.storage_root)?;
-            println!("Adding account leaf with no storage overlays: {:?}", path);
-            hash_builder.add_leaf(path, &rlp_encoded);
+            // println!("Adding account leaf with no storage overlays: {:?}", path);
+            let storage_root_hash = storage_root.as_ref().map_or(EMPTY_ROOT_HASH, |p| p.rlp().as_hash().unwrap_or(EMPTY_ROOT_HASH));
+
+            self.add_account_leaf_to_hash_builder(
+                hash_builder,
+                path,
+                &nonce_rlp,
+                &balance_rlp,
+                &code_hash,
+                &storage_root_hash,
+            );
             return Ok(());
         }
 
@@ -357,7 +341,7 @@ impl StorageEngine {
 
         match storage_root {
             Some(pointer) => {
-                println!("Processing overlayed storage root for: {:?}", path);
+                // println!("Processing overlayed storage root for: {:?}", path);
                 let mut storage_stack = TraversalStack::new();
 
                 // load the root storage node
@@ -405,18 +389,42 @@ impl StorageEngine {
         };
         let (mut storage_hash_builder, updated_storage_branch_nodes) = storage_hash_builder.split();
         let new_root = storage_hash_builder.root();
-        println!("New root: {:?}", new_root);
+        // println!("New root: {:?}", new_root);
 
         storage_branch_updates.insert(B256::from_slice(&path.pack()), updated_storage_branch_nodes);
 
-        let encoded = self.encode_account_with_root(account, new_root).unwrap();
-        println!("Adding overlayed account leaf: {:?}", path);
+        // println!("Adding overlayed account leaf: {:?}", path);
 
-        hash_builder.add_leaf(path, &encoded);
+        self.add_account_leaf_to_hash_builder(
+            hash_builder,
+            path,
+            &nonce_rlp,
+            &balance_rlp,
+            &code_hash,
+            &new_root,
+        );
 
         Ok(())
     }
 
+    #[inline(never)]
+    fn add_account_leaf_to_hash_builder(
+        &self,
+        hash_builder: &mut HashBuilder,
+        path: Nibbles,
+        nonce_rlp: &ArrayVec<u8, 9>,
+        balance_rlp: &ArrayVec<u8, 33>,
+        code_hash: &B256,
+        storage_root: &B256,
+    ) {
+        let mut buf = [0u8; 110]; // max RLP length for an account: 2 bytes for list length, 9 for nonce, 33 for
+        // balance, 33 for storage root, 33 for code hash
+        let mut value_rlp = buf.as_mut();
+        let account_rlp_length = encode_account_leaf(nonce_rlp, balance_rlp, code_hash, storage_root, &mut value_rlp);
+        hash_builder.add_leaf(path, &buf[..account_rlp_length]);
+    }
+
+    #[inline(never)]
     fn process_overlayed_child<'a>(
         &'a self,
         context: &TransactionContext,
@@ -431,10 +439,10 @@ impl StorageEngine {
         // First consider the overlay. All values in it must already contain the child_path prefix.
         // If the overlay matches the child path, we can add it to the hash builder and skip
         // actually reading the child node.
-        let first_overlay_item = overlay.iter().next();
-        if let Some((overlay_path, overlay_value)) = first_overlay_item {
-            if child_path == overlay_path &&
-                (matches!(overlay_value, Some(OverlayValue::Hash(_))) || overlay_value.is_none())
+        // Account values cannot be directly overlayed, as they may need to be merged with the
+        // existing storage trie.
+        if let Some((overlay_path, overlay_value)) = overlay.first() {
+            if child_path == overlay_path && !matches!(overlay_value, Some(OverlayValue::Account(_)))
             {
                 // the child path is directly overlayed, so only use the overlay state
                 self.add_overlay_to_hash_builder(hash_builder, &overlay, storage_branch_updates);
@@ -465,6 +473,7 @@ impl StorageEngine {
         Ok(())
     }
 
+    #[inline(never)]
     fn process_overlayed_account(
         &self,
         hash_builder: &mut HashBuilder,
@@ -475,7 +484,7 @@ impl StorageEngine {
     ) -> Result<(), Error> {
         if storage_overlay.is_empty() {
             let encoded = self.encode_account(account).unwrap();
-            println!("Adding overlayed account leaf with no storage overlays: {:?}", path);
+            // println!("Adding overlayed account leaf with no storage overlays: {:?}", path);
             hash_builder.add_leaf(path, &encoded);
             return Ok(());
         }
@@ -490,16 +499,17 @@ impl StorageEngine {
         let (mut storage_hash_builder, updated_storage_branch_nodes) = storage_hash_builder.split();
         let storage_root = storage_hash_builder.root();
 
-        println!("Updated storage branch nodes: {:?}", updated_storage_branch_nodes);
+        // println!("Updated storage branch nodes: {:?}", updated_storage_branch_nodes);
 
         storage_branch_updates.insert(B256::from_slice(&path.pack()), updated_storage_branch_nodes);
 
         let encoded = self.encode_account_with_root(account, storage_root).unwrap();
-        println!("Adding overlayed account leaf with storage overlays: {:?}", path);
+        // println!("Adding overlayed account leaf with storage overlays: {:?}", path);
         hash_builder.add_leaf(path, &encoded);
         Ok(())
     }
 
+    #[inline(never)]
     fn add_overlay_to_hash_builder(
         &self,
         hash_builder: &mut HashBuilder,
@@ -518,7 +528,7 @@ impl StorageEngine {
             match value {
                 Some(OverlayValue::Account(account)) => {
                     let storage_overlay = overlay
-                        .sub_slice_for_prefix(&Nibbles::from_nibbles(path))
+                        .sub_slice_for_prefix(path)
                         .with_prefix_offset(64);
                     self.process_overlayed_account(
                         hash_builder,
@@ -532,17 +542,17 @@ impl StorageEngine {
                 }
                 Some(OverlayValue::Storage(storage_value)) => {
                     let encoded = self.encode_storage(&storage_value).unwrap();
-                    println!("Adding overlayed storage leaf: {:?}", path);
+                    // println!("Adding overlayed storage leaf: {:?}", path);
                     hash_builder.add_leaf(Nibbles::from_nibbles(path), &encoded);
                 }
                 Some(OverlayValue::Hash(hash)) => {
-                    println!("Adding overlayed branch node: {:?}", path);
+                    // println!("Adding overlayed branch node: {:?}", path);
                     hash_builder.add_branch(Nibbles::from_nibbles(path), *hash, false);
                     last_processed_path = Some(path);
                 }
                 None => {
                     // Tombstone - skip
-                    println!("Skipping tombstone: {:?}", path);
+                    // println!("Skipping tombstone: {:?}", path);
                     last_processed_path = Some(path);
                 }
             }
