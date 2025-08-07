@@ -4,7 +4,7 @@ use std::{
     fs::File,
     io::{self, IoSlice, Read, Seek, SeekFrom, Write},
     ops::Range,
-    os::fd::FromRawFd,
+    os::{fd::FromRawFd, unix::fs::FileExt},
     path::Path,
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
@@ -220,13 +220,12 @@ impl PageManagerTrait for BufferPoolManager {
         }
 
         // Otherwise, need to load the page from disk
-        let mut file = &self.file;
         let frame_id = self.get_free_frame().ok_or(PageError::OutOfMemory)?;
-
-        file.seek(SeekFrom::Start(page_id.as_offset() as u64)).map_err(PageError::IO)?;
         let buf: *mut [u8; Page::SIZE] = self.frames[frame_id.0 as usize].ptr;
         unsafe {
-            file.read_exact(&mut *buf).map_err(PageError::IO)?;
+            self.file
+                .read_exact_at(&mut *buf, page_id.as_offset() as u64)
+                .map_err(PageError::IO)?;
         }
         self.page_table.insert(page_id, FrameHeader { frame_id, pin_count: 0 });
         // self.access_page(page_id);
@@ -250,13 +249,12 @@ impl PageManagerTrait for BufferPoolManager {
         }
 
         // Otherwise, need to load the page from disk
-        let mut file = &self.file;
         let frame_id = self.get_free_frame().ok_or(PageError::OutOfMemory)?;
-
-        file.seek(SeekFrom::Start(page_id.as_offset() as u64)).map_err(PageError::IO)?;
         let buf: *mut [u8; Page::SIZE] = self.frames[frame_id.0 as usize].ptr;
         unsafe {
-            file.read_exact(&mut *buf).map_err(PageError::IO)?;
+            self.file
+                .read_exact_at(&mut *buf, page_id.as_offset() as u64)
+                .map_err(PageError::IO)?;
         }
         self.page_table.insert(page_id, FrameHeader { frame_id, pin_count: 0 });
         self.dirty_frames.lock().push((frame_id, page_id));
