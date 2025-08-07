@@ -5,8 +5,10 @@ use crate::{
 use memmap2::{Advice, MmapOptions, MmapRaw};
 use parking_lot::Mutex;
 use std::{
+    collections::HashSet,
     fs::File,
     io,
+    ops::Range,
     path::Path,
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
@@ -18,6 +20,10 @@ pub struct PageManager {
     file: Mutex<File>,
     file_len: AtomicU64,
     page_count: AtomicU32,
+    // A set of reallocated dirty pages which need to be flushed to disk.
+    dirty_set: Mutex<HashSet<usize>>,
+    // A range of newly allocated pages at the end of the file which need to be flushed to disk.
+    dirty_range: Mutex<Option<Range<usize>>>,
 }
 
 impl PageManager {
@@ -101,6 +107,8 @@ impl PageManager {
             file: Mutex::new(file),
             file_len: AtomicU64::new(file_len),
             page_count: AtomicU32::new(opts.page_count),
+            dirty_set: Mutex::new(HashSet::new()),
+            dirty_range: Mutex::new(None),
         })
     }
 
@@ -213,6 +221,8 @@ impl PageManager {
         // SAFETY: We have checked that the page fits inside the memory map.
         let data = unsafe { self.mmap.as_mut_ptr().byte_add(offset).cast() };
 
+        self.add_dirty(page_id);
+
         // TODO: This is actually unsafe, as it's possible to call `get()` arbitrary times before
         // calling this function (this will be fixed in a future commit).
         unsafe { PageMut::from_ptr(page_id, snapshot_id, data) }
@@ -234,6 +244,8 @@ impl PageManager {
         // SAFETY: We have checked that the page fits inside the memory map.
         let data = unsafe { self.mmap.as_mut_ptr().byte_add(offset).cast() };
 
+        self.extend_dirty_range(page_id);
+
         // SAFETY:
         // - This is a newly created page at the end of the file, so we're guaranteed to have
         //   exclusive access to it. Even if another thread was calling `allocate()` at the same
@@ -243,10 +255,35 @@ impl PageManager {
         unsafe { PageMut::acquire_unchecked(page_id, snapshot_id, data) }
     }
 
+    #[inline]
+    fn add_dirty(&self, page_id: PageId) {
+        self.dirty_set.lock().insert(page_id.as_offset());
+    }
+
+    #[inline]
+    fn extend_dirty_range(&self, page_id: PageId) {
+        let mut dirty_range = self.dirty_range.lock();
+        match dirty_range.as_mut() {
+            Some(range) => {
+                *dirty_range = Some(range.start..page_id.as_offset() + Page::SIZE);
+            }
+            None => {
+                *dirty_range = Some(page_id.as_offset()..page_id.as_offset() + Page::SIZE);
+            }
+        }
+    }
+
     /// Syncs pages to the backing file.
     pub fn sync(&self) -> io::Result<()> {
         if cfg!(not(miri)) {
-            self.mmap.flush()
+            let mut dirty_set = self.dirty_set.lock();
+            for offset in dirty_set.drain() {
+                self.mmap.flush_range(offset, Page::SIZE)?;
+            }
+            if let Some(range) = self.dirty_range.lock().take() {
+                self.mmap.flush_range(range.start, range.end - range.start)?;
+            }
+            Ok(())
         } else {
             Ok(())
         }
