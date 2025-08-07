@@ -13,6 +13,7 @@ use rayon::ThreadPoolBuildError;
 use std::{
     fs::File,
     io,
+    num::NonZero,
     ops::Deref,
     path::{Path, PathBuf},
 };
@@ -31,8 +32,9 @@ pub struct DatabaseOptions {
     create_new: bool,
     wipe: bool,
     meta_path: Option<PathBuf>,
-    max_pages: u32,
-    num_threads: usize,
+    max_pages: Option<NonZero<u32>>,
+    num_threads: Option<NonZero<usize>>,
+    io_parallelism: Option<NonZero<usize>>,
 }
 
 #[derive(Debug)]
@@ -85,17 +87,32 @@ impl DatabaseOptions {
     }
 
     /// Sets the maximum number of pages that can be allocated.
-    pub fn max_pages(&mut self, max_pages: u32) -> &mut Self {
-        self.max_pages = max_pages;
+    pub fn max_pages(&mut self, max_pages: NonZero<u32>) -> &mut Self {
+        self.max_pages = Some(max_pages);
         self
     }
 
     /// Sets the maximum number of threads used to CPU-intensive computations (like hashing).
     ///
-    /// By default, or if `num_threads` is 0, the number of threads is selected automatically based
-    /// on the number of available CPUs on the system.
-    pub fn num_threads(&mut self, num_threads: usize) -> &mut Self {
-        self.num_threads = num_threads;
+    /// By default, the number of threads is selected automatically based on the number of
+    /// available CPUs on the system. The algorithm for deciding the default number is not
+    /// specified and may change in the future.
+    pub fn num_threads(&mut self, num_threads: NonZero<usize>) -> &mut Self {
+        self.num_threads = Some(num_threads);
+        self
+    }
+
+    /// Sets the maximum amount I/O parallelism that can be used during writes.
+    ///
+    /// When data is written to the database as part of a write transaction, the database may opt
+    /// to write data to storage in parallel, rather than sequentially. This can result in
+    /// significant performance gains on modern SSD devices over NVMe/PCIe, or over certain RAID
+    /// setups. The number specified through `io_parallelism` specifies the maximum number of
+    /// *pages* that can be written in parallel at any given time.
+    ///
+    /// By default, `io_parallelism` is set to 128, although this default may change in the future.
+    pub fn io_parallelism(&mut self, io_parallelism: NonZero<usize>) -> &mut Self {
+        self.io_parallelism = Some(io_parallelism);
         self
     }
 
@@ -149,16 +166,22 @@ impl Database {
         }
 
         let page_count = meta_manager.active_slot().page_count();
-        let page_manager = PageManager::options()
+        let mut page_manager_opts = PageManager::options();
+        page_manager_opts
             .create(opts.create)
             .create_new(opts.create_new)
             .wipe(opts.wipe)
-            .page_count(page_count)
-            .open(db_path)
-            .map_err(OpenError::PageError)?;
+            .page_count(page_count);
+        if let Some(max_pages) = opts.max_pages {
+            page_manager_opts.max_pages(max_pages.get());
+        }
+        if let Some(io_parallelism) = opts.io_parallelism {
+            page_manager_opts.io_parallelism(io_parallelism);
+        }
+        let page_manager = page_manager_opts.open(db_path).map_err(OpenError::PageError)?;
 
         let thread_pool = threadpool::builder()
-            .num_threads(opts.num_threads)
+            .num_threads(opts.num_threads.map(NonZero::get).unwrap_or(0))
             .build()
             .map_err(OpenError::ThreadPoolError)?;
 

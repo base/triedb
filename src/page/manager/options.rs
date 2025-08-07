@@ -1,6 +1,7 @@
 use crate::page::{Page, PageError, PageManager};
 use std::{
     fs::{File, OpenOptions},
+    num::NonZero,
     path::Path,
 };
 
@@ -9,6 +10,7 @@ pub struct PageManagerOptions {
     pub(super) open_options: OpenOptions,
     pub(super) page_count: u32,
     pub(super) max_pages: u32,
+    pub(super) io_parallelism: NonZero<usize>,
 }
 
 impl PageManagerOptions {
@@ -24,7 +26,7 @@ impl PageManagerOptions {
             Page::MAX_COUNT / 1024
         };
 
-        Self { open_options, page_count: 0, max_pages }
+        Self { open_options, page_count: 0, max_pages, io_parallelism: NonZero::new(128).unwrap() }
     }
 
     /// Sets the option to create a new file, or open it if it already exists.
@@ -67,6 +69,17 @@ impl PageManagerOptions {
     /// number greater than `0` will cause the open to fail.
     pub fn wipe(&mut self, wipe: bool) -> &mut Self {
         self.open_options.truncate(wipe);
+        self
+    }
+
+    /// Sets the maximum amount I/O parallelism that can be used during writes.
+    ///
+    /// This specifies the maximum number of *pages* that can be written in parallel at any given
+    /// time.
+    ///
+    /// By default, `io_parallelism` is set to 128, although this default may change in the future.
+    pub fn io_parallelism(&mut self, io_parallelism: NonZero<usize>) -> &mut Self {
+        self.io_parallelism = io_parallelism;
         self
     }
 

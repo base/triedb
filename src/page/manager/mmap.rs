@@ -1,5 +1,5 @@
 use crate::{
-    page::{Page, PageError, PageId, PageManagerOptions, PageMut},
+    page::{manager::syncer::PageSyncer, Page, PageError, PageId, PageManagerOptions, PageMut},
     snapshot::SnapshotId,
 };
 use memmap2::{Advice, MmapOptions, MmapRaw};
@@ -14,10 +14,10 @@ use std::{
 // Manages pages in a memory mapped file.
 #[derive(Debug)]
 pub struct PageManager {
-    mmap: MmapRaw,
     file: Mutex<File>,
     file_len: AtomicU64,
     page_count: AtomicU32,
+    syncer: PageSyncer,
 }
 
 impl PageManager {
@@ -96,12 +96,20 @@ impl PageManager {
             file_len / (Page::SIZE as u64)
         );
 
+        let syncer =
+            PageSyncer::new(mmap, opts.io_parallelism).map_err(PageError::ThreadPoolError)?;
+
         Ok(Self {
-            mmap,
             file: Mutex::new(file),
             file_len: AtomicU64::new(file_len),
             page_count: AtomicU32::new(opts.page_count),
+            syncer,
         })
+    }
+
+    #[inline]
+    pub fn mmap(&self) -> &MmapRaw {
+        self.syncer.mmap()
     }
 
     /// Returns the number of pages currently stored in the file.
@@ -111,7 +119,7 @@ impl PageManager {
 
     /// Returns the maximum number of pages that can be allocated to the file.
     pub fn capacity(&self) -> u32 {
-        (self.mmap.len() / Page::SIZE).min(u32::MAX as usize) as u32
+        (self.mmap().len() / Page::SIZE).min(u32::MAX as usize) as u32
     }
 
     /// Grows the size of the underlying file to make room for additional pages.
@@ -124,7 +132,7 @@ impl PageManager {
         let cur_len = self.file_len.load(Ordering::Relaxed);
         let increment = (cur_len / 8).max(1024 * Page::SIZE as u64);
         let new_len = cur_len.checked_add(increment).ok_or(PageError::PageLimitReached)?;
-        let new_len = new_len.min(self.mmap.len() as u64);
+        let new_len = new_len.min(self.mmap().len() as u64);
         if new_len <= cur_len {
             return Err(PageError::PageLimitReached);
         }
@@ -192,7 +200,7 @@ impl PageManager {
 
         let offset = page_id.as_offset();
         // SAFETY: We have checked that the page fits inside the memory map.
-        let data = unsafe { self.mmap.as_mut_ptr().byte_add(offset).cast() };
+        let data = unsafe { self.mmap().as_mut_ptr().byte_add(offset).cast() };
 
         // SAFETY: All memory from the memory map is accessed through `Page` or `PageMut`, thus
         // respecting the page state access memory model.
@@ -211,11 +219,11 @@ impl PageManager {
 
         let offset = page_id.as_offset();
         // SAFETY: We have checked that the page fits inside the memory map.
-        let data = unsafe { self.mmap.as_mut_ptr().byte_add(offset).cast() };
+        let data = unsafe { self.mmap().as_mut_ptr().byte_add(offset).cast() };
 
         // TODO: This is actually unsafe, as it's possible to call `get()` arbitrary times before
         // calling this function (this will be fixed in a future commit).
-        unsafe { PageMut::from_ptr(page_id, snapshot_id, data) }
+        unsafe { PageMut::from_ptr(page_id, snapshot_id, data, Some(&self.syncer)) }
     }
 
     /// Adds a new page.
@@ -225,14 +233,14 @@ impl PageManager {
         let (page_id, new_count) = self.next_page_id().ok_or(PageError::PageLimitReached)?;
         let new_len = new_count as usize * Page::SIZE;
 
-        if new_len > self.mmap.len() {
+        if new_len > self.mmap().len() {
             return Err(PageError::PageLimitReached);
         }
         self.grow_if_needed(new_len as u64)?;
 
         let offset = page_id.as_offset();
         // SAFETY: We have checked that the page fits inside the memory map.
-        let data = unsafe { self.mmap.as_mut_ptr().byte_add(offset).cast() };
+        let data = unsafe { self.mmap().as_mut_ptr().byte_add(offset).cast() };
 
         // SAFETY:
         // - This is a newly created page at the end of the file, so we're guaranteed to have
@@ -240,16 +248,13 @@ impl PageManager {
         //   time, they would get a different `page_id`.
         // - All memory from the memory map is accessed through `Page` or `PageMut`, thus respecting
         //   the page state access memory model.
-        unsafe { PageMut::acquire_unchecked(page_id, snapshot_id, data) }
+        unsafe { PageMut::acquire_unchecked(page_id, snapshot_id, data, Some(&self.syncer)) }
     }
 
     /// Syncs pages to the backing file.
     pub fn sync(&self) -> io::Result<()> {
-        if cfg!(not(miri)) {
-            self.mmap.flush()
-        } else {
-            Ok(())
-        }
+        self.syncer.sync();
+        Ok(())
     }
 
     /// Syncs and closes the backing file.
