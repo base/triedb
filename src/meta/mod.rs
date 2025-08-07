@@ -170,13 +170,8 @@ pub struct MetadataSlot {
     page_count: u32,
     /// Total size of `orphan_pages` (including reclaimed pages)
     orphan_pages_len: u32,
-    /// Index of the first reclaimed page inside of `orphan_pages`
-    reclaimed_orphans_start: u32,
-    /// Number of reclaimed pages inside of `orphan_pages`
-    reclaimed_orphans_end: u32,
-    /// Unused data to allow this structure to be properly aligned. This padding is stored on disk
-    /// to improve runtime performance
-    padding: u32,
+    /// Number of reclaimed pages from the `orphan_pages` list
+    reclaimed_orphans_len: u32,
 }
 
 impl MetadataSlot {
@@ -251,24 +246,16 @@ impl MetadataSlot {
     #[inline]
     #[must_use]
     fn reclaimed_range(&self) -> Range<usize> {
-        self.reclaimed_orphans_start as usize..self.reclaimed_orphans_end as usize
+        0..self.reclaimed_orphans_len as usize
     }
 
     /// Returns the range of pages that are actually orphans (not reclaimed) in the `orphan_pages`
     /// list.
-    ///
-    /// This returns 2 disjoint ranges because there may be some reclaimed pages in the middle.
     #[inline]
     #[must_use]
-    fn actual_orphans_ranges(&self) -> (Range<usize>, Range<usize>) {
-        debug_assert!(
-            self.orphan_pages_len >= self.reclaimed_orphans_start + self.reclaimed_orphans_end
-        );
-        (
-            0..(self.reclaimed_orphans_start as usize),
-            (self.reclaimed_orphans_start as usize + self.reclaimed_orphans_end as usize)..
-                (self.orphan_pages_len as usize),
-        )
+    fn actual_orphans_range(&self) -> Range<usize> {
+        debug_assert!(self.orphan_pages_len >= self.reclaimed_orphans_len);
+        self.reclaimed_orphans_len as usize..self.orphan_pages_len as usize
     }
 
     /// Computes the hash for this slot.
@@ -310,11 +297,7 @@ impl HashedMetadataSlot {
         }
         // Check that the number of reclaimed pages doesn't exceed the total number of orphan
         // pages.
-        let reclaimed_orphans_end = self
-            .reclaimed_orphans_start
-            .checked_add(self.reclaimed_orphans_end)
-            .ok_or(CorruptedMetadataError)?;
-        if self.orphan_pages_len < reclaimed_orphans_end {
+        if self.orphan_pages_len < self.reclaimed_orphans_len {
             return Err(CorruptedMetadataError);
         }
         // Check the hash.
@@ -559,11 +542,43 @@ impl MetadataManager {
         Ok(())
     }
 
+    fn compact_orphans(&mut self) {
+        let (active, dirty, list) = self.parts_mut();
+        let reclaimed_range = active.reclaimed_range();
+        let actual_orphans_range = dirty.actual_orphans_range();
+
+        // If orphan page list has observed N pushes and M pops, then first of all note that:
+        //
+        // - N == actual_orphans_range.len()
+        // - M == reclaimed_range.len()
+        // - N - M = actual_orphans_range.len()
+        // - N >= M, or equivalently N - M >= 0
+        //
+        // Here we move the orphans to the start of the list when M >= N - M, which implies N <=
+        // 2M. If that condition is satisfied, we will move N - M items. In total, if the condition
+        // is satisfied, we will have performed:
+        //
+        // - N pushes
+        // - M pops
+        // - N - M copies
+        //
+        // for a total of N + M + N - M = 2N operations, which means that adding items to the
+        // orphan page list still takes O(1) amortized time.
+        if reclaimed_range.len() >= actual_orphans_range.len() {
+            dirty.orphan_pages_len = actual_orphans_range.len() as u32;
+            dirty.reclaimed_orphans_len = 0;
+            list.copy_within(actual_orphans_range, 0);
+        }
+    }
+
     /// Saves the metadata to the storage device, and promotes the dirty slot to the active slot.
     ///
     /// After calling this method, a new dirty slot is produced with the same contents as the new
     /// active slot, and an auto-incremented snapshot ID.
     pub fn commit(&mut self) -> io::Result<()> {
+        // Compact the orphan page list if there's enough room
+        self.compact_orphans();
+
         // First make sure the changes from the dirty slot are on disk
         self.dirty_slot_mut().update_hash();
         debug_assert!(self.dirty_slot_mut().verify_integrity().is_ok());
@@ -622,7 +637,7 @@ impl<'a> OrphanPages<'a> {
     #[inline]
     pub fn len(&self) -> usize {
         let m = self.manager.dirty_slot();
-        (m.orphan_pages_len as usize) - (m.reclaimed_orphans_end as usize)
+        (m.orphan_pages_len as usize) - (m.reclaimed_orphans_len as usize)
     }
 
     /// Maximum number of orphan pages that this list can contain without resizing.
@@ -640,8 +655,8 @@ impl<'a> OrphanPages<'a> {
     /// Returns an iterator that yields the IDs of orphan pages.
     pub fn iter(&self) -> impl FusedIterator<Item = OrphanPage> + use<'_> {
         let list = self.manager.raw_orphan_pages();
-        let (left, right) = self.manager.dirty_slot().actual_orphans_ranges();
-        list[right].iter().copied().chain(list[left].iter().copied())
+        let range = self.manager.dirty_slot().actual_orphans_range();
+        list[range].iter().copied()
     }
 
     /// Adds a page to the orphan page list, increasing the capacity of the list if necessary.
@@ -656,43 +671,11 @@ impl<'a> OrphanPages<'a> {
 
     /// Adds a page to the orphan page list if there is enough capacity.
     pub fn push_within_capacity(&mut self, orphan: OrphanPage) -> Result<(), OrphanPage> {
-        // To make sure the previous snapshot is always valid, we cannot modify orphan pages that
-        // are referenced by the previous snapshot. We can only modify the reclaimed orphans
-        // slice, or the the additional orphans elements added at the end of the list (if any).
-        //
-        // Particular care should be taken because a `pop()` may be followed by a `push()`, and
-        // it's important that the `push()` does not overwrite data from the previous snapshot.
+        let (_, dirty, list) = self.manager.parts_mut();
 
-        let (active, dirty, list) = self.manager.parts_mut();
-
-        // Check if we can write in the reclaimed slice. We can only write in the intersection
-        // between the active reclaimed range and the dirty reclaimed range, and only at the bounds
-        // of the dirty reclaimed range.
-        let active_reclaimed_range = active.reclaimed_range();
-        let dirty_reclaimed_range = dirty.reclaimed_range();
-        let intersection = active_reclaimed_range.start.max(dirty_reclaimed_range.start)..
-            active_reclaimed_range.end.min(dirty_reclaimed_range.end);
-
-        if !intersection.is_empty() {
-            if intersection.start == dirty_reclaimed_range.start {
-                list[dirty_reclaimed_range.start] = orphan;
-                dirty.reclaimed_orphans_start += 1;
-                dirty.reclaimed_orphans_end -= 1;
-                return Ok(());
-            } else if intersection.end == dirty_reclaimed_range.end {
-                list[dirty_reclaimed_range.end - 1] = orphan;
-                dirty.reclaimed_orphans_end -= 1;
-                return Ok(());
-            }
-        }
-
-        // We need to write at the end of the list. We can only write past the active and dirty
-        // list.
-        let (_, active_orphans_range) = active.actual_orphans_ranges();
-        let (_, dirty_orphans_range) = dirty.actual_orphans_ranges();
-        let index = active_orphans_range.end.max(dirty_orphans_range.end);
-        if index < list.len() {
-            list[index] = orphan;
+        let range = dirty.actual_orphans_range();
+        if range.end < list.len() {
+            list[range.end] = orphan;
             dirty.orphan_pages_len += 1;
             return Ok(());
         }
@@ -710,33 +693,24 @@ impl<'a> OrphanPages<'a> {
     /// exists.
     pub fn pop(&mut self, snapshot_threshold: SnapshotId) -> Option<OrphanPage> {
         let (_, dirty, list) = self.manager.parts_mut();
-        let (left, right) = dirty.actual_orphans_ranges();
+        let range = dirty.actual_orphans_range();
 
-        // The following code checks the `left` and `right` ranges for orphaned pages that have an
-        // `orphaned_at()` equal or below `snapshot_threshold`.
-        //
-        // Instead of scanning the whole `left` and `right` lists, the code only check the boundary
-        // elements. The assumption is that snapshot IDs are always increasing, never decreasing,
-        // and therefore each call to `push()` always adds pages with an increasing
-        // `orphaned_at()`. So if the first element has an `orphaned_at()` that is already too
-        // high, there's no point in checking the other elements, because they will also be above
-        // the threshold.
-
-        if !right.is_empty() {
-            let orphan = list[right.start];
+        if !range.is_empty() {
+            let orphan = list[range.start];
             if orphan.orphaned_at() <= snapshot_threshold {
-                dirty.reclaimed_orphans_end += 1;
+                dirty.reclaimed_orphans_len += 1;
                 return Some(orphan);
             }
         }
 
-        if !left.is_empty() {
-            let orphan = list[left.end - 1];
-            if orphan.orphaned_at() <= snapshot_threshold {
-                dirty.reclaimed_orphans_start -= 1;
-                dirty.reclaimed_orphans_end += 1;
-                return Some(orphan);
-            }
+        #[cfg(debug_assertions)]
+        {
+            // TODO: remove
+            let valid_candidates = list[range]
+                .iter()
+                .filter(|orphan| orphan.orphaned_at() <= snapshot_threshold)
+                .count();
+            debug_assert_eq!(valid_candidates, 0);
         }
 
         None
@@ -909,6 +883,43 @@ mod tests {
                     .verify_integrity()
                     .expect("active slot should be consistent after a commit");
             }
+        }
+
+        #[test]
+        fn push_pop_2() {
+            let f = tempfile::tempfile().expect("failed to open temporary file");
+            let mut manager =
+                MetadataManager::from_file(f).expect("failed to initialize metadata manager");
+
+            // Add 4 pages with increasing snapshots; the orphan page list will look like this:
+            // [1, 2, 3, 4]
+            manager.orphan_pages().push(OrphanPage::new(page_id!(1), 1)).expect("push failed");
+            manager.orphan_pages().push(OrphanPage::new(page_id!(2), 2)).expect("push failed");
+            manager.orphan_pages().push(OrphanPage::new(page_id!(3), 3)).expect("push failed");
+            manager.orphan_pages().push(OrphanPage::new(page_id!(4), 4)).expect("push failed");
+            manager.commit().expect("commit failed");
+
+            // Pop 3 pages; orphan page list: [(claimed), (claimed), (claimed), 4]
+            manager.orphan_pages().pop(3).expect("pop failed");
+            manager.orphan_pages().pop(3).expect("pop failed");
+            manager.orphan_pages().pop(3).expect("pop failed");
+            manager.commit().expect("commit failed");
+
+            // Push 2 new pages, again with increasing snapshots; orphan page list: [5, 6,
+            // (claimed), 4]
+            manager.orphan_pages().push(OrphanPage::new(page_id!(5), 5)).expect("push failed");
+            manager.orphan_pages().push(OrphanPage::new(page_id!(6), 6)).expect("push failed");
+            manager.commit().expect("commit failed");
+
+            // Pop 2 pages; orphan page list: [(claimed), 6, (claimed), (claimed)]
+            manager.orphan_pages().pop(5).expect("pop failed");
+            manager.orphan_pages().pop(5).expect("pop failed");
+            manager.commit().expect("commit failed");
+
+            assert_eq!(
+                manager.orphan_pages().iter().map(|orphan| orphan.page_id).collect::<Vec<_>>(),
+                [6]
+            );
         }
 
         #[test]
