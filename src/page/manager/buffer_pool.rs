@@ -3,6 +3,7 @@ use std::{
     ffi::CString,
     fs::File,
     io::{self, IoSlice, Read, Seek, SeekFrom, Write},
+    ops::Range,
     os::fd::FromRawFd,
     path::Path,
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
@@ -70,8 +71,7 @@ pub struct BufferPoolManager {
                          * num_frames size */
     page_table: DashMap<PageId, FrameHeader>, /* mapping between page id and buffer pool frames,
                                                * indexed by page id with fix num_frames size */
-    free_frames: Mutex<VecDeque<FrameId>>, /* list of free frames that do not hold any pages'
-                                            * data, with fix num_frames size */
+    original_free_frame_idx: AtomicU32,
     dirty_frames: Mutex<Vec<(FrameId, PageId)>>, /* list of dirty frames that need to be flushed
                                                   * to disk, with fix num_frames size */
     lru_replacer: CacheEvict, /* the replacer to find unpinned/candidate pages for eviction */
@@ -98,6 +98,7 @@ impl BufferPoolManager {
         let flags = libc::O_RDWR | libc::O_CREAT | libc::O_DIRECT;
         #[cfg(not(target_os = "linux"))]
         let flags = libc::O_RDWR | libc::O_CREAT;
+
         let fd = unsafe { libc::open(path_cstr.as_ptr(), flags, 0o644) };
         if fd == -1 {
             return Err(PageError::IO(io::Error::last_os_error()));
@@ -122,7 +123,6 @@ impl BufferPoolManager {
             frames.push(Frame { ptr });
         }
         let dirty_frames = Mutex::new(Vec::with_capacity(num_frames as usize));
-        let free_frames = Mutex::new((0..num_frames).map(FrameId).collect::<VecDeque<_>>());
         let lru_replacer = CacheEvict::new(num_frames as usize);
 
         Ok(BufferPoolManager {
@@ -131,7 +131,7 @@ impl BufferPoolManager {
             file_len,
             frames,
             page_table,
-            free_frames,
+            original_free_frame_idx: AtomicU32::new(0),
             dirty_frames,
             lru_replacer,
             file,
@@ -139,25 +139,44 @@ impl BufferPoolManager {
     }
 
     fn next_page_id(&self) -> Option<(PageId, u32)> {
-        // TODO: could have race condition here
-        let old_count = self.page_count.load(Ordering::Relaxed);
-        let new_count = old_count.checked_add(1)?;
-        let page_id = PageId::try_from(new_count).ok()?;
-        self.page_count.store(new_count, Ordering::Relaxed);
-        Some((page_id, new_count))
+        loop {
+            let old_count = self.page_count.load(Ordering::Relaxed);
+            let new_count = old_count.checked_add(1)?;
+            let page_id = PageId::try_from(new_count).ok()?;
+            match self.page_count.compare_exchange_weak(
+                old_count,
+                new_count,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Some((page_id, new_count)),
+                Err(_) => continue, // Another thread modiled page_count, retry.
+            }
+        }
     }
 
     fn get_free_frame(&self) -> Option<FrameId> {
-        let mut free_frames = self.free_frames.lock();
-        let fr = free_frames.pop_front();
-        match fr {
-            Some(frame_id) => Some(frame_id),
-            None => {
+        loop {
+            let original_free_frame_idx = self.original_free_frame_idx.load(Ordering::Relaxed);
+            if original_free_frame_idx < self.num_frames {
+                match self.original_free_frame_idx.compare_exchange_weak(
+                    original_free_frame_idx,
+                    original_free_frame_idx + 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => return Some(FrameId(original_free_frame_idx)),
+                    Err(_) => continue, // Another thread modiled original_free_frame_idx, retry.
+                }
+            } else {
                 let evicted_page = self.lru_replacer.evict();
                 if let Some(page_id) = evicted_page {
-                    self.page_table.remove(&page_id).map(|(_, frame_header)| frame_header.frame_id)
+                    return self
+                        .page_table
+                        .remove(&page_id)
+                        .map(|(_, frame_header)| frame_header.frame_id)
                 } else {
-                    None
+                    return None
                 }
             }
         }
