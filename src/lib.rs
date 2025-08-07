@@ -8,6 +8,7 @@
 // TODO: temporary allow these warnings so that we can enforce clippy rules
 #![allow(clippy::module_inception)]
 #![allow(clippy::too_many_arguments)]
+#![allow(private_interfaces)]
 
 pub mod account;
 pub mod context;
