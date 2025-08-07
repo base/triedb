@@ -228,11 +228,40 @@ impl PageManagerTrait for BufferPoolManager {
                 .map_err(PageError::IO)?;
         }
         self.page_table.insert(page_id, FrameHeader { frame_id, pin_count: 0 });
-        // self.access_page(page_id);
         self.lru_replacer.touch(page_id).map_err(|_| PageError::EvictionPolicy)?;
 
         unsafe { Page::from_ptr(page_id, buf) }
     }
+    // fn get(&self, page_id: PageId) -> Result<Page<'_>, PageError> {
+    //     if page_id > self.page_count.load(Ordering::Relaxed) {
+    //         return Err(PageError::PageNotFound(page_id));
+    //     }
+
+    //     use dashmap::mapref::entry::Entry;
+    //     match self.page_table.entry(page_id) {
+    //         Entry::Occupied(entry) => {
+    //             let frame_header = entry.get();
+    //             let frame = &self.frames[frame_header.frame_id.0 as usize];
+    //             unsafe { Page::from_ptr(page_id, frame.ptr) }
+    //         }
+    //         Entry::Vacant(entry) => {
+    //             // Only this thread will execute this block for this page_id
+    //             let frame_id = self.get_free_frame().ok_or(PageError::OutOfMemory)?;
+    //             let buf: *mut [u8; Page::SIZE] = self.frames[frame_id.0 as usize].ptr;
+
+    //             unsafe {
+    //                 self.file
+    //                     .read_exact_at(&mut *buf, page_id.as_offset() as u64)
+    //                     .map_err(PageError::IO)?;
+    //             }
+
+    //             entry.insert(FrameHeader { frame_id, pin_count: 0 });
+    //             self.lru_replacer.touch(page_id).map_err(|_| PageError::EvictionPolicy)?;
+
+    //             unsafe { Page::from_ptr(page_id, buf) }
+    //         }
+    //     }
+    // }
 
     /// Retrieves a mutable page from the buffer pool.
     fn get_mut(&self, snapshot_id: SnapshotId, page_id: PageId) -> Result<PageMut<'_>, PageError> {
@@ -258,7 +287,6 @@ impl PageManagerTrait for BufferPoolManager {
         }
         self.page_table.insert(page_id, FrameHeader { frame_id, pin_count: 0 });
         self.dirty_frames.lock().push((frame_id, page_id));
-        // self.access_page(page_id);
         self.lru_replacer.pin(page_id).map_err(|_| PageError::EvictionPolicy)?;
 
         unsafe { PageMut::from_ptr(page_id, snapshot_id, buf) }
@@ -354,7 +382,11 @@ mod tests {
     use crate::page_id;
 
     use super::*;
-    use std::io::Seek;
+    use std::{
+        io::Seek,
+        sync::{atomic::AtomicUsize, Arc, Barrier},
+        thread,
+    };
 
     fn len(f: &File) -> usize {
         f.metadata().expect("fetching file metadata failed").len().try_into().unwrap()
@@ -570,5 +602,443 @@ mod tests {
             let page = m.get(page_id).expect(&format!("failed to get page {}", i));
             assert_eq!(page.contents(), &mut [0x10 + i as u8; Page::DATA_SIZE]);
         });
+    }
+
+    #[test]
+    fn test_concurrent_get_same_page() {
+        let snapshot = 1234;
+        let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
+
+        // Pre-populate the file with test data
+        {
+            let mut opts = BufferPoolManagerOptions::new();
+            opts.num_frames(100); // Plenty of frames to avoid eviction
+            let m = BufferPoolManager::open_with_options(&opts, temp_file.path())
+                .expect("buffer pool creation failed");
+
+            // Allocate and initialize test pages
+            for i in 1..=50 {
+                let mut page = m.allocate(snapshot + i as u64).expect("page allocation failed");
+                page.contents_mut().iter_mut().for_each(|byte| *byte = i as u8);
+                drop(page);
+            }
+            m.sync().expect("sync failed");
+        }
+
+        // Test concurrent access to the same pages
+        {
+            let mut opts = BufferPoolManagerOptions::new();
+            opts.num_frames(100).page_count(50);
+            let m = Arc::new(
+                BufferPoolManager::open_with_options(&opts, temp_file.path())
+                    .expect("buffer pool creation failed"),
+            );
+
+            let num_threads = 16;
+            let iterations = 100;
+            let barrier = Arc::new(Barrier::new(num_threads));
+
+            let handles: Vec<_> = (0..num_threads)
+                .map(|thread_id| {
+                    let m = m.clone();
+                    let barrier = barrier.clone();
+
+                    thread::spawn(move || {
+                        barrier.wait(); // Synchronize start to maximize race conditions
+
+                        for iter in 0..iterations {
+                            // Mix of different pages, but with high probability of conflicts
+                            let page_id = PageId::new(1 + (iter as u32) % 10).unwrap();
+
+                            match m.get(page_id) {
+                                Ok(page) => {
+                                    // Verify page contents are correct
+                                    let expected = page_id.as_u32() as u8;
+                                    assert_eq!(page.contents(), &[expected; Page::DATA_SIZE]);
+
+                                    // Hold the page for a random short time to increase contention
+                                    // if (thread_id + iter as usize) % 7 == 0 {
+                                    //     thread::sleep(std::time::Duration::from_micros(1));
+                                    // }
+                                }
+                                Err(e) => {
+                                    panic!("Unexpected error getting page {}: {:?}", page_id, e)
+                                }
+                            }
+                        }
+                    })
+                })
+                .collect();
+
+            for handle in handles {
+                handle.join().expect("thread panicked");
+            }
+
+            // Verify final state consistency
+            for i in 1..=10 {
+                let page_id = PageId::new(i).unwrap();
+                let page = m.get(page_id).expect("page should exist");
+                assert_eq!(page.contents(), &[i as u8; Page::DATA_SIZE]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_concurrent_get_different_pages_limited_frames() {
+        let snapshot = 1234;
+        let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
+
+        // Pre-populate the file with test data
+        {
+            let m = BufferPoolManager::open(temp_file.path()).expect("buffer pool creation failed");
+
+            for i in 1..=100 {
+                let mut page = m.allocate(snapshot + i as u64).expect("page allocation failed");
+                page.contents_mut().iter_mut().for_each(|byte| *byte = i as u8);
+                drop(page);
+            }
+            m.sync().expect("sync failed");
+        }
+
+        // Test with limited frames to force eviction
+        {
+            let mut opts = BufferPoolManagerOptions::new();
+            opts.num_frames(10).page_count(100); // Force frequent eviction
+            let m = Arc::new(
+                BufferPoolManager::open_with_options(&opts, temp_file.path())
+                    .expect("buffer pool creation failed"),
+            );
+
+            let num_threads = 8;
+            let iterations = 50;
+            let barrier = Arc::new(Barrier::new(num_threads));
+
+            let handles: Vec<_> = (0..num_threads)
+                .map(|thread_id| {
+                    let m = m.clone();
+                    let barrier = barrier.clone();
+
+                    thread::spawn(move || {
+                        barrier.wait();
+
+                        for iter in 0..iterations {
+                            // Access different pages to force frame reuse
+                            let page_id =
+                                PageId::new(1 + (thread_id as u32 * iterations + iter) % 100)
+                                    .unwrap();
+
+                            match m.get(page_id) {
+                                Ok(page) => {
+                                    let expected = page_id.as_u32() as u8;
+                                    assert_eq!(page.contents(), &[expected; Page::DATA_SIZE]);
+                                }
+                                Err(e) => {
+                                    panic!("Unexpected error getting page {}: {:?}", page_id, e)
+                                }
+                            }
+                        }
+                    })
+                })
+                .collect();
+
+            for handle in handles {
+                handle.join().expect("thread panicked");
+            }
+        }
+    }
+
+    #[test]
+    fn test_concurrent_allocate_and_get() {
+        let snapshot = 1234;
+        let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
+
+        let mut opts = BufferPoolManagerOptions::new();
+        opts.num_frames(50);
+        let m = Arc::new(
+            BufferPoolManager::open_with_options(&opts, temp_file.path())
+                .expect("buffer pool creation failed"),
+        );
+
+        let num_threads = 8;
+        let pages_per_thread = 10;
+        let barrier = Arc::new(Barrier::new(num_threads));
+        let allocate_count = Arc::new(AtomicUsize::new(0));
+        let get_count = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|thread_id| {
+                let m = m.clone();
+                let barrier = barrier.clone();
+                let allocate_count = allocate_count.clone();
+                let get_count = get_count.clone();
+
+                thread::spawn(move || {
+                    barrier.wait();
+
+                    for i in 0..pages_per_thread {
+                        if i % 2 == 0 {
+                            // Allocate new pages
+                            match m.allocate(snapshot + thread_id as u64 * 1000 + i as u64) {
+                                Ok(mut page) => {
+                                    page.contents_mut().iter_mut().for_each(|byte| {
+                                        *byte = (thread_id as u8).wrapping_add(i as u8)
+                                    });
+                                    allocate_count.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(PageError::OutOfMemory) => {
+                                    // Expected when buffer pool is full
+                                }
+                                Err(e) => panic!("Unexpected error allocating page: {:?}", e),
+                            }
+                        } else {
+                            // Try to get existing pages
+                            let page_id =
+                                PageId::new(1 + (thread_id as u32 + i as u32) % 20).unwrap();
+                            match m.get(page_id) {
+                                Ok(_page) => {
+                                    get_count.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(PageError::PageNotFound(_)) => {
+                                    // Expected if page doesn't exist yet
+                                }
+                                Err(e) => {
+                                    panic!("Unexpected error getting page {}: {:?}", page_id, e)
+                                }
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("thread panicked");
+        }
+
+        println!(
+            "Allocated {} pages, got {} pages",
+            allocate_count.load(Ordering::Relaxed),
+            get_count.load(Ordering::Relaxed)
+        );
+    }
+
+
+    #[test]
+    fn test_frame_allocation_race_detection() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+        use std::collections::HashSet;
+        
+        let snapshot = 1234;
+        let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
+        
+        // Pre-populate file with some pages
+        {
+            let m = BufferPoolManager::open(temp_file.path())
+                .expect("buffer pool creation failed");
+            for i in 1..=30 {
+                let mut page = m.allocate(snapshot + i as u64).expect("page allocation failed");
+                page.contents_mut().iter_mut().for_each(|byte| *byte = i as u8);
+                drop(page);
+            }
+            m.sync().expect("sync failed");
+        }
+        
+        // Test with exactly the number of frames we'll try to load
+        {
+            let mut opts = BufferPoolManagerOptions::new();
+            opts.num_frames(15).page_count(30); // Limited frames, force conflicts
+            let m = Arc::new(
+                BufferPoolManager::open_with_options(&opts, temp_file.path())
+                    .expect("buffer pool creation failed")
+            );
+            
+            let num_threads = 15;
+            let barrier = Arc::new(Barrier::new(num_threads));
+            let used_frames = Arc::new(parking_lot::Mutex::new(HashSet::new()));
+            
+            let handles: Vec<_> = (0..num_threads)
+                .map(|thread_id| {
+                    let m = m.clone();
+                    let barrier = barrier.clone();
+                    let used_frames = used_frames.clone();
+                    
+                    thread::spawn(move || {
+                        barrier.wait();
+                        
+                        // Each thread tries to load a unique page
+                        let page_id = PageId::new(1 + thread_id as u32).unwrap();
+                        
+                        match m.get(page_id) {
+                            Ok(page) => {
+                                // Verify page content
+                                let expected = page_id.as_u32() as u8;
+                                assert_eq!(page.contents(), &[expected; Page::DATA_SIZE]);
+                                
+                                // Check frame uniqueness
+                                if let Some(frame_header) = m.page_table.get(&page_id) {
+                                    let frame_id = frame_header.frame_id;
+                                    let mut frames = used_frames.lock();
+                                    assert!(frames.insert(frame_id), 
+                                           "Frame {:?} was used by multiple pages! Race condition detected.", frame_id);
+                                }
+                            }
+                            Err(PageError::OutOfMemory) => {
+                                // This is expected when we run out of frames
+                            }
+                            Err(e) => panic!("Unexpected error getting page {}: {:?}", page_id, e),
+                        }
+                    })
+                })
+                .collect();
+            
+            for handle in handles {
+                handle.join().expect("thread panicked");
+            }
+        }
+    }
+    
+    #[test]
+    fn test_page_table_consistency_under_load() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+        
+        let snapshot = 1234;
+        let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
+        
+        // Pre-populate file
+        {
+            let m = BufferPoolManager::open(temp_file.path())
+                .expect("buffer pool creation failed");
+            for i in 1..=20 {
+                let mut page = m.allocate(snapshot + i as u64).expect("page allocation failed");
+                page.contents_mut().iter_mut().for_each(|byte| *byte = i as u8);
+                drop(page);
+            }
+            m.sync().expect("sync failed");
+        }
+        
+        {
+            let mut opts = BufferPoolManagerOptions::new();
+            opts.num_frames(10).page_count(20); // Force eviction
+            let m = Arc::new(
+                BufferPoolManager::open_with_options(&opts, temp_file.path())
+                    .expect("buffer pool creation failed")
+            );
+            
+            let num_threads = 10;
+            let iterations = 100;
+            let barrier = Arc::new(Barrier::new(num_threads));
+            
+            let handles: Vec<_> = (0..num_threads)
+                .map(|thread_id| {
+                    let m = m.clone();
+                    let barrier = barrier.clone();
+                    
+                    thread::spawn(move || {
+                        barrier.wait();
+                        
+                        for iter in 0..iterations {
+                            let page_id = PageId::new(1 + (thread_id + iter) % 20).unwrap();
+                            
+                            match m.get(page_id) {
+                                Ok(page) => {
+                                    // Verify the page table entry matches what we got
+                                    if let Some(frame_header) = m.page_table.get(&page_id) {
+                                        let frame = &m.frames[frame_header.frame_id.0 as usize];
+                                        let expected_ptr = frame.ptr as *const u8;
+                                        let actual_ptr = page.all_contents().as_ptr();
+                                        assert_eq!(expected_ptr, actual_ptr, 
+                                                  "Page table entry doesn't match returned page for page {}", page_id);
+                                    } else {
+                                        panic!("Page {} was returned but not found in page table", page_id);
+                                    }
+                                    
+                                    // Verify content
+                                    let expected = page_id.as_u32() as u8;
+                                    assert_eq!(page.contents(), &[expected; Page::DATA_SIZE]);
+                                }
+                                Err(e) => panic!("Unexpected error getting page {}: {:?}", page_id, e),
+                            }
+                        }
+                    })
+                })
+                .collect();
+            
+            for handle in handles {
+                handle.join().expect("thread panicked");
+            }
+        }
+    }
+    
+    #[test]
+    fn test_lru_consistency_with_concurrent_access() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+        
+        let snapshot = 1234;
+        let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
+        
+        // Pre-populate file
+        {
+            let m = BufferPoolManager::open(temp_file.path())
+                .expect("buffer pool creation failed");
+            for i in 1..=50 {
+                let mut page = m.allocate(snapshot + i as u64).expect("page allocation failed");
+                page.contents_mut().iter_mut().for_each(|byte| *byte = i as u8);
+                drop(page);
+            }
+            m.sync().expect("sync failed");
+        }
+        
+        {
+            let mut opts = BufferPoolManagerOptions::new();
+            opts.num_frames(5).page_count(50); // Very limited frames to force heavy eviction
+            let m = Arc::new(
+                BufferPoolManager::open_with_options(&opts, temp_file.path())
+                    .expect("buffer pool creation failed")
+            );
+            
+            let num_threads = 8;
+            let iterations = 50;
+            let barrier = Arc::new(Barrier::new(num_threads));
+            
+            let handles: Vec<_> = (0..num_threads)
+                .map(|thread_id| {
+                    let m = m.clone();
+                    let barrier = barrier.clone();
+                    
+                    thread::spawn(move || {
+                        barrier.wait();
+                        
+                        for iter in 0..iterations {
+                            // Access pattern that should trigger eviction
+                            let page_id = PageId::new(1 + (thread_id * 7 + iter) % 50).unwrap();
+                            
+                            match m.get(page_id) {
+                                Ok(page) => {
+                                    let expected = page_id.as_u32() as u8;
+                                    assert_eq!(page.contents(), &[expected; Page::DATA_SIZE]);
+                                    
+                                    // Verify that if page is in cache, LRU knows about it
+                                    // (This is harder to verify directly, but inconsistencies should show up as panics)
+                                }
+                                Err(e) => panic!("Unexpected error getting page {}: {:?}", page_id, e),
+                            }
+                        }
+                    })
+                })
+                .collect();
+            
+            for handle in handles {
+                handle.join().expect("thread panicked");
+            }
+            
+            // Final consistency check - all pages in page_table should be valid
+            let page_table_size = m.page_table.len();
+            assert!(page_table_size <= m.num_frames as usize, 
+                   "Page table has more entries ({}) than available frames ({})", 
+                   page_table_size, m.num_frames);
+        }
     }
 }
