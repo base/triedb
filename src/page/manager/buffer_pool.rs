@@ -139,8 +139,8 @@ impl BufferPoolManager {
     }
 
     fn next_page_id(&self) -> Option<(PageId, u32)> {
+        let mut old_count = self.page_count.load(Ordering::Relaxed);
         loop {
-            let old_count = self.page_count.load(Ordering::Relaxed);
             let new_count = old_count.checked_add(1)?;
             let page_id = PageId::try_from(new_count).ok()?;
             match self.page_count.compare_exchange_weak(
@@ -150,14 +150,14 @@ impl BufferPoolManager {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => return Some((page_id, new_count)),
-                Err(_) => continue, // Another thread modiled page_count, retry.
+                Err(val) => old_count = val, // Another thread modiled page_count, retry.
             }
         }
     }
 
     fn get_free_frame(&self) -> Option<FrameId> {
+        let mut original_free_frame_idx = self.original_free_frame_idx.load(Ordering::Relaxed);
         loop {
-            let original_free_frame_idx = self.original_free_frame_idx.load(Ordering::Relaxed);
             if original_free_frame_idx < self.num_frames {
                 match self.original_free_frame_idx.compare_exchange_weak(
                     original_free_frame_idx,
@@ -166,7 +166,7 @@ impl BufferPoolManager {
                     Ordering::Relaxed,
                 ) {
                     Ok(_) => return Some(FrameId(original_free_frame_idx)),
-                    Err(_) => continue, // Another thread modiled original_free_frame_idx, retry.
+                    Err(val) => original_free_frame_idx = val, /* Another thread modiled original_free_frame_idx, retry. */
                 }
             } else {
                 let evicted_page = self.lru_replacer.evict();
