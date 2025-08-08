@@ -776,10 +776,8 @@ mod tests {
         ];
 
         for path in &paths {
-            mutable.insert(
-                Nibbles::from_nibbles(path.clone()),
-                Some(OverlayValue::Account(account.clone())),
-            );
+            mutable
+                .insert(Nibbles::from_nibbles(*path), Some(OverlayValue::Account(account.clone())));
         }
 
         let frozen = mutable.freeze();
