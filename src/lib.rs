@@ -12,6 +12,7 @@
 pub mod account;
 pub mod context;
 pub mod database;
+pub mod executor;
 pub mod location;
 pub mod meta;
 pub mod metrics;
