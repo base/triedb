@@ -603,7 +603,8 @@ fn bench_state_root_with_overlay(c: &mut Criterion) {
     let total_addresses = BATCH_SIZE;
     let addresses: Vec<AddressPath> =
         (0..total_addresses).map(|_| generate_random_address(&mut rng)).collect();
-    // let storage_paths_values = generate_storage_paths_values(&addresses, total_storage_per_address);
+    // let storage_paths_values = generate_storage_paths_values(&addresses,
+    // total_storage_per_address);
 
     let mut account_overlay_mut = OverlayStateMut::new();
     addresses.iter().enumerate().for_each(|(i, addr)| {
@@ -635,7 +636,7 @@ fn bench_state_root_with_overlay(c: &mut Criterion) {
                 let db_path = dir.path().join(&file_name);
                 Database::open(db_path).unwrap()
             },
-    |db| {
+            |db| {
                 let tx = db.begin_ro().unwrap();
 
                 // Compute the root hash with the overlay
@@ -660,8 +661,9 @@ fn bench_state_root_with_overlay(c: &mut Criterion) {
     //                     let tx = db.begin_ro().unwrap();
 
     //                     // Compute the root hash with the overlay
-    //                     let _root_result = tx.compute_root_with_overlay(&storage_overlay).unwrap();
-                        
+    //                     let _root_result =
+    // tx.compute_root_with_overlay(&storage_overlay).unwrap();
+
     //                     tx.commit().unwrap();
     //                 }
     //             })
