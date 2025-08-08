@@ -25,7 +25,7 @@ impl TransactionManager {
     pub fn begin_rw(&mut self, snapshot_id: SnapshotId) -> Result<SnapshotId, TransactionError> {
         // only allow one writable transaction at a time
         if self.has_writer {
-            return Err(TransactionError);
+            return Err(TransactionError::Generic);
         }
         self.has_writer = true;
         self.open_txs.push(snapshot_id - 1);
