@@ -34,7 +34,7 @@ struct FrameHeader {
     pin_count: usize,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 struct FrameId(u32);
 
 pub struct BufferPoolManagerOptions {
@@ -383,9 +383,7 @@ mod tests {
 
     use super::*;
     use std::{
-        io::Seek,
-        sync::{atomic::AtomicUsize, Arc, Barrier},
-        thread,
+        collections::HashSet, io::Seek, sync::{atomic::AtomicUsize, Arc, Barrier}, thread
     };
 
     fn len(f: &File) -> usize {
@@ -606,16 +604,17 @@ mod tests {
 
     #[test]
     fn test_concurrent_get_same_page() {
+        // Test high contention race by having multiple threads accessing same pages with cache hits/misses
         let snapshot = 1234;
         let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
-
+        
         // Pre-populate the file with test data
         {
             let mut opts = BufferPoolManagerOptions::new();
             opts.num_frames(100); // Plenty of frames to avoid eviction
             let m = BufferPoolManager::open_with_options(&opts, temp_file.path())
                 .expect("buffer pool creation failed");
-
+            
             // Allocate and initialize test pages
             for i in 1..=50 {
                 let mut page = m.allocate(snapshot + i as u64).expect("page allocation failed");
@@ -624,56 +623,54 @@ mod tests {
             }
             m.sync().expect("sync failed");
         }
-
+        
         // Test concurrent access to the same pages
         {
             let mut opts = BufferPoolManagerOptions::new();
             opts.num_frames(100).page_count(50);
             let m = Arc::new(
                 BufferPoolManager::open_with_options(&opts, temp_file.path())
-                    .expect("buffer pool creation failed"),
+                    .expect("buffer pool creation failed")
             );
-
+            
             let num_threads = 16;
             let iterations = 100;
             let barrier = Arc::new(Barrier::new(num_threads));
-
+            
             let handles: Vec<_> = (0..num_threads)
                 .map(|thread_id| {
                     let m = m.clone();
                     let barrier = barrier.clone();
-
+                    
                     thread::spawn(move || {
                         barrier.wait(); // Synchronize start to maximize race conditions
-
+                        
                         for iter in 0..iterations {
                             // Mix of different pages, but with high probability of conflicts
-                            let page_id = PageId::new(1 + (iter as u32) % 10).unwrap();
-
+                            let page_id = PageId::new(1 + (iter as u32 + thread_id as u32) % 10).unwrap();
+                            
                             match m.get(page_id) {
                                 Ok(page) => {
                                     // Verify page contents are correct
                                     let expected = page_id.as_u32() as u8;
                                     assert_eq!(page.contents(), &[expected; Page::DATA_SIZE]);
-
+                                    
                                     // Hold the page for a random short time to increase contention
-                                    // if (thread_id + iter as usize) % 7 == 0 {
-                                    //     thread::sleep(std::time::Duration::from_micros(1));
-                                    // }
+                                    if (thread_id + iter) % 7 == 0 {
+                                        thread::sleep(std::time::Duration::from_micros(1));
+                                    }
                                 }
-                                Err(e) => {
-                                    panic!("Unexpected error getting page {}: {:?}", page_id, e)
-                                }
+                                Err(e) => panic!("Unexpected error getting page {}: {:?}", page_id, e),
                             }
                         }
                     })
                 })
                 .collect();
-
+            
             for handle in handles {
                 handle.join().expect("thread panicked");
             }
-
+            
             // Verify final state consistency
             for i in 1..=10 {
                 let page_id = PageId::new(i).unwrap();
@@ -685,6 +682,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_get_different_pages_limited_frames() {
+        // Test eviction under pressure race condition
         let snapshot = 1234;
         let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
 
@@ -749,6 +747,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_allocate_and_get() {
+        // Test allocation vs get race condition
         let snapshot = 1234;
         let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
 
@@ -825,10 +824,7 @@ mod tests {
 
     #[test]
     fn test_frame_allocation_race_detection() {
-        use std::sync::{Arc, Barrier};
-        use std::thread;
-        use std::collections::HashSet;
-        
+        // Test frame allocation race condition
         let snapshot = 1234;
         let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
         
@@ -900,9 +896,6 @@ mod tests {
     
     #[test]
     fn test_page_table_consistency_under_load() {
-        use std::sync::{Arc, Barrier};
-        use std::thread;
-        
         let snapshot = 1234;
         let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
         
@@ -939,7 +932,7 @@ mod tests {
                         barrier.wait();
                         
                         for iter in 0..iterations {
-                            let page_id = PageId::new(1 + (thread_id + iter) % 20).unwrap();
+                            let page_id = PageId::new(1 + (thread_id as u32 + iter as u32) % 20).unwrap();
                             
                             match m.get(page_id) {
                                 Ok(page) => {
@@ -973,9 +966,6 @@ mod tests {
     
     #[test]
     fn test_lru_consistency_with_concurrent_access() {
-        use std::sync::{Arc, Barrier};
-        use std::thread;
-        
         let snapshot = 1234;
         let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
         
@@ -1013,7 +1003,7 @@ mod tests {
                         
                         for iter in 0..iterations {
                             // Access pattern that should trigger eviction
-                            let page_id = PageId::new(1 + (thread_id * 7 + iter) % 50).unwrap();
+                            let page_id = PageId::new(1 + (thread_id as u32 * 7 + iter as u32) % 50).unwrap();
                             
                             match m.get(page_id) {
                                 Ok(page) => {
