@@ -43,3 +43,10 @@ Current stats, all presented with minimum, maximum, and mean:
   * Node size in bytes
 
 
+### Consistency Check ###
+Traverses the trie starting at both root pages, determines which pages are reachable, and flags any unreachable pages or orphaned reachable pages.  
+`cargo run consistency-check -d <path to database> [-o <output path>]`
+
+
+
+
