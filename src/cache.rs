@@ -1,9 +1,11 @@
 use crate::{page::PageId, snapshot::SnapshotId};
 use alloy_trie::Nibbles;
 use std::{
+    cell::RefCell,
     collections::HashMap,
     num::NonZeroUsize,
-    sync::{Arc, Mutex, Weak},
+    rc::{Rc, Weak as RcWeak},
+    sync::{Arc, Mutex},
 };
 
 /// Represents the location of a cached entry. Typically would be wrapped with `Option` to
@@ -20,8 +22,8 @@ struct Entry {
     snapshot_id: SnapshotId,
     key: Nibbles,
     value: Option<(PageId, u8)>,
-    lru_prev: Option<Weak<Mutex<Entry>>>,
-    lru_next: Option<Arc<Mutex<Entry>>>,
+    lru_prev: Option<RcWeak<RefCell<Entry>>>,
+    lru_next: Option<Rc<RefCell<Entry>>>,
 }
 
 impl Entry {
@@ -41,8 +43,8 @@ struct VersionedLru {
     entries: HashMap<Nibbles, Vec<Entry>>,
 
     // Keep track of the head and tail
-    head: Option<Arc<Mutex<Entry>>>,
-    tail: Option<Weak<Mutex<Entry>>>,
+    head: Option<Rc<RefCell<Entry>>>,
+    tail: Option<RcWeak<RefCell<Entry>>>,
     capacity: usize,
     size: usize,
 
@@ -110,7 +112,7 @@ impl VersionedLru {
         } else {
             // new entry
             versions.insert(pos, entry.clone());
-            self.add_to_front(Arc::new(Mutex::new(entry.clone())));
+            self.add_to_front(Rc::new(RefCell::new(entry.clone())));
             self.size += 1;
         }
         self.purge_outdated_entries(&key);
@@ -119,7 +121,7 @@ impl VersionedLru {
         if self.size > self.capacity && self.tail.is_some() {
             if let Some(weak) = &self.tail {
                 if let Some(tail_entry) = weak.upgrade() {
-                    let tail_key = tail_entry.lock().unwrap().key.clone();
+                    let tail_key = tail_entry.borrow().key.clone();
 
                     // Find oldest sibling (first entry in sorted versions list)
                     if let Some(versions) = self.entries.get(&tail_key) {
@@ -153,59 +155,54 @@ impl VersionedLru {
     //////////////////////////////
     //// Helpers
     //////////////////////////////
-    fn get_entry(&self, key: &Nibbles, snapshot_id: SnapshotId) -> Option<Arc<Mutex<Entry>>> {
+    fn get_entry(&self, key: &Nibbles, snapshot_id: SnapshotId) -> Option<Rc<RefCell<Entry>>> {
         let mut current = self.head.clone();
         while let Some(entry) = current {
-            let guard = entry.lock().unwrap();
-            if &guard.key == key && guard.snapshot_id == snapshot_id {
-                drop(guard);
+            if &entry.borrow().key == key && entry.borrow().snapshot_id == snapshot_id {
                 return Some(entry);
             }
-            current = guard.lru_next.clone();
+            current = entry.borrow().lru_next.clone();
         }
         None
     }
 
     /// Update head pointer and `Entry`'s pointers
-    fn add_to_front(&mut self, entry: Arc<Mutex<Entry>>) {
-        let mut guard = entry.lock().unwrap();
-        guard.lru_prev = None;
-        guard.lru_next = self.head.clone();
-        drop(guard);
+    fn add_to_front(&mut self, entry: Rc<RefCell<Entry>>) {
+        entry.borrow_mut().lru_prev = None;
+        entry.borrow_mut().lru_next = self.head.clone();
 
         if let Some(old_head) = &self.head {
-            old_head.lock().unwrap().lru_prev = Some(Arc::downgrade(&entry));
+            old_head.borrow_mut().lru_prev = Some(Rc::downgrade(&entry));
         } else {
-            self.tail = Some(Arc::downgrade(&entry));
+            self.tail = Some(Rc::downgrade(&entry));
         }
 
         self.head = Some(entry);
     }
 
     /// Remove an entry from LRU
-    fn remove(&mut self, entry: Arc<Mutex<Entry>>) {
+    fn remove(&mut self, entry: Rc<RefCell<Entry>>) {
         let (prev, next) = {
-            let entry_guard = entry.lock().unwrap();
+            let entry_guard = entry.borrow();
             (entry_guard.lru_prev.clone(), entry_guard.lru_next.clone())
         };
 
         if let Some(weak) = &prev {
             if let Some(prev_entry) = weak.upgrade() {
-                prev_entry.lock().unwrap().lru_next = next.clone();
+                prev_entry.borrow_mut().lru_next = next.clone();
             }
         } else {
             self.head = next.clone();
         }
 
         if let Some(next_entry) = &next {
-            next_entry.lock().unwrap().lru_prev = prev.clone();
+            next_entry.borrow_mut().lru_prev = prev.clone();
         } else {
             self.tail = prev;
         }
 
-        let mut guard = entry.lock().unwrap();
-        guard.lru_prev = None;
-        guard.lru_next = None;
+        entry.borrow_mut().lru_prev = None;
+        entry.borrow_mut().lru_next = None;
     }
 
     /// Purging is done lazily in `get` and `set` methods
@@ -226,7 +223,7 @@ impl VersionedLru {
     fn move_to_front(&mut self, key: &Nibbles, snapshot_id: SnapshotId) {
         if let Some(lru_entry) = self.get_entry(key, snapshot_id) {
             if let Some(head) = &self.head {
-                if Arc::ptr_eq(head, &lru_entry) {
+                if Rc::ptr_eq(head, &lru_entry) {
                     return;
                 }
             }
@@ -236,8 +233,12 @@ impl VersionedLru {
     }
 }
 
+// VersionedLru is only accessed through the Mutex
+unsafe impl Send for Entry {}
+unsafe impl Send for VersionedLru {}
+
 /// Holds the shared versioned LRU cache.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CacheManager {
     cache: Arc<Mutex<VersionedLru>>,
 }
@@ -283,15 +284,14 @@ mod tests {
     #[test]
     fn test_cache_reading_and_writing() {
         let cache = CacheManager::new(NonZeroUsize::new(10).unwrap());
-        let shared_cache = Arc::new(cache);
 
         // first writer
-        shared_cache.insert(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11)));
-        shared_cache.insert(100, Nibbles::from_nibbles([2]), Some((PageId::new(12).unwrap(), 13)));
-        shared_cache.insert(200, Nibbles::from_nibbles([1]), Some((PageId::new(20).unwrap(), 21)));
+        cache.insert(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11)));
+        cache.insert(200, Nibbles::from_nibbles([1]), Some((PageId::new(20).unwrap(), 21)));
+        cache.insert(100, Nibbles::from_nibbles([2]), Some((PageId::new(12).unwrap(), 13)));
 
         // have some concurrent readers
-        let cache_reader1 = Arc::clone(&shared_cache);
+        let cache_reader1 = cache.clone();
         let reader1 = thread::spawn(move || {
             let val1 = cache_reader1.get(100, &Nibbles::from_nibbles([1]));
             let val2 = cache_reader1.get(200, &Nibbles::from_nibbles([1]));
@@ -300,7 +300,7 @@ mod tests {
             thread::sleep(Duration::from_millis(50));
         });
 
-        let cache_reader2 = Arc::clone(&shared_cache);
+        let cache_reader2 = cache.clone();
         let reader2 = thread::spawn(move || {
             let val = cache_reader2.get(100, &Nibbles::from_nibbles([2]));
             assert_eq!(val, Some(CachedLocation::GlobalPosition(PageId::new(12).unwrap(), 13)));
@@ -308,7 +308,7 @@ mod tests {
         });
 
         // writer2
-        let cache_writer2 = Arc::clone(&shared_cache);
+        let cache_writer2 = cache.clone();
         let writer2 = thread::spawn(move || {
             cache_writer2.insert(
                 101,
@@ -327,103 +327,97 @@ mod tests {
         writer2.join().unwrap();
 
         assert_eq!(
-            shared_cache.get(100, &Nibbles::from_nibbles([1])),
+            cache.get(100, &Nibbles::from_nibbles([1])),
             Some(CachedLocation::GlobalPosition(PageId::new(10).unwrap(), 11))
         );
         assert_eq!(
-            shared_cache.get(100, &Nibbles::from_nibbles([2])),
+            cache.get(100, &Nibbles::from_nibbles([2])),
             Some(CachedLocation::GlobalPosition(PageId::new(12).unwrap(), 13))
         );
         assert_eq!(
-            shared_cache.get(101, &Nibbles::from_nibbles([3])),
+            cache.get(101, &Nibbles::from_nibbles([3])),
             Some(CachedLocation::GlobalPosition(PageId::new(14).unwrap(), 15))
         );
         assert_eq!(
-            shared_cache.get(200, &Nibbles::from_nibbles([1])),
+            cache.get(200, &Nibbles::from_nibbles([1])),
             Some(CachedLocation::GlobalPosition(PageId::new(20).unwrap(), 21))
         );
         assert_eq!(
-            shared_cache.get(300, &Nibbles::from_nibbles([1])),
+            cache.get(300, &Nibbles::from_nibbles([1])),
             Some(CachedLocation::GlobalPosition(PageId::new(30).unwrap(), 31))
         );
-        assert_eq!(shared_cache.get(300, &Nibbles::from_nibbles([4])), None);
+        assert_eq!(cache.get(300, &Nibbles::from_nibbles([4])), None);
     }
 
     #[test]
     fn test_getting_different_snapshots() {
         let cache = CacheManager::new(NonZeroUsize::new(10).unwrap());
-        let shared_cache = Arc::new(cache);
 
-        shared_cache.insert(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11)));
-        shared_cache.insert(200, Nibbles::from_nibbles([1]), Some((PageId::new(20).unwrap(), 21)));
-        shared_cache.insert(300, Nibbles::from_nibbles([1]), Some((PageId::new(30).unwrap(), 31)));
+        cache.insert(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11)));
+        cache.insert(300, Nibbles::from_nibbles([1]), Some((PageId::new(30).unwrap(), 31)));
+        cache.insert(200, Nibbles::from_nibbles([1]), Some((PageId::new(20).unwrap(), 21)));
 
         // exact same snapshots
         assert_eq!(
-            shared_cache.get(100, &Nibbles::from_nibbles([1])),
+            cache.get(100, &Nibbles::from_nibbles([1])),
             Some(CachedLocation::GlobalPosition(PageId::new(10).unwrap(), 11))
         );
         assert_eq!(
-            shared_cache.get(200, &Nibbles::from_nibbles([1])),
+            cache.get(200, &Nibbles::from_nibbles([1])),
             Some(CachedLocation::GlobalPosition(PageId::new(20).unwrap(), 21))
         );
         assert_eq!(
-            shared_cache.get(300, &Nibbles::from_nibbles([1])),
+            cache.get(300, &Nibbles::from_nibbles([1])),
             Some(CachedLocation::GlobalPosition(PageId::new(30).unwrap(), 31))
         );
 
         // different snapshots, but it should find the latest version <= target snapshot
         assert_eq!(
-            shared_cache.get(150, &Nibbles::from_nibbles([1])),
+            cache.get(150, &Nibbles::from_nibbles([1])),
             Some(CachedLocation::GlobalPosition(PageId::new(10).unwrap(), 11))
         );
         assert_eq!(
-            shared_cache.get(250, &Nibbles::from_nibbles([1])),
+            cache.get(250, &Nibbles::from_nibbles([1])),
             Some(CachedLocation::GlobalPosition(PageId::new(20).unwrap(), 21))
         );
 
         // snapshot too small, since snapshot < earliest
-        assert_eq!(shared_cache.get(50, &Nibbles::from_nibbles([1])), None);
+        assert_eq!(cache.get(50, &Nibbles::from_nibbles([1])), None);
     }
 
     #[test]
     fn test_invalidating_entries() {
         let cache = CacheManager::new(NonZeroUsize::new(10).unwrap());
-        let shared_cache = Arc::new(cache);
 
         // insert a value
-        shared_cache.insert(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11)));
+        cache.insert(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11)));
 
         // invalidate it
-        shared_cache.insert(100, Nibbles::from_nibbles([1]), None);
+        cache.insert(100, Nibbles::from_nibbles([1]), None);
 
         // try reading it - should return DeletedEntry (tombstone) not None
-        assert_eq!(
-            shared_cache.get(100, &Nibbles::from_nibbles([1])),
-            Some(CachedLocation::DeletedEntry)
-        );
+        assert_eq!(cache.get(100, &Nibbles::from_nibbles([1])), Some(CachedLocation::DeletedEntry));
     }
 
     #[test]
     fn test_min_snapshot_purging() {
         let cache = CacheManager::new(NonZeroUsize::new(10).unwrap());
-        let shared_cache = Arc::new(cache);
 
         // insert entries with different snapshots
-        shared_cache.insert(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11)));
-        shared_cache.insert(200, Nibbles::from_nibbles([1]), Some((PageId::new(20).unwrap(), 21)));
-        shared_cache.insert(300, Nibbles::from_nibbles([1]), Some((PageId::new(30).unwrap(), 31)));
+        cache.insert(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11)));
+        cache.insert(300, Nibbles::from_nibbles([1]), Some((PageId::new(30).unwrap(), 31)));
+        cache.insert(200, Nibbles::from_nibbles([1]), Some((PageId::new(20).unwrap(), 21)));
 
         // set minimum snapshot ID to 250
-        shared_cache.set_min_snapshot_id(250);
+        cache.set_min_snapshot_id(250);
 
         // purged the entries below min snapshot
-        assert_eq!(shared_cache.get(100, &Nibbles::from_nibbles([1])), None);
-        assert_eq!(shared_cache.get(200, &Nibbles::from_nibbles([1])), None);
+        assert_eq!(cache.get(100, &Nibbles::from_nibbles([1])), None);
+        assert_eq!(cache.get(200, &Nibbles::from_nibbles([1])), None);
 
         // only keep entries above min snapshot
         assert_eq!(
-            shared_cache.get(300, &Nibbles::from_nibbles([1])),
+            cache.get(300, &Nibbles::from_nibbles([1])),
             Some(CachedLocation::GlobalPosition(PageId::new(30).unwrap(), 31))
         );
     }
@@ -431,37 +425,36 @@ mod tests {
     #[test]
     fn test_oldest_sibling_eviction() {
         let cache = CacheManager::new(NonZeroUsize::new(4).unwrap());
-        let shared_cache = Arc::new(cache);
 
         // multiple versions of key [1] out of order to ensure the oldest version is still evicted
-        shared_cache.insert(200, Nibbles::from_nibbles([1]), Some((PageId::new(20).unwrap(), 21)));
-        shared_cache.insert(300, Nibbles::from_nibbles([1]), Some((PageId::new(30).unwrap(), 31)));
-        shared_cache.insert(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11))); // multiple versions of key [1] out of order to ensure the oldest version is still evicted
+        cache.insert(200, Nibbles::from_nibbles([1]), Some((PageId::new(20).unwrap(), 21)));
+        cache.insert(300, Nibbles::from_nibbles([1]), Some((PageId::new(30).unwrap(), 31)));
+        cache.insert(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11))); // multiple versions of key [1] out of order to ensure the oldest version is still evicted
 
         // one entry for key [2]
-        shared_cache.insert(150, Nibbles::from_nibbles([2]), Some((PageId::new(15).unwrap(), 16)));
+        cache.insert(150, Nibbles::from_nibbles([2]), Some((PageId::new(15).unwrap(), 16)));
 
         // since the cache is full, should evict oldest sibling of tail entry
-        shared_cache.insert(400, Nibbles::from_nibbles([3]), Some((PageId::new(40).unwrap(), 41)));
+        cache.insert(400, Nibbles::from_nibbles([3]), Some((PageId::new(40).unwrap(), 41)));
 
         // snapshot 100 should be evicted
-        assert_eq!(shared_cache.get(100, &Nibbles::from_nibbles([1])), None);
+        assert_eq!(cache.get(100, &Nibbles::from_nibbles([1])), None);
 
         // rest should exist
         assert_eq!(
-            shared_cache.get(200, &Nibbles::from_nibbles([1])),
+            cache.get(200, &Nibbles::from_nibbles([1])),
             Some(CachedLocation::GlobalPosition(PageId::new(20).unwrap(), 21))
         );
         assert_eq!(
-            shared_cache.get(300, &Nibbles::from_nibbles([1])),
+            cache.get(300, &Nibbles::from_nibbles([1])),
             Some(CachedLocation::GlobalPosition(PageId::new(30).unwrap(), 31))
         );
         assert_eq!(
-            shared_cache.get(150, &Nibbles::from_nibbles([2])),
+            cache.get(150, &Nibbles::from_nibbles([2])),
             Some(CachedLocation::GlobalPosition(PageId::new(15).unwrap(), 16))
         );
         assert_eq!(
-            shared_cache.get(400, &Nibbles::from_nibbles([3])),
+            cache.get(400, &Nibbles::from_nibbles([3])),
             Some(CachedLocation::GlobalPosition(PageId::new(40).unwrap(), 41))
         );
     }
@@ -469,28 +462,27 @@ mod tests {
     #[test]
     fn test_temporal_coherence() {
         let cache = CacheManager::new(NonZeroUsize::new(2).unwrap());
-        let shared_cache = Arc::new(cache);
 
         // insert entries
-        shared_cache.insert(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11)));
-        shared_cache.insert(200, Nibbles::from_nibbles([2]), Some((PageId::new(20).unwrap(), 21)));
+        cache.insert(100, Nibbles::from_nibbles([1]), Some((PageId::new(10).unwrap(), 11)));
+        cache.insert(200, Nibbles::from_nibbles([2]), Some((PageId::new(20).unwrap(), 21)));
 
         // this should evict snapshot 100, setting max_evicted_version to 100
-        shared_cache.insert(300, Nibbles::from_nibbles([3]), Some((PageId::new(30).unwrap(), 31)));
+        cache.insert(300, Nibbles::from_nibbles([3]), Some((PageId::new(30).unwrap(), 31)));
 
         // this should be rejected since it's older than max_evicted_version
-        shared_cache.insert(50, Nibbles::from_nibbles([4]), Some((PageId::new(5).unwrap(), 6)));
+        cache.insert(50, Nibbles::from_nibbles([4]), Some((PageId::new(5).unwrap(), 6)));
 
         // should not be retrievable
-        assert_eq!(shared_cache.get(50, &Nibbles::from_nibbles([4])), None);
+        assert_eq!(cache.get(50, &Nibbles::from_nibbles([4])), None);
 
         // rest should still work
         assert_eq!(
-            shared_cache.get(200, &Nibbles::from_nibbles([2])),
+            cache.get(200, &Nibbles::from_nibbles([2])),
             Some(CachedLocation::GlobalPosition(PageId::new(20).unwrap(), 21))
         );
         assert_eq!(
-            shared_cache.get(300, &Nibbles::from_nibbles([3])),
+            cache.get(300, &Nibbles::from_nibbles([3])),
             Some(CachedLocation::GlobalPosition(PageId::new(30).unwrap(), 31))
         );
     }
