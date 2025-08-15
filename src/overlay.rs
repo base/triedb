@@ -1,7 +1,7 @@
 use crate::{account::Account, node::TrieValue};
 use alloy_primitives::{StorageValue, B256, U256};
 use alloy_trie::Nibbles;
-use std::sync::Arc;
+use std::{cmp::min, sync::Arc};
 
 #[derive(Debug, Clone)]
 pub enum OverlayValue {
@@ -251,7 +251,7 @@ impl OverlayState {
                 true
             } else {
                 let adjusted_path = &stored_path[self.prefix_offset..];
-                &adjusted_path[..prefix.len()] <= prefix
+                &adjusted_path[..min(adjusted_path.len(), prefix.len())] <= prefix
             }
         })
     }
