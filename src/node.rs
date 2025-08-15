@@ -3,7 +3,7 @@ use crate::{
     pointer::Pointer,
     storage::value::{self, Value},
 };
-use alloy_primitives::{hex, StorageValue, B256, U256};
+use alloy_primitives::{StorageValue, B256, U256};
 use alloy_rlp::{
     decode_exact, encode_fixed_size, length_of_length, BufMut, Encodable, Header, MaxEncodedLen,
     EMPTY_STRING_CODE,
@@ -16,11 +16,6 @@ use arrayvec::ArrayVec;
 use proptest::{arbitrary, strategy, strategy::Strategy};
 use proptest_derive::Arbitrary;
 use std::cmp::{max, min};
-
-// This is equivalent to RlpNode::word_rlp(&EMPTY_ROOT_HASH), and is used to encode the storage root
-// of an account with no storage.
-const EMPTY_ROOT_RLP: [u8; 33] =
-    hex!("0xa056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");
 
 const MAX_PREFIX_LENGTH: usize = 64;
 

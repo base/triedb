@@ -8,13 +8,10 @@ use crate::{
     node::TrieValue,
     overlay::OverlayState,
     path::{AddressPath, StoragePath},
-    storage::proofs::AccountProof,
+    storage::{overlay_root::OverlayedRoot, proofs::AccountProof},
 };
-use alloy_primitives::{
-    map::{B256Map, HashMap},
-    StorageValue, B256,
-};
-use alloy_trie::{BranchNodeCompact, Nibbles};
+use alloy_primitives::{map::HashMap, StorageValue, B256};
+use alloy_trie::Nibbles;
 pub use error::TransactionError;
 pub use manager::TransactionManager;
 use sealed::sealed;
@@ -91,10 +88,7 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
     pub fn compute_root_with_overlay(
         &self,
         overlay_state: OverlayState,
-    ) -> Result<
-        (B256, HashMap<Nibbles, BranchNodeCompact>, B256Map<HashMap<Nibbles, BranchNodeCompact>>),
-        TransactionError,
-    > {
+    ) -> Result<OverlayedRoot, TransactionError> {
         self.database
             .storage_engine
             .compute_state_root_with_overlay_iterative(&self.context, overlay_state)
@@ -207,7 +201,6 @@ impl<DB: Deref<Target = Database>> Transaction<DB, RW> {
 
 impl<DB: Deref<Target = Database>> Transaction<DB, RO> {
     pub fn commit(mut self) -> Result<(), TransactionError> {
-        println!("transaction_metrics: {:?}", self.context.transaction_metrics);
         let mut transaction_manager = self.database.transaction_manager.lock();
         transaction_manager.remove_tx(self.context.snapshot_id, false);
 
