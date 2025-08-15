@@ -148,7 +148,7 @@ impl OverlayState {
 
     #[inline]
     pub fn first(&self) -> Option<(&[u8], &Option<OverlayValue>)> {
-        if self.len() == 0 {
+        if self.is_empty() {
             None
         } else {
             let (path, value) = &self.data[self.start_idx];

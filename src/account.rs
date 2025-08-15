@@ -26,7 +26,7 @@ impl Account {
 /// case. An account is encoded as a list of 4 elements, with 3 of these represnting 32 byte values
 /// and the nonce being an 8 byte value. Each element has 1 extra byte of encoding overhead.
 /// The list also has 2 bytes of encoding overhead. The total length is `2 + 3*33 + 9 = 110`.
-const MAX_RLP_ENCODED_LEN: usize = 2 + 3*33 + 9;
+const MAX_RLP_ENCODED_LEN: usize = 2 + 3 * 33 + 9;
 
 unsafe impl MaxEncodedLen<MAX_RLP_ENCODED_LEN> for Account {}
 
