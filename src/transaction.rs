@@ -90,14 +90,14 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
 
     pub fn compute_root_with_overlay(
         &self,
-        overlay_state: &OverlayState,
+        overlay_state: OverlayState,
     ) -> Result<
         (B256, HashMap<Nibbles, BranchNodeCompact>, B256Map<HashMap<Nibbles, BranchNodeCompact>>),
         TransactionError,
     > {
         self.database
             .storage_engine
-            .compute_root_with_overlay(&self.context, overlay_state)
+            .compute_state_root_with_overlay_iterative(&self.context, overlay_state)
             .map_err(|_| TransactionError::Generic)
     }
 
