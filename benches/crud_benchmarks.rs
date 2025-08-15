@@ -20,7 +20,7 @@ use alloy_primitives::{StorageKey, StorageValue, U256};
 use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::prelude::*;
-use std::{fs, hint::black_box, io, path::Path, sync::Arc, thread, time::Duration};
+use std::{fs, io, path::Path, sync::Arc, thread, time::Duration};
 use tempdir::TempDir;
 use triedb::{
     account::Account,
@@ -630,30 +630,6 @@ fn bench_state_root_with_overlay(c: &mut Criterion) {
             },
         );
     });
-
-    // group.bench_function(BenchmarkId::new("state_root_with_storage_overlay", BATCH_SIZE), |b| {
-    //     b.iter_with_setup(
-    //         || {
-    //             let dir = TempDir::new("triedb_bench_state_root_with_storage_overlay").unwrap();
-    //             copy_files(&base_dir, dir.path()).unwrap();
-    //             let db_path = dir.path().join(&file_name);
-    //             Database::open(db_path).unwrap()
-    //         },
-    //         |db| {
-    //             black_box({
-    //                 for _ in 0..100 {
-    //                     let tx = db.begin_ro().unwrap();
-
-    //                     // Compute the root hash with the overlay
-    //                     let _root_result =
-    // tx.compute_root_with_overlay(&storage_overlay).unwrap();
-
-    //                     tx.commit().unwrap();
-    //                 }
-    //             })
-    //         },
-    //     );
-    // });
 
     group.finish();
 }
