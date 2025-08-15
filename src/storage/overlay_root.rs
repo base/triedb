@@ -54,7 +54,7 @@ impl<'a> TraversalStack<'a> {
         self.push(TriePosition::Pointer(path, page, pointer, can_add_by_hash), overlay);
     }
 
-    fn push_none(&mut self, overlay: OverlayState) {
+    fn push_overlay(&mut self, overlay: OverlayState) {
         self.push(TriePosition::None, overlay);
     }
 
@@ -187,7 +187,7 @@ impl StorageEngine {
                         storage_branch_updates,
                     );
                     // Defer the post_overlay to be processed after the node is traversed
-                    stack.push_none(post_overlay);
+                    stack.push_overlay(post_overlay);
 
                     if pre_overlay.contains_prefix_of(&path) {
                         // A prefix of the node has already been processed, so we can skip the rest
@@ -308,7 +308,7 @@ impl StorageEngine {
                         // nothing here to add
                     } else {
                         // we have a nonconflicting overlay, add all of it to the hash builder
-                        stack.push_none(child_overlay);
+                        stack.push_overlay(child_overlay);
                     }
                 }
             }
@@ -637,8 +637,8 @@ mod tests {
             (output.root, output.updated_branch_nodes, output.storage_branch_updates);
         assert_ne!(overlay_root, initial_root, "Overlay should not match initial root");
 
-        println!("Account branch updates: {:?}", account_branch_updates);
-        println!("Storage branch updates: {:?}", storage_branch_updates);
+        // println!("Account branch updates: {:?}", account_branch_updates);
+        // println!("Storage branch updates: {:?}", storage_branch_updates);
 
         let mut overlay_mut_with_branches = OverlayStateMut::new();
 
