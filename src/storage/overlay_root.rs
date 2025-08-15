@@ -70,7 +70,7 @@ impl StorageEngine {
         // println!("Updated branch nodes: {:?}", updated_branch_nodes);
 
         let root = hash_builder.root(); // This will clear the hash builder
-                                        // println!("Root: {:?}", root);
+        println!("Root: {:?}", root);
 
         println!("Stats: {:?}", stats);
         Ok((root, updated_branch_nodes, updated_storage_branch_nodes))
@@ -171,7 +171,7 @@ impl StorageEngine {
             NodeKind::Branch { .. } => {
                 // Filter the overlay based on the path_prefix
                 let (pre_overlay, with_prefix, post_overlay) =
-                    overlay.sub_slice_by_prefix(path_prefix);
+                    overlay.sub_slice_by_prefix(&path_prefix);
                 if with_prefix.is_empty() {
                     self.process_nonoverlapping_overlay_state(
                         context,
@@ -213,7 +213,7 @@ impl StorageEngine {
                             updated_storage_branch_nodes,
                         )?;
                     }
-                    Ok(())
+                    return Ok(());
                 } else {
                     let (pre_overlay, with_prefix, post_overlay) =
                         overlay.sub_slice_by_prefix(&full_path);
@@ -242,7 +242,7 @@ impl StorageEngine {
                         stats,
                         updated_storage_branch_nodes,
                     )?;
-                    Ok(())
+                    return Ok(());
                 }
             }
             NodeKind::AccountLeaf { .. } | NodeKind::StorageLeaf { .. } => {
@@ -282,7 +282,7 @@ impl StorageEngine {
                     stats,
                     updated_storage_branch_nodes,
                 )?;
-                Ok(())
+                return Ok(());
             }
         }
     }
@@ -295,10 +295,10 @@ impl StorageEngine {
         stats: &mut Stats,
         updated_storage_branch_nodes: &mut B256Map<HashMap<Nibbles, BranchNodeCompact>>,
     ) -> Result<(), Error> {
-        let mut last_processed_path: Option<Nibbles> = None;
+        let mut last_processed_path: Option<&[u8]> = None;
         for (path, value) in overlay.iter() {
             if let Some(ref last_processed_path) = last_processed_path {
-                if path.has_prefix(last_processed_path) {
+                if path.starts_with(last_processed_path) {
                     // skip over all descendants of a processed path
                     continue;
                 }
@@ -319,13 +319,13 @@ impl StorageEngine {
                 Some(OverlayValue::Storage(storage_value)) => {
                     let rlp_encoded = self.encode_storage(storage_value)?;
                     println!("Adding overlayed storage leaf: {:?}", path);
-                    hash_builder.add_leaf(path.clone(), &rlp_encoded);
+                    hash_builder.add_leaf(Nibbles::from_nibbles(path), &rlp_encoded);
                     stats.storage.overlay_leaves += 1;
                     last_processed_path = Some(path);
                 }
                 Some(OverlayValue::Hash(hash)) => {
                     println!("Adding overlayed branch: {:?}", path);
-                    hash_builder.add_branch(path.clone(), *hash, false);
+                    hash_builder.add_branch(Nibbles::from_nibbles(path), *hash, false);
                     stats.account.overlay_branch_nodes += 1;
                     last_processed_path = Some(path);
                 }
@@ -421,7 +421,7 @@ impl StorageEngine {
             // Create sub-slice of overlay for this child's subtree
             let child_overlay = overlay.sub_slice_for_prefix(&child_path);
 
-            children[i as usize] = (child_path, child_overlay, node.child(i).unwrap());
+            children[i as usize] = (child_path, child_overlay, node.child(i as u8).unwrap());
         }
 
         // This conservatively counts the minimum number of children that will exist. It may
@@ -448,10 +448,10 @@ impl StorageEngine {
             // many lookups, hashes, and page reads.
             for (child_path, child_overlay, child_pointer) in children.iter() {
                 if let Some((path, _)) = child_overlay.get(0) {
-                    if &path == child_path {
+                    if path == child_path.as_slice() {
                         self.process_nonoverlapping_overlay_state(
                             context,
-                            child_overlay,
+                            &child_overlay,
                             hash_builder,
                             stats,
                             updated_storage_branch_nodes,
@@ -473,11 +473,11 @@ impl StorageEngine {
                             // Child is in the same page
                             self.traverse_node_with_overlay(
                                 context,
-                                child_overlay,
+                                &child_overlay,
                                 hash_builder,
                                 slotted_page,
                                 child_cell_index,
-                                child_path,
+                                &child_path,
                                 child_hash,
                                 stats,
                                 updated_storage_branch_nodes,
@@ -486,10 +486,10 @@ impl StorageEngine {
                             // Child is in a different page
                             self.traverse_page_with_overlay(
                                 context,
-                                child_overlay,
+                                &child_overlay,
                                 hash_builder,
                                 child_page_id,
-                                child_path,
+                                &child_path,
                                 child_hash,
                                 stats,
                                 updated_storage_branch_nodes,
@@ -500,7 +500,7 @@ impl StorageEngine {
                     // No child exists on disk, process any matching overlay changes
                     self.process_nonoverlapping_overlay_state(
                         context,
-                        child_overlay,
+                        &child_overlay,
                         hash_builder,
                         stats,
                         updated_storage_branch_nodes,
@@ -514,12 +514,12 @@ impl StorageEngine {
         // We need to traverse and add the children directly in order to be safe.
         for (child_path, child_overlay, child_pointer) in children.iter() {
             if let Some((path, _)) = child_overlay.get(0) {
-                if &path == child_path {
+                if path == child_path.as_slice() {
                     // Direct overlay - the overlay path exactly matches this node's path
                     // No need to traverse the child
                     self.process_nonoverlapping_overlay_state(
                         context,
-                        child_overlay,
+                        &child_overlay,
                         hash_builder,
                         stats,
                         updated_storage_branch_nodes,
@@ -537,11 +537,11 @@ impl StorageEngine {
                     // Child is in the same page
                     self.traverse_node_with_overlay(
                         context,
-                        child_overlay,
+                        &child_overlay,
                         hash_builder,
                         slotted_page,
                         child_cell_index,
-                        child_path,
+                        &child_path,
                         child_hash,
                         stats,
                         updated_storage_branch_nodes,
@@ -550,10 +550,10 @@ impl StorageEngine {
                     // Child is in a different page
                     self.traverse_page_with_overlay(
                         context,
-                        child_overlay,
+                        &child_overlay,
                         hash_builder,
                         child_page_id,
-                        child_path,
+                        &child_path,
                         child_hash,
                         stats,
                         updated_storage_branch_nodes,
@@ -563,7 +563,7 @@ impl StorageEngine {
                 // No child exists on disk, process any matching overlay changes
                 self.process_nonoverlapping_overlay_state(
                     context,
-                    child_overlay,
+                    &child_overlay,
                     hash_builder,
                     stats,
                     updated_storage_branch_nodes,
@@ -642,8 +642,8 @@ impl StorageEngine {
                 .insert(B256::from_slice(&full_path.pack()), updated_branch_nodes);
 
             // Add the modified account to the main HashBuilder
+            println!("Adding modified account leaf: {full_path:?} with storage root: {new_storage_root:?}");
             let rlp_encoded = self.encode_account_with_root(account, new_storage_root)?;
-            println!("Adding modified account leaf: {full_path:?}");
             hash_builder.add_leaf(full_path.clone(), &rlp_encoded);
         }
         Ok(())
@@ -654,7 +654,7 @@ impl StorageEngine {
         context: &TransactionContext,
         overlay: &OverlayState,
         hash_builder: &mut HashBuilder,
-        full_path: &Nibbles,
+        full_path: &[u8],
         account: &Account,
         stats: &mut Stats,
         updated_storage_branch_nodes: &mut B256Map<HashMap<Nibbles, BranchNodeCompact>>,
@@ -670,7 +670,7 @@ impl StorageEngine {
             // No storage overlays for this account, use original account
             let rlp_encoded = self.encode_account(account)?;
             // println!("Adding overlayed account leaf: {:?}", full_path);
-            hash_builder.add_leaf(full_path.clone(), &rlp_encoded);
+            hash_builder.add_leaf(Nibbles::from_nibbles(full_path), &rlp_encoded);
             stats.account.overlay_leaves += 1;
             return Ok(());
         }
@@ -691,12 +691,14 @@ impl StorageEngine {
         let (mut storage_hash_builder, updated_branch_nodes) = storage_hash_builder.split();
         let new_storage_root = storage_hash_builder.root();
         println!("New storage root: {new_storage_root:?}");
-        updated_storage_branch_nodes
-            .insert(B256::from_slice(&full_path.pack()), updated_branch_nodes);
+        updated_storage_branch_nodes.insert(
+            B256::from_slice(&Nibbles::from_nibbles(full_path).pack()),
+            updated_branch_nodes,
+        );
 
         // Add the modified account to the main HashBuilder
         let rlp_encoded = self.encode_account_with_root(account, new_storage_root)?;
-        hash_builder.add_leaf(full_path.clone(), &rlp_encoded);
+        hash_builder.add_leaf(Nibbles::from_nibbles(full_path), &rlp_encoded);
         stats.account.overlay_leaves += 1;
 
         Ok(())
@@ -788,7 +790,7 @@ impl StorageEngine {
 
     /// Helper to encode TrieValue as RLP
     #[inline]
-    fn encode_trie_value(&self, trie_value: &TrieValue) -> Result<Vec<u8>, Error> {
+    pub fn encode_trie_value(&self, trie_value: &TrieValue) -> Result<Vec<u8>, Error> {
         let rlp_encoded = match trie_value {
             TrieValue::Account(account) => self.encode_account(account)?,
             TrieValue::Storage(storage_value) => self.encode_storage(storage_value)?,
@@ -797,7 +799,7 @@ impl StorageEngine {
     }
 
     #[inline]
-    fn encode_account(&self, account: &Account) -> Result<Vec<u8>, Error> {
+    pub fn encode_account(&self, account: &Account) -> Result<Vec<u8>, Error> {
         let trie_account = TrieAccount {
             nonce: account.nonce,
             balance: account.balance,
@@ -808,7 +810,11 @@ impl StorageEngine {
     }
 
     #[inline]
-    fn encode_account_with_root(&self, account: &Account, root: B256) -> Result<Vec<u8>, Error> {
+    pub fn encode_account_with_root(
+        &self,
+        account: &Account,
+        root: B256,
+    ) -> Result<Vec<u8>, Error> {
         let trie_account = TrieAccount {
             nonce: account.nonce,
             balance: account.balance,
@@ -819,7 +825,7 @@ impl StorageEngine {
     }
 
     #[inline]
-    fn encode_storage(&self, storage_value: &U256) -> Result<Vec<u8>, Error> {
+    pub fn encode_storage(&self, storage_value: &U256) -> Result<Vec<u8>, Error> {
         Ok(encode(storage_value))
     }
 }
@@ -2286,4 +2292,233 @@ mod tests {
         let committed_root = context.root_node_hash;
         assert_eq!(committed_root, overlay_root);
     }
+
+    #[test]
+    fn test_complex_case() {}
+
+    // #[test]
+    // fn test_overlay_state_root_fuzz_rounds() {
+    //     use crate::{path::AddressPath, path::StoragePath, Database};
+    //     use alloy_primitives::{Address, B256, U256};
+    //     use rand::{rngs::StdRng, Rng, SeedableRng};
+    //     use std::collections::{HashMap, HashSet};
+    //     use tempfile::TempDir;
+
+    //     // Deterministic RNG for reproducibility
+    //     let mut rng = StdRng::seed_from_u64(0xDEADBEEFCAFEBABE);
+
+    //     // Create an empty DB
+    //     let tmp_dir = TempDir::new().unwrap();
+    //     let file_path = tmp_dir.path().join("test.db");
+    //     let db = Database::create_new(file_path).unwrap();
+    //     let mut context = db.storage_engine.write_context();
+
+    //     // In-memory expected state: AddressPath -> (Account, slot_hash -> value)
+    //     let mut state: HashMap<AddressPath, (Account, HashMap<B256, U256>)> = HashMap::new();
+    //     let mut all_paths: Vec<AddressPath> = Vec::new();
+    //     let mut used_paths: HashSet<AddressPath> = HashSet::new();
+
+    //     // Pre-seed 10,000 accounts
+    //     let mut initial_changes: Vec<(Nibbles, Option<TrieValue>)> = Vec::with_capacity(10_000);
+    //     for i in 0..10_000u64 {
+    //         let addr = Address::random();
+    //         let ap = AddressPath::for_address(addr);
+    //         used_paths.insert(ap.clone());
+    //         all_paths.push(ap.clone());
+    //         let account = Account::new(i, U256::from(rng.random::<u64>()), EMPTY_ROOT_HASH,
+    // KECCAK_EMPTY);         state.insert(ap.clone(), (account.clone(), HashMap::new()));
+    //         initial_changes.push((ap.into(), Some(TrieValue::Account(account))));
+    //     }
+
+    //     // Of these, 1,000 should have storage: 100 with 10 slots, 900 with 1,000 slots
+    //     let storage_accounts_small: Vec<AddressPath> =
+    // all_paths.iter().cloned().take(100).collect();     let storage_accounts_large:
+    // Vec<AddressPath> = all_paths.iter().cloned().skip(100).take(900).collect();
+
+    //     // Helper to insert unique slots for an address
+    //     let mut insert_slots = |ap: &AddressPath, num_slots: usize| {
+    //         let (_, ref mut slots) = state.get_mut(ap).unwrap();
+    //         for _ in 0..num_slots {
+    //             // Ensure unique slot per account
+    //             let mut key: B256;
+    //             loop {
+    //                 key = B256::from(rng.random::<[u8; 32]>());
+    //                 if !slots.contains_key(&key) {
+    //                     break;
+    //                 }
+    //             }
+    //             let value = U256::from(rng.random::<u128>());
+    //             slots.insert(key, value);
+    //             let storage_path = StoragePath::for_address_path_and_slot(ap.clone(), key);
+    //             initial_changes.push((storage_path.full_path(),
+    // Some(TrieValue::Storage(value))));         }
+    //     };
+
+    //     for ap in storage_accounts_small.iter() {
+    //         insert_slots(ap, 10);
+    //     }
+    //     for ap in storage_accounts_large.iter() {
+    //         insert_slots(ap, 1_000);
+    //     }
+
+    //     // Sort and commit initial state
+    //     initial_changes.sort_by(|a, b| a.0.cmp(&b.0));
+    //     db.storage_engine.set_values(&mut context, &mut initial_changes).unwrap();
+
+    //     // Accounts considered to have storage (non-empty map)
+    //     let mut accounts_with_storage: Vec<AddressPath> = state
+    //         .iter()
+    //         .filter_map(|(ap, (_acc, slots))| if !slots.is_empty() { Some(ap.clone()) } else {
+    // None })         .collect();
+
+    //     // Helper to sample n unique elements from a candidate list without replacement
+    //     let mut sample_n = |cands_len: usize, n: usize| -> Vec<usize> {
+    //         let n = n.min(cands_len);
+    //         let mut idxs: Vec<usize> = (0..cands_len).collect();
+    //         for i in 0..n {
+    //             let rand_u = rng.random::<u64>() as usize;
+    //             let j = i + (rand_u % (cands_len - i));
+    //             idxs.swap(i, j);
+    //         }
+    //         idxs.truncate(n);
+    //         idxs
+    //     };
+
+    //     // 100 rounds of randomized operations
+    //     for _round in 0..100 {
+    //         let mut overlay_mut = OverlayStateMut::new();
+
+    //         // Insert 50 new accounts
+    //         let mut new_accounts: Vec<AddressPath> = Vec::with_capacity(50);
+    //         for i in 0..50u64 {
+    //             let ap = loop {
+    //                 let a = Address::random();
+    //                 let candidate = AddressPath::for_address(a);
+    //                 if !used_paths.contains(&candidate) {
+    //                     break candidate;
+    //                 }
+    //             };
+    //             used_paths.insert(ap.clone());
+    //             new_accounts.push(ap.clone());
+    //             all_paths.push(ap.clone());
+    //             let account = Account::new(i, U256::from(rng.random::<u64>()), EMPTY_ROOT_HASH,
+    // KECCAK_EMPTY);             state.insert(ap.clone(), (account.clone(), HashMap::new()));
+    //             overlay_mut.insert(ap.into(), Some(OverlayValue::Account(account)));
+    //         }
+
+    //         // Update 50 existing accounts
+    //         let existing_paths: Vec<AddressPath> = state.keys().cloned().collect();
+    //         let filtered: Vec<AddressPath> = existing_paths
+    //             .into_iter()
+    //             .filter(|a| !new_accounts.contains(a))
+    //             .collect();
+    //         let idxs = sample_n(filtered.len(), 50);
+    //         let update_targets: Vec<AddressPath> = idxs.into_iter().map(|i|
+    // filtered[i].clone()).collect();         for ap in update_targets.iter().cloned() {
+    //             if let Some((acc, _)) = state.get_mut(&ap) {
+    //                 acc.balance = U256::from(rng.random::<u128>());
+    //                 acc.nonce = acc.nonce.wrapping_add(1);
+    //                 overlay_mut.insert(ap.into(), Some(OverlayValue::Account(acc.clone())));
+    //             }
+    //         }
+
+    //         // Delete 10 accounts (avoid newly inserted and updated to keep sets disjoint)
+    //         let delete_candidates: Vec<AddressPath> = state
+    //             .keys()
+    //             .filter(|a| !new_accounts.contains(a) && !update_targets.contains(a))
+    //             .cloned()
+    //             .collect();
+    //         let idxs = sample_n(delete_candidates.len(), 10);
+    //         let delete_targets: Vec<AddressPath> = idxs.into_iter().map(|i|
+    // delete_candidates[i].clone()).collect();         for ap in delete_targets.iter().cloned()
+    // {             overlay_mut.insert(ap.clone().into(), None);
+    //             state.remove(&ap);
+    //             accounts_with_storage.retain(|a| *a != ap);
+    //         }
+
+    //         // Storage operations
+    //         // Helper: sample N accounts with at least K storage slots
+    //         let mut sample_accounts_with_min_slots = |n: usize, k: usize| -> Vec<AddressPath> {
+    //             let candidates: Vec<AddressPath> = accounts_with_storage
+    //                 .iter()
+    //                 .filter(|ap| state.get(*ap).map(|(_, m)| m.len()).unwrap_or(0) >= k)
+    //                 .cloned()
+    //                 .collect();
+    //             let idxs = sample_n(candidates.len(), n);
+    //             idxs.into_iter().map(|i| candidates[i].clone()).collect()
+    //         };
+
+    //         // Insert 100 new slots into 10 random storage accounts
+    //         let insert_slot_accounts = sample_accounts_with_min_slots(10, 0);
+    //         for ap in insert_slot_accounts.iter().cloned() {
+    //             if let Some((_, slots)) = state.get_mut(&ap) {
+    //                 for _ in 0..100 {
+    //                     let key = loop {
+    //                         let k = B256::from(rng.random::<[u8; 32]>());
+    //                         if !slots.contains_key(&k) {
+    //                             break k;
+    //                         }
+    //                     };
+    //                     let value = U256::from(rng.random::<u128>());
+    //                     slots.insert(key, value);
+    //                     let storage_path = StoragePath::for_address_path_and_slot(ap.clone(),
+    // key);                     overlay_mut.insert(storage_path.full_path(),
+    // Some(OverlayValue::Storage(value)));                 }
+    //                 if !accounts_with_storage.contains(&ap) {
+    //                     accounts_with_storage.push(ap);
+    //                 }
+    //             }
+    //         }
+
+    //         // Update 10 slots in 10 random storage accounts (10 slots each)
+    //         let update_slot_accounts = sample_accounts_with_min_slots(10, 10);
+    //         for ap in update_slot_accounts.iter().cloned() {
+    //             if let Some((_, map)) = state.get_mut(&ap) {
+    //                 let keys: Vec<B256> = map.keys().cloned().collect();
+    //                 let idxs = sample_n(keys.len(), 10);
+    //                 for i in idxs {
+    //                     let key = keys[i];
+    //                     let new_value = U256::from(rng.random::<u128>());
+    //                     map.insert(key, new_value);
+    //                     let storage_path = StoragePath::for_address_path_and_slot(ap.clone(),
+    // key);                     overlay_mut
+    //                         .insert(storage_path.full_path(),
+    // Some(OverlayValue::Storage(new_value)));                 }
+    //             }
+    //         }
+
+    //         // Delete 10 slots in 10 random storage accounts (10 slots each)
+    //         let delete_slot_accounts = sample_accounts_with_min_slots(10, 10);
+    //         for ap in delete_slot_accounts.iter().cloned() {
+    //             if let Some((_, map)) = state.get_mut(&ap) {
+    //                 let keys: Vec<B256> = map.keys().cloned().collect();
+    //                 let idxs = sample_n(keys.len(), 10);
+    //                 for i in idxs {
+    //                     let key = keys[i];
+    //                     map.remove(&key);
+    //                     let storage_path = StoragePath::for_address_path_and_slot(ap.clone(),
+    // key);                     overlay_mut.insert(storage_path.full_path(), None);
+    //                 }
+    //                 if map.is_empty() {
+    //                     accounts_with_storage.retain(|a| *a != ap);
+    //                 }
+    //             }
+    //         }
+
+    //         // Compute overlay root, apply, and compare
+    //         let overlay = overlay_mut.freeze();
+    //         let (overlay_root, _, _) = db.storage_engine.compute_root_with_overlay(&context,
+    // &overlay).unwrap();
+
+    //         let mut commit_changes: Vec<(Nibbles, Option<TrieValue>)> = overlay
+    //             .data()
+    //             .iter()
+    //             .map(|(path, value)| (path.clone(), value.clone().map(|v|
+    // v.try_into().unwrap())))             .collect();
+    //         db.storage_engine.set_values(&mut context, &mut commit_changes).unwrap();
+    //         let committed_root = context.root_node_hash;
+
+    //         assert_eq!(overlay_root, committed_root);
+    //     }
+    // }
 }
