@@ -619,7 +619,7 @@ impl StorageEngine {
         if let Some(account) = account {
             // Check if there are any storage overlays for this account
             // Storage overlays have 128-nibble paths that start with this account's 64-nibble path
-            let storage_overlays = overlay.find_prefix_range(full_path);
+            let storage_overlays = overlay.sub_slice_for_prefix(full_path);
             let has_storage_overlays = storage_overlays.iter().any(|(path, _)| path.len() > 64);
 
             if !has_storage_overlays {
@@ -664,7 +664,7 @@ impl StorageEngine {
         println!("Account: {account:?}");
         // Check if there are any storage overlays for this account
         // Storage overlays have 128-nibble paths that start with this account's 64-nibble path
-        let storage_overlays = overlay.find_prefix_range(full_path);
+        let storage_overlays = overlay.sub_slice_for_prefix(full_path);
         let has_storage_overlays = storage_overlays.iter().any(|(path, _)| path.len() > 64);
 
         if !has_storage_overlays {

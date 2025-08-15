@@ -1,8 +1,4 @@
-use crate::{
-    account::Account,
-    node::{Node, TrieValue},
-    pointer::Pointer,
-};
+use crate::{account::Account, node::TrieValue};
 use alloy_primitives::{StorageValue, B256, U256};
 use alloy_trie::Nibbles;
 use std::sync::Arc;
@@ -152,7 +148,12 @@ impl OverlayState {
 
     #[inline]
     pub fn first(&self) -> Option<(&[u8], &Option<OverlayValue>)> {
-        self.get(0)
+        if self.len() == 0 {
+            None
+        } else {
+            let (path, value) = &self.data[self.start_idx];
+            Some((&path[self.prefix_offset..], value))
+        }
     }
 
     /// Returns the effective slice of data for this overlay, respecting bounds.
@@ -178,47 +179,6 @@ impl OverlayState {
         match slice.binary_search_by(|(p, _)| self.compare_with_offset(p, path)) {
             Ok(index) => Some(&slice[index].1),
             Err(_) => None,
-        }
-    }
-
-    /// Finds all entries that have the given prefix.
-    /// Returns a zero-copy sub-slice of the overlay containing only matching entries.
-    /// The prefix is compared against offset-adjusted paths.
-    pub fn find_prefix_range(&self, prefix: &[u8]) -> OverlayState {
-        if self.is_empty() {
-            return OverlayState::empty();
-        }
-
-        let slice = self.effective_slice();
-        let mut start_idx = None;
-        let mut end_idx = slice.len();
-
-        // Find the range of entries that start with the prefix after applying offset
-        for (i, (path, _)) in slice.iter().enumerate() {
-            if path.len() >= self.prefix_offset {
-                let adjusted_path = &path.as_slice()[self.prefix_offset..];
-                if adjusted_path.len() >= prefix.len() &&
-                    adjusted_path[..prefix.len()] == prefix[..]
-                {
-                    if start_idx.is_none() {
-                        start_idx = Some(i);
-                    }
-                } else if start_idx.is_some() {
-                    // We've found the end of the matching range
-                    end_idx = i;
-                    break;
-                }
-            }
-        }
-
-        match start_idx {
-            Some(start) => OverlayState {
-                data: Arc::clone(&self.data),
-                start_idx: self.start_idx + start,
-                end_idx: self.start_idx + end_idx,
-                prefix_offset: self.prefix_offset,
-            },
-            None => OverlayState::empty(),
         }
     }
 
@@ -268,6 +228,34 @@ impl OverlayState {
         }
     }
 
+    /// Returns the first index of the effective slice with the given nibbles prefix
+    fn find_start_index_with_prefix(
+        &self,
+        effective_slice: &[(Nibbles, Option<OverlayValue>)],
+        prefix: &[u8],
+    ) -> usize {
+        effective_slice
+            .binary_search_by(|(p, _)| self.compare_with_offset(p, prefix))
+            .unwrap_or_else(|i| i)
+    }
+
+    /// Returns the first index of the effective slice immediately following the given prefix.
+    /// This is used to find the end of a prefix range in the overlay.
+    fn find_end_index_with_prefix(
+        &self,
+        effective_slice: &[(Nibbles, Option<OverlayValue>)],
+        prefix: &[u8],
+    ) -> usize {
+        effective_slice.partition_point(|(stored_path, _)| {
+            if stored_path.len() < self.prefix_offset {
+                true
+            } else {
+                let adjusted_path = &stored_path[self.prefix_offset..];
+                &adjusted_path[..prefix.len()] <= prefix
+            }
+        })
+    }
+
     /// Helper method to compare a stored path with a target path, applying prefix_offset.
     /// Returns the comparison result of the offset-adjusted stored path vs target path.
     fn compare_with_offset(&self, stored_path: &[u8], target_path: &[u8]) -> std::cmp::Ordering {
@@ -305,24 +293,11 @@ impl OverlayState {
     /// - before: all changes before the prefix
     /// - with_prefix: all changes with the prefix
     /// - after: all changes after the prefix
-    pub fn sub_slice_by_prefix(
-        &self,
-        prefix: &Nibbles,
-    ) -> (OverlayState, OverlayState, OverlayState) {
+    pub fn sub_slice_by_prefix(&self, prefix: &[u8]) -> (OverlayState, OverlayState, OverlayState) {
         let slice = self.effective_slice();
 
-        let start_index = slice
-            .binary_search_by(|(p, _)| self.compare_with_offset(p, prefix))
-            .unwrap_or_else(|i| i);
-        let end_index = match prefix.increment() {
-            Some(next) => slice
-                .binary_search_by(|(p, _)| self.compare_with_offset(p, &next))
-                .unwrap_or_else(|i| i),
-            None => {
-                // Prefix is all 0xF's, nothing can come after it
-                slice.len()
-            }
-        };
+        let start_index = self.find_start_index_with_prefix(slice, prefix);
+        let end_index = self.find_end_index_with_prefix(slice, prefix);
 
         let before = self.sub_slice(0, start_index);
         let with_prefix = self.sub_slice(start_index, end_index);
@@ -334,7 +309,16 @@ impl OverlayState {
     /// rooted at the given path prefix. This is used during recursive trie traversal
     /// to filter overlay changes relevant to each subtree.
     pub fn sub_slice_for_prefix(&self, prefix: &[u8]) -> OverlayState {
-        self.find_prefix_range(prefix)
+        if self.is_empty() {
+            return OverlayState::empty();
+        }
+
+        let slice = self.effective_slice();
+
+        let start_index = self.find_start_index_with_prefix(slice, prefix);
+        let end_index = self.find_end_index_with_prefix(slice, prefix);
+
+        self.sub_slice(start_index, end_index)
     }
 
     /// Returns an iterator over all changes in the overlay, respecting slice bounds.
@@ -356,97 +340,10 @@ impl OverlayState {
     }
 }
 
-/// Pointer that can reference either on-disk nodes or in-memory overlay nodes.
-/// This allows the trie traversal to seamlessly handle both persisted and overlayed state.
-#[derive(Debug, Clone)]
-pub enum OverlayPointer {
-    /// Reference to a node stored on disk
-    OnDisk(Pointer),
-    /// Reference to a node stored in memory as part of the overlay
-    InMemory(Box<Node>),
-}
-
-impl OverlayPointer {
-    /// Creates a new on-disk overlay pointer.
-    pub fn on_disk(pointer: Pointer) -> Self {
-        Self::OnDisk(pointer)
-    }
-
-    /// Creates a new in-memory overlay pointer.
-    pub fn in_memory(node: Node) -> Self {
-        Self::InMemory(Box::new(node))
-    }
-
-    /// Returns true if this pointer references an on-disk node.
-    pub fn is_on_disk(&self) -> bool {
-        matches!(self, Self::OnDisk(_))
-    }
-
-    /// Returns true if this pointer references an in-memory node.
-    pub fn is_in_memory(&self) -> bool {
-        matches!(self, Self::InMemory(_))
-    }
-
-    /// Returns the underlying disk pointer if this is an on-disk reference.
-    pub fn as_disk_pointer(&self) -> Option<&Pointer> {
-        match self {
-            Self::OnDisk(pointer) => Some(pointer),
-            Self::InMemory(_) => None,
-        }
-    }
-
-    /// Returns the underlying in-memory node if this is an in-memory reference.
-    pub fn as_memory_node(&self) -> Option<&Node> {
-        match self {
-            Self::OnDisk(_) => None,
-            Self::InMemory(node) => Some(node),
-        }
-    }
-
-    /// Converts this overlay pointer to an owned Node.
-    /// For on-disk pointers, this would require loading the node from storage.
-    /// For in-memory pointers, this clones the existing node.
-    pub fn into_node(self) -> Result<Node, OverlayError> {
-        match self {
-            Self::OnDisk(_) => Err(OverlayError::DiskNodeNotLoaded),
-            Self::InMemory(node) => Ok(*node),
-        }
-    }
-}
-
-impl From<Pointer> for OverlayPointer {
-    fn from(pointer: Pointer) -> Self {
-        Self::OnDisk(pointer)
-    }
-}
-
-impl From<Node> for OverlayPointer {
-    fn from(node: Node) -> Self {
-        Self::InMemory(Box::new(node))
-    }
-}
-
-/// Errors that can occur when working with overlay pointers.
-#[derive(Debug)]
-pub enum OverlayError {
-    /// Attempted to access a disk node without loading it first
-    DiskNodeNotLoaded,
-}
-
-impl std::fmt::Display for OverlayError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::DiskNodeNotLoaded => write!(f, "disk node not loaded"),
-        }
-    }
-}
-
-impl std::error::Error for OverlayError {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{account::Account, node::TrieValue};
+    use crate::account::Account;
     use alloy_primitives::U256;
     use alloy_trie::{Nibbles, EMPTY_ROOT_HASH, KECCAK_EMPTY};
 
@@ -546,13 +443,13 @@ mod tests {
 
         // Find entries with prefix [1, 2]
         let prefix = Nibbles::from_nibbles([1, 2]);
-        let subset = frozen.find_prefix_range(&prefix);
+        let subset = frozen.sub_slice_for_prefix(&prefix);
 
         assert_eq!(subset.len(), 2); // Should match first two entries
 
         // Find entries with prefix [1]
         let prefix = Nibbles::from_nibbles([1]);
-        let subset = frozen.find_prefix_range(&prefix);
+        let subset = frozen.sub_slice_for_prefix(&prefix);
 
         assert_eq!(subset.len(), 3); // Should match first three entries
     }
@@ -602,82 +499,8 @@ mod tests {
         assert!(frozen.lookup(&path).is_none());
         assert!(!frozen.contains_prefix_of(&path));
 
-        let subset = frozen.find_prefix_range(&path);
+        let subset = frozen.sub_slice_for_prefix(&path);
         assert!(subset.is_empty());
-    }
-
-    #[test]
-    fn test_overlay_pointer_creation() {
-        use crate::{location::Location, node::Node, pointer::Pointer};
-        use alloy_trie::{nodes::RlpNode, Nibbles, EMPTY_ROOT_HASH};
-
-        // Test on-disk pointer
-        let location = Location::for_cell(42);
-        let rlp = RlpNode::word_rlp(&EMPTY_ROOT_HASH);
-        let disk_pointer = Pointer::new(location, rlp);
-        let overlay_pointer = OverlayPointer::on_disk(disk_pointer.clone());
-
-        assert!(overlay_pointer.is_on_disk());
-        assert!(!overlay_pointer.is_in_memory());
-        assert_eq!(overlay_pointer.as_disk_pointer(), Some(&disk_pointer));
-        assert!(overlay_pointer.as_memory_node().is_none());
-
-        // Test in-memory pointer
-        let path = Nibbles::from_nibbles([1, 2, 3, 4]);
-        let account = test_account();
-        let node = Node::new_leaf(path, &TrieValue::Account(account)).unwrap();
-        let overlay_pointer = OverlayPointer::in_memory(node.clone());
-
-        assert!(!overlay_pointer.is_on_disk());
-        assert!(overlay_pointer.is_in_memory());
-        assert!(overlay_pointer.as_disk_pointer().is_none());
-        assert_eq!(overlay_pointer.as_memory_node(), Some(&node));
-    }
-
-    #[test]
-    fn test_overlay_pointer_conversion() {
-        use crate::{location::Location, pointer::Pointer};
-        use alloy_trie::{nodes::RlpNode, Nibbles, EMPTY_ROOT_HASH};
-
-        // Test From<Pointer>
-        let location = Location::for_cell(42);
-        let rlp = RlpNode::word_rlp(&EMPTY_ROOT_HASH);
-        let disk_pointer = Pointer::new(location, rlp);
-        let overlay_pointer: OverlayPointer = disk_pointer.into();
-        assert!(overlay_pointer.is_on_disk());
-
-        // Test From<Node>
-        let path = Nibbles::from_nibbles([1, 2, 3, 4]);
-        let account = test_account();
-        let node = Node::new_leaf(path, &TrieValue::Account(account)).unwrap();
-        let overlay_pointer: OverlayPointer = node.into();
-        assert!(overlay_pointer.is_in_memory());
-    }
-
-    #[test]
-    fn test_overlay_pointer_into_node() {
-        use alloy_trie::Nibbles;
-
-        // Test in-memory pointer
-        let path = Nibbles::from_nibbles([1, 2, 3, 4]);
-        let account = test_account();
-        let original_node = Node::new_leaf(path, &TrieValue::Account(account)).unwrap();
-        let overlay_pointer = OverlayPointer::in_memory(original_node.clone());
-
-        let extracted_node = overlay_pointer.into_node().unwrap();
-        assert_eq!(extracted_node.prefix(), original_node.prefix());
-        assert_eq!(extracted_node.value().unwrap(), original_node.value().unwrap());
-
-        // Test on-disk pointer (should fail)
-        use crate::{location::Location, pointer::Pointer};
-        use alloy_trie::{nodes::RlpNode, EMPTY_ROOT_HASH};
-
-        let location = Location::for_cell(42);
-        let rlp = RlpNode::word_rlp(&EMPTY_ROOT_HASH);
-        let disk_pointer = Pointer::new(location, rlp);
-        let overlay_pointer = OverlayPointer::on_disk(disk_pointer);
-
-        assert!(overlay_pointer.into_node().is_err());
     }
 
     #[test]
@@ -772,7 +595,7 @@ mod tests {
         let storage_overlay = frozen.with_prefix_offset(4); // Strip 4-nibble account prefix
 
         // Test sub_slice_before_prefix
-        let split_point = Nibbles::from_nibbles([5, 0]); // Storage key [5, 0]
+        let split_point = [5, 0]; // Storage key [5, 0]
 
         let (before, with_prefix, after) = storage_overlay.sub_slice_by_prefix(&split_point);
 
@@ -822,12 +645,12 @@ mod tests {
         let frozen = mutable.freeze();
 
         // Test finding storage for account 1 using find_prefix_range on original overlay
-        let account1_storage = frozen.find_prefix_range(&Nibbles::from_nibbles(account1_prefix));
+        let account1_storage = frozen.sub_slice_for_prefix(&account1_prefix);
         assert_eq!(account1_storage.len(), 2);
 
         // Now test with prefix_offset - should convert to storage-relative paths
         let storage_overlay = account1_storage.with_prefix_offset(4);
-        let storage_with_prefix5 = storage_overlay.find_prefix_range(&Nibbles::from_nibbles([5]));
+        let storage_with_prefix5 = storage_overlay.sub_slice_for_prefix(&[5]);
 
         assert_eq!(storage_with_prefix5.len(), 2);
         assert!(storage_with_prefix5.iter().any(|(path, _)| path == [5, 5].as_slice()));
@@ -948,7 +771,7 @@ mod tests {
         }
 
         let frozen = mutable.freeze();
-        let prefix = Nibbles::from_nibbles([1, 2]);
+        let prefix = [1, 2];
 
         // Test sub_slice_by_prefix
         let (before, with_prefix, after) = frozen.sub_slice_by_prefix(&prefix);
@@ -1054,7 +877,7 @@ mod tests {
         let storage_overlay = frozen.with_prefix_offset(4);
 
         // Test partitioning by storage prefix [5]
-        let storage_prefix = Nibbles::from_nibbles([5]);
+        let storage_prefix = [5];
         let (before, with_prefix, after) = storage_overlay.sub_slice_by_prefix(&storage_prefix);
 
         // Before should contain [2,0,0,0]
