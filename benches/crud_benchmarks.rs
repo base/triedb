@@ -242,7 +242,7 @@ fn bench_account_updates(c: &mut Criterion) {
         b.iter_with_setup(
             || {
                 let db_path = dir.path().join(&file_name);
-                Database::open(db_path.clone()).unwrap()
+                Database::open(db_path).unwrap()
             },
             |db| {
                 let mut tx = db.begin_rw().unwrap();
@@ -596,15 +596,13 @@ fn bench_state_root_with_overlay(c: &mut Criterion) {
         DEFAULT_SETUP_DB_CONTRACT_SIZE,
         DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT,
     );
+    let dir = TempDir::new("triedb_bench_state_root_with_overlay").unwrap();
     let file_name = base_dir.main_file_name.clone();
+    copy_files(&base_dir, dir.path()).unwrap();
 
     let mut rng = StdRng::seed_from_u64(SEED_CONTRACT);
-    // let total_storage_per_address = DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT;
-    let total_addresses = BATCH_SIZE;
     let addresses: Vec<AddressPath> =
-        (0..total_addresses).map(|_| generate_random_address(&mut rng)).collect();
-    // let storage_paths_values = generate_storage_paths_values(&addresses,
-    // total_storage_per_address);
+        (0..BATCH_SIZE).map(|_| generate_random_address(&mut rng)).collect();
 
     let mut account_overlay_mut = OverlayStateMut::new();
     addresses.iter().enumerate().for_each(|(i, addr)| {
@@ -614,25 +612,11 @@ fn bench_state_root_with_overlay(c: &mut Criterion) {
     });
     let account_overlay = account_overlay_mut.freeze();
 
-    // Build overlay state from storage paths and values
-    // let mut storage_overlay_mut = OverlayStateMut::new();
-
-    // for (storage_path, storage_value) in &storage_paths_values {
-    //     // Convert storage path to nibbles for overlay
-    //     let nibbles = storage_path.full_path();
-    //     storage_overlay_mut.insert(nibbles, Some(OverlayValue::Storage(*storage_value)));
-    // }
-
-    // // Freeze the mutable overlay to get an immutable one
-    // let storage_overlay = storage_overlay_mut.freeze();
-
     group.throughput(criterion::Throughput::Elements(BATCH_SIZE as u64));
     group.measurement_time(Duration::from_secs(30));
     group.bench_function(BenchmarkId::new("state_root_with_account_overlay", BATCH_SIZE), |b| {
         b.iter_with_setup(
             || {
-                let dir = TempDir::new("triedb_bench_state_root_with_account_overlay").unwrap();
-                copy_files(&base_dir, dir.path()).unwrap();
                 let db_path = dir.path().join(&file_name);
                 Database::open(db_path).unwrap()
             },
@@ -640,7 +624,7 @@ fn bench_state_root_with_overlay(c: &mut Criterion) {
                 let tx = db.begin_ro().unwrap();
 
                 // Compute the root hash with the overlay
-                let _root_result = tx.compute_root_with_overlay(&account_overlay).unwrap();
+                let _root_result = tx.compute_root_with_overlay(account_overlay.clone()).unwrap();
 
                 tx.commit().unwrap();
             },
