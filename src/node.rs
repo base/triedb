@@ -633,6 +633,7 @@ impl Encodable for Node {
     }
 }
 
+#[inline]
 pub fn encode_account_leaf(
     nonce_rlp: &ArrayVec<u8, 9>,
     balance_rlp: &ArrayVec<u8, 33>,
@@ -653,6 +654,7 @@ pub fn encode_account_leaf(
     len
 }
 
+#[inline]
 pub fn encode_branch(children: &[Option<Pointer>], out: &mut dyn BufMut) -> usize {
     // first encode the header
     let mut payload_length = 1;

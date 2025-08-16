@@ -92,7 +92,7 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
         self.database
             .storage_engine
             .compute_state_root_with_overlay_iterative(&self.context, overlay_state)
-            .map_err(|_| TransactionError::Generic)
+            .map_err(|_| TransactionError)
     }
 
     pub fn get_account_with_proof(
