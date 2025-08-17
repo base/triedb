@@ -183,10 +183,8 @@ impl VersionedLru {
         let prev = entry.borrow().lru_prev.clone();
         let next = entry.borrow().lru_next.clone();
 
-        if let Some(weak) = &prev {
-            if let Some(prev_entry) = weak.upgrade() {
-                prev_entry.borrow_mut().lru_next = next.clone();
-            }
+        if let Some(prev_entry) = prev.as_ref().and_then(|weak| weak.upgrade()) {
+            prev_entry.borrow_mut().lru_next = next.clone();
         } else {
             self.head = next.clone();
         }
@@ -206,11 +204,44 @@ impl VersionedLru {
         self.min_snapshot_id = min_snapshot_id;
     }
 
-    /// Finds the first entry with snapshot id less than min_id and removes it from the list
+    /// Purges outdated entries while keeping at least one version with snapshot_id <= min_id
+    /// to ensure queries at min_id still work.
     fn purge_outdated_entries(&mut self, key: &Nibbles) {
+        if self.min_snapshot_id == 0 {
+            return;
+        }
+
+        let Some(versions) = self.entries.get(key) else {
+            return;
+        };
+
+        // Find the last entry with snapshot_id <= min_snapshot_id
+        let Some(idx) =
+            versions.iter().rposition(|entry| entry.snapshot_id <= self.min_snapshot_id)
+        else {
+            // No entries with snapshot_id <= min_snapshot_id, don't remove any
+            return;
+        };
+
+        // Collect up to the last snapshot_id <= min_snapshot_id
+        let remove_snapshots: Vec<SnapshotId> =
+            versions.iter().take(idx).map(|entry| entry.snapshot_id).collect();
+
+        // Remove entries from LRU and adjust size
+        for snapshot_id in remove_snapshots {
+            if let Some(entry) = self.get_entry(key, snapshot_id) {
+                self.remove(entry);
+                self.size -= 1;
+            }
+        }
+
+        // Remove outdated entries from versions
         if let Some(versions) = self.entries.get_mut(key) {
-            if let Some(idx) = versions.iter().position(|e| e.snapshot_id >= self.min_snapshot_id) {
-                versions.drain(0..idx);
+            for _ in 0..idx {
+                versions.remove(0);
+            }
+            if versions.is_empty() {
+                self.entries.remove(key);
             }
         }
     }
@@ -403,14 +434,26 @@ mod tests {
         // set minimum snapshot ID to 250
         cache.set_min_snapshot_id(250);
 
-        // purged the entries below min snapshot
+        // purged entries before the last valid entry (snapshot 100 should be gone)
         assert_eq!(cache.get(100, &Nibbles::from_nibbles([1])), None);
-        assert_eq!(cache.get(200, &Nibbles::from_nibbles([1])), None);
 
-        // only keep entries above min snapshot
+        // keep the last entry with snapshot_id <= min_snapshot_id (200) for queries at
+        // min_snapshot_id
+        assert_eq!(
+            cache.get(200, &Nibbles::from_nibbles([1])),
+            Some(CachedLocation::GlobalPosition(PageId::new(20).unwrap(), 21))
+        );
+
+        // keep entries above min snapshot
         assert_eq!(
             cache.get(300, &Nibbles::from_nibbles([1])),
             Some(CachedLocation::GlobalPosition(PageId::new(30).unwrap(), 31))
+        );
+
+        // should be able to query at min_snapshot_id and get snapshot 200's value
+        assert_eq!(
+            cache.get(250, &Nibbles::from_nibbles([1])),
+            Some(CachedLocation::GlobalPosition(PageId::new(20).unwrap(), 21))
         );
     }
 
