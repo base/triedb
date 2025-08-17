@@ -1,11 +1,12 @@
 use crate::{page::PageId, snapshot::SnapshotId};
 use alloy_trie::Nibbles;
+use parking_lot::Mutex;
 use std::{
     cell::RefCell,
     collections::HashMap,
     num::NonZeroUsize,
     rc::{Rc, Weak as RcWeak},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 /// Represents the location of a cached entry. Typically would be wrapped with `Option` to
@@ -182,10 +183,8 @@ impl VersionedLru {
 
     /// Remove an entry from LRU
     fn remove(&mut self, entry: Rc<RefCell<Entry>>) {
-        let (prev, next) = {
-            let entry_guard = entry.borrow();
-            (entry_guard.lru_prev.clone(), entry_guard.lru_next.clone())
-        };
+        let prev = entry.borrow().lru_prev.clone();
+        let next = entry.borrow().lru_next.clone();
 
         if let Some(weak) = &prev {
             if let Some(prev_entry) = weak.upgrade() {
@@ -253,26 +252,22 @@ impl CacheManager {
         // Acquire lock since we move the `Entry` to the front of the LRU list each time
         // This is helpful because we'll want to cache an account on read to accelerate
         // reading its contract state.
-        let mut guard = self.cache.lock().unwrap();
-        guard.get(key, snapshot_id)
+        self.cache.lock().get(key, snapshot_id)
     }
 
     /// Inserts or updates an entry in the cache.
     pub fn insert(&self, snapshot_id: SnapshotId, key: Nibbles, value: Option<(PageId, u8)>) {
-        let mut guard = self.cache.lock().unwrap();
-        guard.set(key, snapshot_id, value);
+        self.cache.lock().set(key, snapshot_id, value);
     }
 
     /// Removes an entry from the cache by inserting a None value.
     pub fn remove(&self, snapshot_id: SnapshotId, key: Nibbles) {
-        let mut guard = self.cache.lock().unwrap();
-        guard.set(key, snapshot_id, None);
+        self.cache.lock().set(key, snapshot_id, None);
     }
 
     /// Sets the minimum snapshot ID for proactive cache purging.
     pub fn set_min_snapshot_id(&self, min_snapshot_id: SnapshotId) {
-        let mut guard = self.cache.lock().unwrap();
-        guard.set_min_snapshot_id(min_snapshot_id);
+        self.cache.lock().set_min_snapshot_id(min_snapshot_id);
     }
 }
 
