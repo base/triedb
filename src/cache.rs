@@ -118,36 +118,33 @@ impl VersionedLru {
         }
         self.purge_outdated_entries(&key);
 
-        // Cache full - evict oldest entry (tail)
-        if self.size > self.capacity && self.tail.is_some() {
-            if let Some(weak) = &self.tail {
-                if let Some(tail_entry) = weak.upgrade() {
-                    let tail_key = tail_entry.borrow().key.clone();
+        // Cache full - remove leftmost entry
+        if self.size > self.capacity {
+            let Some(tail_entry) = self.tail.as_ref().and_then(|weak| weak.upgrade()) else {
+                return
+            };
+            let tail_key = tail_entry.borrow().key.clone();
 
-                    // Find oldest sibling (first entry in sorted versions list)
-                    if let Some(versions) = self.entries.get(&tail_key) {
-                        if let Some(oldest_sibling) = versions.first() {
-                            let oldest_snapshot = oldest_sibling.snapshot_id;
+            let Some(leftmost_entry) =
+                self.entries.get(&tail_key).and_then(|versions| versions.first())
+            else {
+                return
+            };
+            let leftmost_snapshot = leftmost_entry.snapshot_id;
 
-                            // Track max evicted version for temporal coherence
-                            self.max_evicted_version =
-                                self.max_evicted_version.max(oldest_snapshot);
+            // Track max evicted version for temporal coherence
+            self.max_evicted_version = self.max_evicted_version.max(leftmost_snapshot);
 
-                            // Find and remove the oldest sibling from LRU
-                            if let Some(lru_entry) = self.get_entry(&tail_key, oldest_snapshot) {
-                                self.remove(lru_entry);
-                                self.size -= 1;
+            // Find and remove the leftmost entry
+            let Some(entry) = self.get_entry(&tail_key, leftmost_snapshot) else { return };
+            self.remove(entry);
+            self.size -= 1;
 
-                                if let Some(versions) = self.entries.get_mut(&tail_key) {
-                                    // Remove leftmost entry
-                                    versions.remove(0);
-                                    if versions.is_empty() {
-                                        self.entries.remove(&tail_key);
-                                    }
-                                }
-                            }
-                        }
-                    }
+            // Remove leftmost entry from versions list
+            if let Some(versions) = self.entries.get_mut(&tail_key) {
+                versions.remove(0);
+                if versions.is_empty() {
+                    self.entries.remove(&tail_key);
                 }
             }
         }
