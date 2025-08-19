@@ -91,7 +91,7 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
     ) -> Result<OverlayedRoot, TransactionError> {
         self.database
             .storage_engine
-            .compute_state_root_with_overlay_iterative(&self.context, overlay_state)
+            .compute_state_root_with_overlay(&self.context, overlay_state)
             .map_err(|_| TransactionError)
     }
 
