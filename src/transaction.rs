@@ -108,10 +108,6 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
         Ok(result)
     }
 
-    pub fn clear_cache(&mut self) {
-        self.context.clear_cache();
-    }
-
     pub fn debug_account(
         &self,
         output_file: impl std::io::Write,
