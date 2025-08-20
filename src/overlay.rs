@@ -118,14 +118,6 @@ pub struct OverlayState {
     prefix_offset: usize,
 }
 
-// SAFETY: OverlayState is thread-safe because:
-// - Arc<[...]> provides thread-safe reference counting
-// - All fields are immutable after construction
-// - No interior mutability is used
-// - All operations are read-only or create new instances
-unsafe impl Send for OverlayState {}
-unsafe impl Sync for OverlayState {}
-
 impl OverlayState {
     /// Creates an empty overlay state.
     pub fn empty() -> Self {

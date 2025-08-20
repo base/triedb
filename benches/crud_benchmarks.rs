@@ -20,7 +20,13 @@ use alloy_primitives::{StorageKey, StorageValue, U256};
 use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::prelude::*;
-use std::{fs, io, path::Path, sync::Arc, thread, time::Duration};
+use std::{
+    fs, io,
+    path::Path,
+    sync::{Arc, Barrier},
+    thread,
+    time::Duration,
+};
 use tempdir::TempDir;
 use triedb::{
     account::Account,
@@ -87,16 +93,15 @@ fn bench_account_reads(c: &mut Criterion) {
         b.iter_with_setup(
             || {
                 let db_path = dir.path().join(&file_name);
-                Arc::new(Database::open(db_path.clone()).unwrap())
-            },
-            |db| {
+                let db = Arc::new(Database::open(db_path.clone()).unwrap());
+
+                // Spawn 4 reader threads
                 let thread_count = 4;
-                // Divide addresses into 4 chunks
-                let addresses = addresses.clone();
+                let setup_barrier = Arc::new(Barrier::new(thread_count + 1));
+                let test_barrier = Arc::new(Barrier::new(thread_count + 1));
                 let chunk_size = addresses.len() / thread_count;
                 let mut handles = Vec::new();
 
-                // Spawn 4 threads
                 for i in 0..thread_count {
                     let start_idx = i * chunk_size;
                     let end_idx = if i == thread_count {
@@ -108,8 +113,12 @@ fn bench_account_reads(c: &mut Criterion) {
 
                     let thread_addresses = addresses[start_idx..end_idx].to_vec();
                     let db_clone = Arc::clone(&db);
+                    let setup_barrier = Arc::clone(&setup_barrier);
+                    let test_barrier = Arc::clone(&test_barrier);
 
                     let handle = thread::spawn(move || {
+                        setup_barrier.wait();
+                        test_barrier.wait();
                         // Each thread creates its own RO transaction
                         let mut tx = db_clone.begin_ro().unwrap();
 
@@ -126,6 +135,12 @@ fn bench_account_reads(c: &mut Criterion) {
                     handles.push(handle);
                 }
 
+                setup_barrier.wait();
+
+                (handles, test_barrier)
+            },
+            |(handles, test_barrier)| {
+                test_barrier.wait();
                 // Wait for all threads to complete
                 for handle in handles {
                     handle.join().unwrap();

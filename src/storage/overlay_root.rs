@@ -175,12 +175,10 @@ impl StorageEngine {
                     if overlay.is_empty() && can_add_by_hash {
                         if let Some(hash) = pointer.rlp().as_hash() {
                             // No overlay, just add the pointer by hash
-                            // println!("Adding pointer by hash: {:?}", path);
                             root_builder.add_branch(path, hash, true);
                             continue;
                         }
                     }
-                    // println!("Adding pointer: {:?}", path);
                     // We have an overlay, need to process the child
                     self.process_overlayed_child(
                         context,
@@ -199,15 +197,12 @@ impl StorageEngine {
                         // The pre_overlay invalidates the current node, so we can simply add the
                         // full overlay. We need to process it all together,
                         // as the post_overlay may contain descendants of the pre_overlay.
-                        // println!("Processing full overlay due to prefix: {:?}", path);
                         self.add_overlay_to_root_builder(root_builder, &overlay);
                         continue;
                     }
 
-                    // println!("Adding pre_overlay before path: {:?}", path);
                     self.add_overlay_to_root_builder(root_builder, &pre_overlay);
                     // Defer the post_overlay to be processed after the node is traversed
-                    // println!("Pushing post_overlay after path: {:?}", path);
                     stack.push_overlay(post_overlay);
 
                     match node.into_kind() {
@@ -264,7 +259,6 @@ impl StorageEngine {
                                 }
                             }
                             // Leaf node, add it to the hash builder
-                            // println!("Adding storage leaf: {:?}", path);
                             root_builder.add_leaf(path, &value_rlp);
                         }
                     }
@@ -348,7 +342,6 @@ impl StorageEngine {
         match overlayed_account {
             Some(None) => {
                 // The account is removed in the overlay
-                // println!("Not adding removed account: {:?}", path);
                 return Ok(());
             }
             Some(Some(OverlayValue::Account(overlayed_account))) => {
@@ -364,7 +357,6 @@ impl StorageEngine {
 
         let has_storage_overlays = overlay.iter().any(|(path, _)| path.len() > 64);
         if !has_storage_overlays {
-            // println!("Adding account leaf with no storage overlays: {:?}", path);
             let storage_root_hash = storage_root
                 .as_ref()
                 .map_or(EMPTY_ROOT_HASH, |p| p.rlp().as_hash().unwrap_or(EMPTY_ROOT_HASH));
@@ -387,7 +379,6 @@ impl StorageEngine {
 
         match storage_root {
             Some(pointer) => {
-                // println!("Processing overlayed storage root for: {:?}", path);
                 let mut storage_stack = TraversalStack::new();
 
                 // load the root storage node
@@ -430,14 +421,11 @@ impl StorageEngine {
         let (mut storage_hash_builder, updated_storage_branch_nodes) =
             storage_root_builder.hash_builder.split();
         let new_root = storage_hash_builder.root();
-        // println!("New root: {:?}", new_root);
 
         root_builder.add_storage_branch_updates(
             B256::from_slice(&path.pack()),
             updated_storage_branch_nodes,
         );
-
-        // println!("Adding overlayed account leaf: {:?}", path);
 
         self.add_account_leaf_to_root_builder(
             root_builder,
@@ -517,7 +505,6 @@ impl StorageEngine {
     ) -> Result<(), Error> {
         if storage_overlay.is_empty() {
             let encoded = self.encode_account(account);
-            // println!("Adding overlayed account leaf with no storage overlays: {:?}", path);
             root_builder.add_leaf(path, &encoded);
             return Ok(());
         }
@@ -529,15 +516,12 @@ impl StorageEngine {
             storage_root_builder.hash_builder.split();
         let storage_root = storage_hash_builder.root();
 
-        // println!("Updated storage branch nodes: {:?}", updated_storage_branch_nodes);
-
         root_builder.add_storage_branch_updates(
             B256::from_slice(&path.pack()),
             updated_storage_branch_nodes,
         );
 
         let encoded = self.encode_account_with_root(account, storage_root);
-        // println!("Adding overlayed account leaf with storage overlays: {:?}", path);
         root_builder.add_leaf(path, &encoded);
         Ok(())
     }
@@ -566,17 +550,14 @@ impl StorageEngine {
                 }
                 Some(OverlayValue::Storage(storage_value)) => {
                     let encoded = self.encode_storage(storage_value);
-                    // println!("Adding overlayed storage leaf: {:?}", path);
                     root_builder.add_leaf(Nibbles::from_nibbles(path), &encoded);
                 }
                 Some(OverlayValue::Hash(hash)) => {
-                    // println!("Adding overlayed branch node: {:?}", path);
                     root_builder.add_branch(Nibbles::from_nibbles(path), *hash, false);
                     last_processed_path = Some(path);
                 }
                 None => {
                     // Tombstone - skip
-                    // println!("Skipping tombstone: {:?}", path);
                     last_processed_path = Some(path);
                 }
             }
@@ -639,9 +620,6 @@ mod tests {
         let (overlay_root, account_branch_updates, storage_branch_updates) =
             (output.root, output.updated_branch_nodes, output.storage_branch_updates);
         assert_ne!(overlay_root, initial_root, "Overlay should not match initial root");
-
-        // println!("Account branch updates: {:?}", account_branch_updates);
-        // println!("Storage branch updates: {:?}", storage_branch_updates);
 
         let mut overlay_mut_with_branches = OverlayStateMut::new();
 
@@ -1039,8 +1017,6 @@ mod tests {
         let storage_path1 =
             crate::path::StoragePath::for_address_and_slot(account_address, storage_key1.into());
 
-        // println!("Storage path 1: {:?}", storage_path1.full_path());
-
         // Set up initial state with 1 storage slot
         db.storage_engine
             .set_values(
@@ -1057,8 +1033,6 @@ mod tests {
         let storage_key2 = U256::from(20); // New storage key
         let storage_path2 =
             crate::path::StoragePath::for_address_and_slot(account_address, storage_key2.into());
-
-        // println!("Storage path 2: {:?}", storage_path2.full_path());
 
         overlay_mut.insert(storage_path2.full_path(), Some(OverlayValue::Storage(U256::from(222))));
         let overlay = overlay_mut.freeze();
