@@ -10,11 +10,11 @@ TESTS_FIXTURES_PATH := tests/fixtures
 
 .PHONY: format
 format:
-	@cargo +nightly fmt
+	@cargo +nightly fmt --all
 
 .PHONY: lint
 lint:
-	@cargo clippy --fix --allow-dirty
+	@cargo clippy --all-targets --fix --allow-dirty
 
 .PHONY: bench-baseline
 bench-baseline:

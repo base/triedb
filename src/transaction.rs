@@ -62,7 +62,7 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
 
     pub fn get_account(
         &mut self,
-        address_path: AddressPath,
+        address_path: &AddressPath,
     ) -> Result<Option<Account>, TransactionError> {
         let account =
             self.database.storage_engine.get_account(&mut self.context, address_path).unwrap();
@@ -72,7 +72,7 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
 
     pub fn get_storage_slot(
         &mut self,
-        storage_path: StoragePath,
+        storage_path: &StoragePath,
     ) -> Result<Option<StorageValue>, TransactionError> {
         let storage_slot =
             self.database.storage_engine.get_storage(&mut self.context, storage_path).unwrap();

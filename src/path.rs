@@ -42,6 +42,20 @@ impl From<AddressPath> for Nibbles {
     }
 }
 
+impl<'a> From<&'a AddressPath> for &'a Nibbles {
+    fn from(path: &'a AddressPath) -> Self {
+        &path.path
+    }
+}
+
+impl core::ops::Deref for AddressPath {
+    type Target = [u8];
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.path.as_ref()
+    }
+}
 /// A path to a `slot` in the storage trie of an `account`.
 /// This should contain exactly 64 nibbles, representing the keccak256 hash of an address, followed
 /// by 64 nibbles, representing the keccak256 hash of a slot.
