@@ -162,9 +162,6 @@ impl BufferPoolManager {
     fn get_free_frame(&self) -> Option<FrameId> {
         let mut original_free_frame_idx = self.original_free_frame_idx.load(Ordering::Relaxed);
         loop {
-            eprintln!("original_free_frame_idx: {original_free_frame_idx}");
-            // println!("original_free_frame_idx: {}", original_free_frame_idx);
-            // dbg!("original_free_frame_idx: {}", original_free_frame_idx);
             if original_free_frame_idx < self.num_frames {
                 match self.original_free_frame_idx.compare_exchange_weak(
                     original_free_frame_idx,
@@ -189,7 +186,7 @@ impl BufferPoolManager {
         }
     }
 
-    fn grow_if_needed(&self, min_len: u32) -> Result<(), PageError> {
+    fn grow_if_needed(&self, _min_len: u32) -> Result<(), PageError> {
         // TODO: implement this
         Ok(())
     }
@@ -355,9 +352,9 @@ impl PageManagerTrait for BufferPoolManager {
         }
         file.flush()?;
         for (_, page_id) in dirty_pages.iter() {
-            self.lru_replacer.unpin(*page_id).map_err(|e| {
-                io::Error::other(format!("eviction policy error: {e:?}"))
-            })?;
+            self.lru_replacer
+                .unpin(*page_id)
+                .map_err(|e| io::Error::other(format!("eviction policy error: {e:?}")))?;
         }
         dirty_pages.clear();
         Ok(())
