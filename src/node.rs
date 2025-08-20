@@ -3,7 +3,7 @@ use crate::{
     pointer::Pointer,
     storage::value::{self, Value},
 };
-use alloy_primitives::{hex, StorageValue, B256, U256};
+use alloy_primitives::{StorageValue, B256, U256};
 use alloy_rlp::{
     decode_exact, encode_fixed_size, length_of_length, BufMut, Encodable, Header, MaxEncodedLen,
     EMPTY_STRING_CODE,
@@ -16,11 +16,6 @@ use arrayvec::ArrayVec;
 use proptest::{arbitrary, strategy, strategy::Strategy};
 use proptest_derive::Arbitrary;
 use std::cmp::{max, min};
-
-// This is equivalent to RlpNode::word_rlp(&EMPTY_ROOT_HASH), and is used to encode the storage root
-// of an account with no storage.
-const EMPTY_ROOT_RLP: [u8; 33] =
-    hex!("0xa056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");
 
 const MAX_PREFIX_LENGTH: usize = 64;
 
@@ -150,6 +145,10 @@ impl Node {
 
     pub const fn kind(&self) -> &NodeKind {
         &self.0.kind
+    }
+
+    pub fn into_kind(self) -> NodeKind {
+        self.0.kind
     }
 
     /// Returns whether the [Node] type supports children.
@@ -567,17 +566,17 @@ impl Encodable for Node {
                 let mut buf = [0u8; 110]; // max RLP length for an account: 2 bytes for list length, 9 for nonce, 33 for
                                           // balance, 33 for storage root, 33 for code hash
                 let mut value_rlp = buf.as_mut();
-                let storage_root_rlp =
-                    storage_root.as_ref().map(|p| p.rlp().as_slice()).unwrap_or(&EMPTY_ROOT_RLP);
-                let len = 2 + nonce_rlp.len() + balance_rlp.len() + storage_root_rlp.len() + 33;
-                value_rlp.put_u8(0xf8);
-                value_rlp.put_u8((len - 2) as u8);
-                value_rlp.put_slice(nonce_rlp);
-                value_rlp.put_slice(balance_rlp);
-                value_rlp.put_slice(storage_root_rlp);
-                value_rlp.put_u8(0xa0);
-                value_rlp.put_slice(code_hash.as_slice());
-                LeafNodeRef { key: prefix, value: &buf[..len] }.encode(out);
+                let storage_root_hash = storage_root
+                    .as_ref()
+                    .map_or(EMPTY_ROOT_HASH, |p| p.rlp().as_hash().unwrap_or(EMPTY_ROOT_HASH));
+                let account_rlp_length = encode_account_leaf(
+                    nonce_rlp,
+                    balance_rlp,
+                    code_hash,
+                    &storage_root_hash,
+                    &mut value_rlp,
+                );
+                LeafNodeRef { key: prefix, value: &buf[..account_rlp_length] }.encode(out);
             }
             NodeKind::Branch { ref children } => {
                 if prefix.is_empty() {
@@ -634,6 +633,28 @@ impl Encodable for Node {
     }
 }
 
+#[inline]
+pub fn encode_account_leaf(
+    nonce_rlp: &ArrayVec<u8, 9>,
+    balance_rlp: &ArrayVec<u8, 33>,
+    code_hash: &B256,
+    storage_root: &B256,
+    out: &mut dyn BufMut,
+) -> usize {
+    let len = 2 + nonce_rlp.len() + balance_rlp.len() + 33 * 2;
+    out.put_u8(0xf8);
+    out.put_u8((len - 2) as u8);
+    out.put_slice(nonce_rlp);
+    out.put_slice(balance_rlp);
+    out.put_u8(0xa0);
+    out.put_slice(storage_root.as_slice());
+    out.put_u8(0xa0);
+    out.put_slice(code_hash.as_slice());
+
+    len
+}
+
+#[inline]
 pub fn encode_branch(children: &[Option<Pointer>], out: &mut dyn BufMut) -> usize {
     // first encode the header
     let mut payload_length = 1;
