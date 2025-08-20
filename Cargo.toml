@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 alloy-primitives = { version = "1.2.1", features = ["arbitrary", "rand"] }
 alloy-rlp = "0.3.12"
-alloy-trie = { version = "0.8.1", features = ["arbitrary", "ethereum"] }
+alloy-trie = { path = "../../alloy-rs/trie", features = ["arbitrary", "ethereum"] }
 arrayvec = "0.7.6"
 memmap2 = "0.9.5"
 proptest = "1.7.0"

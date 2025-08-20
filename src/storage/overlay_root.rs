@@ -14,7 +14,7 @@ use alloy_primitives::{
     B256, U256,
 };
 use alloy_rlp::encode_fixed_size;
-use alloy_trie::{BranchNodeCompact, HashBuilder, Nibbles, EMPTY_ROOT_HASH};
+use alloy_trie::{hash_builder::HashBuilderValueRef, merge_parallel_builders, BranchNodeCompact, HashBuilder, Nibbles, EMPTY_ROOT_HASH};
 use arrayvec::ArrayVec;
 
 #[derive(Debug)]
@@ -92,24 +92,24 @@ impl OverlayedRoot {
     }
 }
 struct RootBuilder {
-    hash_builder: HashBuilder,
+    hash_builders: [HashBuilder; 16],
     storage_branch_updates: B256Map<HashMap<Nibbles, BranchNodeCompact>>,
 }
 
 impl RootBuilder {
     fn new() -> Self {
         Self {
-            hash_builder: HashBuilder::default().with_updates(true),
+            hash_builders: core::array::from_fn(|_| HashBuilder::default().with_updates(true)),
             storage_branch_updates: B256Map::default(),
         }
     }
 
     fn add_leaf(&mut self, key: Nibbles, value: &[u8]) {
-        self.hash_builder.add_leaf(key, value);
+        self.hash_builders[key[0] as usize].add_leaf(key, value);
     }
 
     fn add_branch(&mut self, key: Nibbles, value: B256, stored_in_database: bool) {
-        self.hash_builder.add_branch(key, value, stored_in_database);
+        self.hash_builders[key[0] as usize].add_branch(key, value, stored_in_database);
     }
 
     fn add_storage_branch_updates(
@@ -121,8 +121,29 @@ impl RootBuilder {
     }
 
     fn finalize(self) -> OverlayedRoot {
-        let (mut hash_builder, updated_branch_nodes) = self.hash_builder.split();
-        OverlayedRoot::new(hash_builder.root(), updated_branch_nodes, self.storage_branch_updates)
+        let root = merge_parallel_builders(self.hash_builders);
+        // println!("root: {:?}", root);
+        // let mut top_level_builder = HashBuilder::default();
+        // let mut updated_branch_nodes = HashMap::default();
+        // for sub_builder in self.hash_builders.into_iter() {
+        //     let (sub_builder, branch_nodes) = sub_builder.split();
+        //     println!("sub_builder: {:?}", sub_builder);
+        //     println!("sub_builder.key: {:?}", sub_builder.key);
+        //     println!("sub_builder.value: {:?}", sub_builder.value);
+        //     println!("branch_nodes: {:?}", branch_nodes);
+        //     match sub_builder.value.as_ref() {
+        //         HashBuilderValueRef::Hash(hash) => {
+        //             top_level_builder.add_branch(sub_builder.key, *hash, false);
+        //         }
+        //         HashBuilderValueRef::Bytes(bytes) => {
+        //             if !bytes.is_empty() {
+        //                 top_level_builder.add_leaf(sub_builder.key, bytes);
+        //             }
+        //         }
+        //     }
+        //     updated_branch_nodes.extend(branch_nodes);
+        // }
+        OverlayedRoot::new(root, Default::default(), self.storage_branch_updates)
     }
 }
 
@@ -427,14 +448,13 @@ impl StorageEngine {
                 self.add_overlay_to_root_builder(&mut storage_root_builder, &storage_overlay);
             }
         };
-        let (mut storage_hash_builder, updated_storage_branch_nodes) =
-            storage_root_builder.hash_builder.split();
-        let new_root = storage_hash_builder.root();
+        let overlayed_root = storage_root_builder.finalize();
+        let new_root = overlayed_root.root;
         // println!("New root: {:?}", new_root);
 
         root_builder.add_storage_branch_updates(
             B256::from_slice(&path.pack()),
-            updated_storage_branch_nodes,
+            overlayed_root.updated_branch_nodes,
         );
 
         // println!("Adding overlayed account leaf: {:?}", path);
@@ -525,15 +545,14 @@ impl StorageEngine {
         let mut storage_root_builder = RootBuilder::new();
         self.add_overlay_to_root_builder(&mut storage_root_builder, &storage_overlay);
 
-        let (mut storage_hash_builder, updated_storage_branch_nodes) =
-            storage_root_builder.hash_builder.split();
-        let storage_root = storage_hash_builder.root();
+        let overlayed_root = storage_root_builder.finalize();
+        let storage_root = overlayed_root.root;
 
         // println!("Updated storage branch nodes: {:?}", updated_storage_branch_nodes);
 
         root_builder.add_storage_branch_updates(
             B256::from_slice(&path.pack()),
-            updated_storage_branch_nodes,
+            overlayed_root.updated_branch_nodes,
         );
 
         let encoded = self.encode_account_with_root(account, storage_root);
