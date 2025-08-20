@@ -1,8 +1,10 @@
 use std::rc::Rc;
+use std::sync::mpsc;
 
 use crate::{
     account::Account,
     context::TransactionContext,
+    executor::{threadpool, Executor, Future, Wait},
     node::{encode_account_leaf, Node, NodeKind},
     overlay::{OverlayState, OverlayValue},
     page::SlottedPage,
@@ -14,8 +16,9 @@ use alloy_primitives::{
     B256, U256,
 };
 use alloy_rlp::encode_fixed_size;
-use alloy_trie::{hash_builder::HashBuilderValueRef, merge_parallel_builders, BranchNodeCompact, HashBuilder, Nibbles, EMPTY_ROOT_HASH};
+use alloy_trie::{merge_parallel_builders, BranchNodeCompact, HashBuilder, Nibbles, EMPTY_ROOT_HASH};
 use arrayvec::ArrayVec;
+use rayon::yield_now;
 
 #[derive(Debug)]
 enum TriePosition<'a> {
@@ -91,25 +94,89 @@ impl OverlayedRoot {
         }
     }
 }
+
+#[derive(Debug, Clone)]
+enum WorkItem {
+    Leaf(Nibbles, Vec<u8>),
+    Branch(Nibbles, B256, bool),
+}
+
+fn hash_builder_worker(
+    receiver: mpsc::Receiver<WorkItem>,
+) -> (HashBuilder, HashMap<Nibbles, BranchNodeCompact>) {
+    let mut hash_builder = HashBuilder::default().with_updates(true);
+    
+    loop {
+        match receiver.try_recv() {
+            Ok(work_item) => {
+                match work_item {
+                    WorkItem::Leaf(key, value) => {
+                        hash_builder.add_leaf(key, &value);
+                    }
+                    WorkItem::Branch(key, value, stored_in_database) => {
+                        hash_builder.add_branch(key, value, stored_in_database);
+                    }
+                }
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                break;
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                yield_now();
+            }
+        }
+    }
+
+    println!("Worker finished");
+
+    let (builder, updated_branch_nodes) = hash_builder.split();
+    (builder, updated_branch_nodes)
+}
+
 struct RootBuilder {
-    hash_builders: [HashBuilder; 16],
+    senders: [Option<mpsc::Sender<WorkItem>>; 16],
+    worker_futures: [Option<Future<(HashBuilder, HashMap<Nibbles, BranchNodeCompact>)>>; 16],
     storage_branch_updates: B256Map<HashMap<Nibbles, BranchNodeCompact>>,
 }
 
 impl RootBuilder {
-    fn new() -> Self {
+    fn new(threadpool: &rayon::ThreadPool) -> Self {
+        let mut senders = core::array::from_fn(|_| None);
+        let mut worker_futures = core::array::from_fn(|_| None);
+        
+        for i in 0..16 {
+            let (sender, receiver) = mpsc::channel();
+            senders[i] = Some(sender);
+            
+            let future = threadpool.defer(move || hash_builder_worker(receiver));
+            worker_futures[i] = Some(future);
+        }
+        
         Self {
-            hash_builders: core::array::from_fn(|_| HashBuilder::default().with_updates(true)),
+            senders,
+            worker_futures,
             storage_branch_updates: B256Map::default(),
         }
     }
 
     fn add_leaf(&mut self, key: Nibbles, value: &[u8]) {
-        self.hash_builders[key[0] as usize].add_leaf(key, value);
+        // println!("Adding leaf: {:?}", key);
+        let index = key[0] as usize;
+        if let Some(sender) = &self.senders[index] {
+            let work_item = WorkItem::Leaf(key, value.to_vec());
+            // Ignore send errors - the channel may be closed during shutdown
+            sender.send(work_item).unwrap();
+        }
     }
 
     fn add_branch(&mut self, key: Nibbles, value: B256, stored_in_database: bool) {
-        self.hash_builders[key[0] as usize].add_branch(key, value, stored_in_database);
+        // println!("Adding branch: {:?}", key);
+        let index = key[0] as usize;
+        if let Some(sender) = &self.senders[index] {
+            let work_item = WorkItem::Branch(key, value, stored_in_database);
+            // Ignore send errors - the channel may be closed during shutdown
+            sender.send(work_item).unwrap();
+        }
     }
 
     fn add_storage_branch_updates(
@@ -120,30 +187,39 @@ impl RootBuilder {
         self.storage_branch_updates.insert(account, updates);
     }
 
-    fn finalize(self) -> OverlayedRoot {
-        let root = merge_parallel_builders(self.hash_builders);
-        // println!("root: {:?}", root);
-        // let mut top_level_builder = HashBuilder::default();
-        // let mut updated_branch_nodes = HashMap::default();
-        // for sub_builder in self.hash_builders.into_iter() {
-        //     let (sub_builder, branch_nodes) = sub_builder.split();
-        //     println!("sub_builder: {:?}", sub_builder);
-        //     println!("sub_builder.key: {:?}", sub_builder.key);
-        //     println!("sub_builder.value: {:?}", sub_builder.value);
-        //     println!("branch_nodes: {:?}", branch_nodes);
-        //     match sub_builder.value.as_ref() {
-        //         HashBuilderValueRef::Hash(hash) => {
-        //             top_level_builder.add_branch(sub_builder.key, *hash, false);
-        //         }
-        //         HashBuilderValueRef::Bytes(bytes) => {
-        //             if !bytes.is_empty() {
-        //                 top_level_builder.add_leaf(sub_builder.key, bytes);
-        //             }
-        //         }
-        //     }
-        //     updated_branch_nodes.extend(branch_nodes);
-        // }
-        OverlayedRoot::new(root, Default::default(), self.storage_branch_updates)
+    fn finalize(mut self) -> OverlayedRoot {
+        // Close all channels to signal workers to finish
+        println!("Closing channels");
+        for sender_opt in self.senders {
+            if let Some(sender) = sender_opt {
+                drop(sender);
+            }
+        }
+        println!("Channels closed");
+
+        // Wait for all workers to complete and collect their results
+        let mut hash_builders = Vec::with_capacity(16);
+        let mut updated_branch_nodes = HashMap::default();
+        
+        for future_opt in self.worker_futures.into_iter() {
+            if let Some(future) = future_opt {
+                let (hash_builder, branch_nodes) = future.wait();
+                hash_builders.push(hash_builder.clone());
+                for (key, value) in branch_nodes {
+                    updated_branch_nodes.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        
+        // Convert Vec back to array for merge_parallel_builders
+        let hash_builders_array: [HashBuilder; 16] = hash_builders.try_into()
+            .expect("Should have exactly 16 hash builders");
+        
+        let root = merge_parallel_builders(hash_builders_array);
+
+        println!("Root builder finalized");
+        
+        OverlayedRoot::new(root, updated_branch_nodes, self.storage_branch_updates)
     }
 }
 
@@ -157,13 +233,14 @@ impl StorageEngine {
             return Ok(OverlayedRoot::new_hash(context.root_node_hash));
         }
 
-        let mut root_builder = RootBuilder::new();
+        let threadpool = threadpool::builder().build().map_err(|_| Error::DebugError("Failed to create threadpool".to_string()))?;
+        let mut root_builder = RootBuilder::new(&threadpool);
 
         let root_page = if let Some(root_page_id) = context.root_node_page_id {
             let page = self.get_page(context, root_page_id)?;
             SlottedPage::try_from(page).unwrap()
         } else {
-            self.add_overlay_to_root_builder(&mut root_builder, &overlay);
+            self.add_overlay_to_root_builder(&mut root_builder, &overlay, &threadpool);
             return Ok(root_builder.finalize());
         };
 
@@ -171,7 +248,7 @@ impl StorageEngine {
         let mut stack = TraversalStack::new();
         stack.push_node(root_node.prefix().clone(), root_node, Rc::new(root_page), overlay);
 
-        self.compute_root_with_overlay(context, &mut stack, &mut root_builder)?;
+        self.compute_root_with_overlay(context, &mut stack, &mut root_builder, &threadpool)?;
 
         Ok(root_builder.finalize())
     }
@@ -181,6 +258,7 @@ impl StorageEngine {
         context: &TransactionContext,
         stack: &mut TraversalStack<'a>,
         root_builder: &mut RootBuilder,
+        threadpool: &rayon::ThreadPool,
     ) -> Result<(), Error> {
         // Depth first traversal of the trie, starting at the root node.
         // This applies any overlay state to the trie, taking precedence over the trie's own values.
@@ -190,7 +268,7 @@ impl StorageEngine {
             match position {
                 TriePosition::None => {
                     // No trie position, process whatever is in the overlay
-                    self.add_overlay_to_root_builder(root_builder, &overlay);
+                    self.add_overlay_to_root_builder(root_builder, &overlay, threadpool);
                 }
                 TriePosition::Pointer(path, page, pointer, can_add_by_hash) => {
                     if overlay.is_empty() && can_add_by_hash {
@@ -211,6 +289,7 @@ impl StorageEngine {
                         &pointer,
                         page,
                         stack,
+                        threadpool,
                     )?;
                 }
                 TriePosition::Node(path, page, node) => {
@@ -221,12 +300,12 @@ impl StorageEngine {
                         // full overlay. We need to process it all together,
                         // as the post_overlay may contain descendants of the pre_overlay.
                         // println!("Processing full overlay due to prefix: {:?}", path);
-                        self.add_overlay_to_root_builder(root_builder, &overlay);
+                        self.add_overlay_to_root_builder(root_builder, &overlay, threadpool);
                         continue;
                     }
 
                     // println!("Adding pre_overlay before path: {:?}", path);
-                    self.add_overlay_to_root_builder(root_builder, &pre_overlay);
+                    self.add_overlay_to_root_builder(root_builder, &pre_overlay, threadpool);
                     // Defer the post_overlay to be processed after the node is traversed
                     // println!("Pushing post_overlay after path: {:?}", path);
                     stack.push_overlay(post_overlay);
@@ -242,6 +321,7 @@ impl StorageEngine {
                                     self.add_overlay_to_root_builder(
                                         root_builder,
                                         &matching_overlay,
+                                        threadpool,
                                     );
                                     continue;
                                 }
@@ -270,6 +350,7 @@ impl StorageEngine {
                                 balance_rlp,
                                 code_hash,
                                 storage_root,
+                                threadpool,
                             )?;
                         }
                         NodeKind::StorageLeaf { value_rlp } => {
@@ -280,6 +361,7 @@ impl StorageEngine {
                                     self.add_overlay_to_root_builder(
                                         root_builder,
                                         &matching_overlay,
+                                        threadpool,
                                     );
                                     continue;
                                 }
@@ -364,6 +446,7 @@ impl StorageEngine {
         mut balance_rlp: ArrayVec<u8, 33>,
         mut code_hash: B256,
         storage_root: Option<Pointer>,
+        threadpool: &rayon::ThreadPool,
     ) -> Result<(), Error> {
         let overlayed_account = overlay.lookup(&path);
         match overlayed_account {
@@ -401,7 +484,7 @@ impl StorageEngine {
             return Ok(());
         }
 
-        let mut storage_root_builder = RootBuilder::new();
+        let mut storage_root_builder = RootBuilder::new(&threadpool);
 
         // We have storage overlays, need to compute a new storage root
         let storage_overlay = overlay.with_prefix_offset(64);
@@ -424,6 +507,7 @@ impl StorageEngine {
                         context,
                         &mut storage_stack,
                         &mut storage_root_builder,
+                        threadpool,
                     )?
                 } else {
                     let storage_page =
@@ -440,12 +524,13 @@ impl StorageEngine {
                         context,
                         &mut storage_stack,
                         &mut storage_root_builder,
+                        threadpool,
                     )?;
                 }
             }
             None => {
                 // No existing storage root, just add the overlay
-                self.add_overlay_to_root_builder(&mut storage_root_builder, &storage_overlay);
+                self.add_overlay_to_root_builder(&mut storage_root_builder, &storage_overlay, threadpool);
             }
         };
         let overlayed_root = storage_root_builder.finalize();
@@ -497,6 +582,7 @@ impl StorageEngine {
         child: &Pointer,
         current_page: Rc<SlottedPage<'a>>,
         stack: &mut TraversalStack<'a>,
+        threadpool: &rayon::ThreadPool,
     ) -> Result<(), Error> {
         // First consider the overlay. All values in it must already contain the child_path prefix.
         // If the overlay matches the child path, we can add it to the hash builder and skip
@@ -508,7 +594,7 @@ impl StorageEngine {
                 !matches!(overlay_value, Some(OverlayValue::Account(_)))
             {
                 // the child path is directly overlayed, so only use the overlay state
-                self.add_overlay_to_root_builder(root_builder, &overlay);
+                self.add_overlay_to_root_builder(root_builder, &overlay, threadpool);
                 return Ok(());
             }
         }
@@ -534,6 +620,7 @@ impl StorageEngine {
         path: Nibbles,
         account: &Account,
         storage_overlay: OverlayState,
+        threadpool: &rayon::ThreadPool,
     ) -> Result<(), Error> {
         if storage_overlay.is_empty() {
             let encoded = self.encode_account(account);
@@ -542,8 +629,8 @@ impl StorageEngine {
             return Ok(());
         }
 
-        let mut storage_root_builder = RootBuilder::new();
-        self.add_overlay_to_root_builder(&mut storage_root_builder, &storage_overlay);
+        let mut storage_root_builder = RootBuilder::new(&threadpool);
+        self.add_overlay_to_root_builder(&mut storage_root_builder, &storage_overlay, threadpool);
 
         let overlayed_root = storage_root_builder.finalize();
         let storage_root = overlayed_root.root;
@@ -561,7 +648,7 @@ impl StorageEngine {
         Ok(())
     }
 
-    fn add_overlay_to_root_builder(&self, root_builder: &mut RootBuilder, overlay: &OverlayState) {
+    fn add_overlay_to_root_builder(&self, root_builder: &mut RootBuilder, overlay: &OverlayState, threadpool: &rayon::ThreadPool) {
         let mut last_processed_path: Option<&[u8]> = None;
         for (path, value) in overlay.iter() {
             if let Some(last_processed_path) = last_processed_path {
@@ -579,6 +666,7 @@ impl StorageEngine {
                         Nibbles::from_nibbles(path),
                         account,
                         storage_overlay,
+                        threadpool,
                     )
                     .unwrap();
                     last_processed_path = Some(path);
