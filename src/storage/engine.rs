@@ -9,7 +9,7 @@ use crate::{
         TrieValue,
     },
     page::{
-        Page, PageError, PageId, PageManager, PageMut, SlottedPage, SlottedPageMut,
+        Page, PageError, PageId, PageManagerTrait, PageMut, SlottedPage, SlottedPageMut,
         CELL_POINTER_SIZE,
     },
     path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH, STORAGE_PATH_LENGTH},
@@ -34,7 +34,7 @@ use std::{
 /// which could be memory-mapped files, in-memory storage, or other implementations.
 #[derive(Debug)]
 pub struct StorageEngine {
-    pub(crate) page_manager: PageManager,
+    pub(crate) page_manager: Box<dyn PageManagerTrait>,
     pub(crate) meta_manager: Mutex<MetadataManager>,
     pub(crate) alive_snapshot: AtomicU64,
 }
@@ -47,10 +47,13 @@ enum PointerChange {
 }
 
 impl StorageEngine {
-    pub fn new(page_manager: PageManager, meta_manager: MetadataManager) -> Self {
+    pub fn new(
+        page_manager: impl PageManagerTrait + 'static,
+        meta_manager: MetadataManager,
+    ) -> Self {
         let alive_snapshot = meta_manager.active_slot().snapshot_id();
         Self {
-            page_manager,
+            page_manager: Box::new(page_manager),
             meta_manager: Mutex::new(meta_manager),
             alive_snapshot: AtomicU64::new(alive_snapshot),
         }
@@ -100,7 +103,7 @@ impl StorageEngine {
         context: &mut TransactionContext,
         page_id: PageId,
     ) -> Result<PageMut<'_>, Error> {
-        let original_page = self.page_manager.get(context.snapshot_id, page_id)?;
+        let original_page = self.page_manager.get(page_id)?;
         context.transaction_metrics.inc_pages_read();
 
         // if the page already has the correct snapshot id, return it without cloning.
@@ -1916,7 +1919,7 @@ impl StorageEngine {
         context: &TransactionContext,
         page_id: PageId,
     ) -> Result<Page<'_>, Error> {
-        let page = self.page_manager.get(context.snapshot_id, page_id)?;
+        let page = self.page_manager.get(page_id)?;
         context.transaction_metrics.inc_pages_read();
         Ok(page)
     }
