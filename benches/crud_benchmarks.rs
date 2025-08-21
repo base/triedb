@@ -124,7 +124,7 @@ fn bench_account_reads(c: &mut Criterion) {
 
                         // Read its chunk of addresses
                         for addr in thread_addresses {
-                            let a = tx.get_account(addr.clone()).unwrap();
+                            let a = tx.get_account(&addr).unwrap();
                             assert!(a.is_some());
                         }
 

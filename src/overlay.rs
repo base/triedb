@@ -267,7 +267,6 @@ impl OverlayState {
     ///
     /// This operation is O(1) and creates no allocations. The returned OverlayState
     /// shares the same underlying Arc<[...]> data and only tracks different bounds.
-    /// Perfect for thread pool scenarios where each thread processes a disjoint range.
     pub fn sub_slice(&self, start: usize, end: usize) -> OverlayState {
         let current_len = self.len();
         let end = end.min(current_len);
