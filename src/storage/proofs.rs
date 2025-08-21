@@ -9,12 +9,12 @@ use crate::{
         TrieValue,
     },
     page::SlottedPage,
-    path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH, STORAGE_PATH_LENGTH},
+    path::{AddressPath, Path, StoragePath, ADDRESS_PATH_LENGTH, STORAGE_PATH_LENGTH},
 };
 
 use alloy_primitives::{map::B256Map, Bytes, B256, U256};
 use alloy_rlp::{decode_exact, BytesMut};
-use alloy_trie::{nybbles::common_prefix_length, Nibbles, EMPTY_ROOT_HASH};
+use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
 
 use super::engine::{Error, StorageEngine};
 
@@ -59,7 +59,7 @@ impl StorageEngine {
     fn get_value_with_proof(
         &self,
         context: &TransactionContext,
-        path: Nibbles,
+        path: Path,
     ) -> Result<Option<AccountProof>, Error> {
         assert!(
             path.len() == ADDRESS_PATH_LENGTH || path.len() == STORAGE_PATH_LENGTH,
@@ -71,10 +71,8 @@ impl StorageEngine {
             Some(page_id) => page_id,
         };
 
-        let account_proof = AccountProof {
-            hashed_address: path.slice(..ADDRESS_PATH_LENGTH).clone(),
-            ..Default::default()
-        };
+        let account_proof =
+            AccountProof { hashed_address: path.trunc_to_nibbles(), ..Default::default() };
         let slotted_page = self.get_slotted_page(context, root_node_page_id)?;
         let proof =
             self.get_value_with_proof_from_page(context, &path, 0, slotted_page, 0, account_proof)?;
@@ -86,7 +84,7 @@ impl StorageEngine {
     fn get_value_with_proof_from_page(
         &self,
         context: &TransactionContext,
-        original_path: &Nibbles,
+        original_path: &Path,
         path_offset: usize,
         slotted_page: SlottedPage<'_>,
         page_index: u8,
@@ -94,17 +92,19 @@ impl StorageEngine {
     ) -> Result<Option<AccountProof>, Error> {
         let node: Node = slotted_page.get_value(page_index)?;
 
-        let common_prefix_length =
-            common_prefix_length(&original_path[path_offset..], node.prefix());
+        let common_prefix_length = original_path
+            .with_offset(path_offset)
+            .trunc_to_nibbles()
+            .common_prefix_length(node.prefix());
         if common_prefix_length < node.prefix().len() {
             return Ok(None);
         }
 
         let proof_node = node.rlp_encode();
-        let full_node_path = original_path.slice(..path_offset);
-        proof.proof.insert(full_node_path.clone(), Bytes::from(proof_node.to_vec()));
+        let full_node_path = original_path.slice(0, path_offset);
+        proof.proof.insert(full_node_path.trunc_to_nibbles(), Bytes::from(proof_node.to_vec()));
 
-        let remaining_path = original_path.slice(path_offset + common_prefix_length..);
+        let remaining_path = original_path.with_offset(path_offset + common_prefix_length);
         if remaining_path.is_empty() {
             match node.value() {
                 Ok(TrieValue::Account(account)) => {
@@ -140,8 +140,10 @@ impl StorageEngine {
 
                 if let Some(storage_root) = storage_root {
                     proof.account.storage_root = storage_root.rlp().as_hash().unwrap();
-                    let storage_proof =
-                        StorageProof { hashed_slot: remaining_path.clone(), ..Default::default() };
+                    let storage_proof = StorageProof {
+                        hashed_slot: remaining_path.trunc_to_nibbles(),
+                        ..Default::default()
+                    };
                     let storage_location = storage_root.location();
                     let storage_proof = if storage_location.cell_index().is_some() {
                         self.get_storage_proof_from_page(
@@ -182,14 +184,14 @@ impl StorageEngine {
             Branch { ref children } => {
                 if !prefix.is_empty() {
                     // extension + branch
-                    let branch_path = original_path.slice(..path_offset + common_prefix_length);
+                    let branch_path = original_path.slice(0, path_offset + common_prefix_length);
                     let mut branch_rlp = BytesMut::new();
                     encode_branch(children, &mut branch_rlp);
-                    proof.proof.insert(branch_path.clone(), branch_rlp.freeze().into());
+                    proof.proof.insert(branch_path.trunc_to_nibbles(), branch_rlp.freeze().into());
                 }
 
                 // go down the trie
-                let child_pointer = children[remaining_path[0] as usize].as_ref();
+                let child_pointer = children[remaining_path.get(0).unwrap() as usize].as_ref();
                 let new_path_offset = path_offset + common_prefix_length + 1;
 
                 match child_pointer {
@@ -228,7 +230,7 @@ impl StorageEngine {
     fn get_storage_proof_from_page(
         &self,
         context: &TransactionContext,
-        original_path: &Nibbles,
+        original_path: &Path,
         path_offset: usize,
         slotted_page: SlottedPage<'_>,
         page_index: u8,
@@ -236,17 +238,19 @@ impl StorageEngine {
     ) -> Result<Option<StorageProof>, Error> {
         let node: Node = slotted_page.get_value(page_index)?;
 
-        let common_prefix_length =
-            common_prefix_length(&original_path[path_offset..], node.prefix());
+        let common_prefix_length = original_path
+            .with_offset(path_offset)
+            .trunc_to_nibbles()
+            .common_prefix_length(node.prefix());
         if common_prefix_length < node.prefix().len() {
             return Ok(None);
         }
 
-        let remaining_path = original_path.slice(path_offset + common_prefix_length..);
+        let remaining_path = original_path.with_offset(path_offset + common_prefix_length);
         if remaining_path.is_empty() {
-            let full_node_path = original_path.slice(..path_offset);
+            let full_node_path = original_path.slice(0, path_offset);
             let proof_node = node.rlp_encode();
-            proof.proof.insert(full_node_path, Bytes::from(proof_node.to_vec()));
+            proof.proof.insert(full_node_path.trunc_to_nibbles(), Bytes::from(proof_node.to_vec()));
             match node.value() {
                 Ok(TrieValue::Storage(storage_value)) => {
                     proof.value = storage_value;
@@ -272,19 +276,21 @@ impl StorageEngine {
         match node.kind() {
             Branch { ref children } => {
                 // update account subtree for branch node or branch+extension node
-                let full_node_path = original_path.slice(..path_offset);
+                let full_node_path = original_path.slice(0, path_offset);
                 let proof_node = node.rlp_encode();
-                proof.proof.insert(full_node_path, Bytes::from(proof_node.to_vec()));
+                proof
+                    .proof
+                    .insert(full_node_path.trunc_to_nibbles(), Bytes::from(proof_node.to_vec()));
 
                 if !prefix.is_empty() {
                     // extension + branch
-                    let branch_path = original_path.slice(..path_offset + common_prefix_length);
+                    let branch_path = original_path.slice(0, path_offset + common_prefix_length);
                     let mut branch_rlp = BytesMut::new();
                     encode_branch(children, &mut branch_rlp);
-                    proof.proof.insert(branch_path.clone(), branch_rlp.freeze().into());
+                    proof.proof.insert(branch_path.trunc_to_nibbles(), branch_rlp.freeze().into());
                 }
 
-                let child_pointer = children[remaining_path[0] as usize].as_ref();
+                let child_pointer = children[remaining_path.get(0).unwrap() as usize].as_ref();
                 let new_path_offset = path_offset + common_prefix_length + 1;
 
                 match child_pointer {
@@ -337,7 +343,7 @@ mod tests {
             storage_root: proof.account.storage_root,
             code_hash: proof.account.code_hash,
         }));
-        verify_proof(root, proof.hashed_address.clone(), expected, proof.proof.values())
+        verify_proof(root, proof.hashed_address, expected, proof.proof.values())
             .expect("failed to verify account proof");
 
         for storage_proof in proof.storage_proofs.values() {
@@ -348,7 +354,7 @@ mod tests {
     fn verify_storage_proof(proof: &StorageProof, root: B256) {
         verify_proof(
             root,
-            proof.hashed_slot.clone(),
+            proof.hashed_slot,
             Some(alloy_rlp::encode(proof.value)),
             proof.proof.values(),
         )
