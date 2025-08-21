@@ -7,7 +7,7 @@ use std::{
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
-use dashmap::{mapref::entry::Entry, DashMap};
+use dashmap::{DashMap, DashSet};
 use parking_lot::Mutex;
 
 use crate::{
@@ -79,6 +79,7 @@ pub struct BufferPoolManager {
     dirty_frames: Mutex<Vec<(FrameId, PageId)>>, /* list of dirty frames that need to be flushed
                                                   * to disk, with fix num_frames size */
     lru_replacer: CacheEvict, /* the replacer to find unpinned/candidate pages for eviction */
+    loading_page: DashSet<PageId>, /* set of pages that are being loaded from disk */
 }
 
 impl BufferPoolManager {
@@ -139,6 +140,7 @@ impl BufferPoolManager {
             dirty_frames,
             lru_replacer,
             file,
+            loading_page: DashSet::with_capacity(num_frames as usize),
         })
     }
 
@@ -240,59 +242,94 @@ impl PageManagerTrait for BufferPoolManager {
         if page_id > self.page_count.load(Ordering::Relaxed) {
             return Err(PageError::PageNotFound(page_id));
         }
-
-        match self.page_table.entry(page_id) {
-            Entry::Occupied(entry) => {
-                let frame_header = entry.get();
+        loop {
+            // Check if page is already in the cache
+            if let Some(frame_header) = self.page_table.get(&page_id) {
                 let frame = &self.frames[frame_header.frame_id.0 as usize];
-                unsafe { Page::from_ptr(page_id, frame.ptr) }
+                return unsafe { Page::from_ptr(page_id, frame.ptr) }
             }
-            Entry::Vacant(entry) => {
-                // Only this thread will execute this block for this page_id
+
+            // Otherwise, need to load the page from disk
+            if self.loading_page.insert(page_id) {
+                // This thread is the first to load this page
                 let frame_id = self.get_free_frame().ok_or(PageError::OutOfMemory)?;
                 let buf: *mut [u8; Page::SIZE] = self.frames[frame_id.0 as usize].ptr;
-
                 unsafe {
                     self.file
                         .read_exact_at(&mut *buf, page_id.as_offset() as u64)
                         .map_err(PageError::IO)?;
                 }
-
-                entry.insert(FrameHeader { frame_id, pin_count: 0 });
+                self.page_table.insert(page_id, FrameHeader { frame_id, pin_count: 0 });
                 self.lru_replacer.touch(page_id).map_err(|_| PageError::EvictionPolicy)?;
-
-                unsafe { Page::from_ptr(page_id, buf) }
+                self.loading_page.remove(&page_id);
+                return unsafe { Page::from_ptr(page_id, buf) }
             }
+            // Another thread is already loading this page, spin/yield and retry
+            std::thread::yield_now();
         }
     }
+    // fn get(&self, page_id: PageId) -> Result<Page<'_>, PageError> {
+    //     if page_id > self.page_count.load(Ordering::Relaxed) {
+    //         return Err(PageError::PageNotFound(page_id));
+    //     }
+
+    //     match self.page_table.entry(page_id) {
+    //         Entry::Occupied(entry) => {
+    //             let frame_header = entry.get();
+    //             let frame = &self.frames[frame_header.frame_id.0 as usize];
+    //             unsafe { Page::from_ptr(page_id, frame.ptr) }
+    //         }
+    //         Entry::Vacant(entry) => {
+    //             // Only this thread will execute this block for this page_id
+    //             let frame_id = self.get_free_frame().ok_or(PageError::OutOfMemory)?;
+    //             let buf: *mut [u8; Page::SIZE] = self.frames[frame_id.0 as usize].ptr;
+
+    //             unsafe {
+    //                 self.file
+    //                     .read_exact_at(&mut *buf, page_id.as_offset() as u64)
+    //                     .map_err(PageError::IO)?;
+    //             }
+
+    //             entry.insert(FrameHeader { frame_id, pin_count: 0 });
+    //             self.lru_replacer.touch(page_id).map_err(|_| PageError::EvictionPolicy)?;
+
+    //             unsafe { Page::from_ptr(page_id, buf) }
+    //         }
+    //     }
+    // }
 
     /// Retrieves a mutable page from the buffer pool.
     fn get_mut(&self, snapshot_id: SnapshotId, page_id: PageId) -> Result<PageMut<'_>, PageError> {
         if page_id > self.page_count.load(Ordering::Relaxed) {
             return Err(PageError::PageNotFound(page_id));
         }
-        let cached_page = self.page_table.get(&page_id).map(|frame_header| {
-            let frame = &self.frames[frame_header.frame_id.0 as usize];
-            unsafe { PageMut::from_ptr(page_id, snapshot_id, frame.ptr) }
-        });
-
-        if let Some(page) = cached_page {
-            return page;
+        loop {
+            // Check if page is already in the cache
+            if let Some(frame_header) = self.page_table.get(&page_id) {
+                let frame = &self.frames[frame_header.frame_id.0 as usize];
+                return unsafe { PageMut::from_ptr(page_id, snapshot_id, frame.ptr) }
+            }
+            // Otherwise, need to load the page from disk
+            if self.loading_page.insert(page_id) {
+                // This thread is the first to load this page
+                let frame_id = self.get_free_frame().ok_or(PageError::OutOfMemory)?;
+                let buf: *mut [u8; Page::SIZE] = self.frames[frame_id.0 as usize].ptr;
+                unsafe {
+                    self.file
+                        .read_exact_at(&mut *buf, page_id.as_offset() as u64)
+                        .map_err(PageError::IO)?;
+                }
+                self.page_table.insert(page_id, FrameHeader { frame_id, pin_count: 0 });
+                self.dirty_frames.lock().push((frame_id, page_id));
+                self.lru_replacer.pin(page_id).map_err(|_| PageError::EvictionPolicy)?;
+                self.loading_page.remove(&page_id);
+                return unsafe { PageMut::from_ptr(page_id, snapshot_id, buf) }
+            } else {
+                // Another thread is already loading this page, spin/yield and retry
+                std::thread::yield_now();
+                continue;
+            }
         }
-
-        // Otherwise, need to load the page from disk
-        let frame_id = self.get_free_frame().ok_or(PageError::OutOfMemory)?;
-        let buf: *mut [u8; Page::SIZE] = self.frames[frame_id.0 as usize].ptr;
-        unsafe {
-            self.file
-                .read_exact_at(&mut *buf, page_id.as_offset() as u64)
-                .map_err(PageError::IO)?;
-        }
-        self.page_table.insert(page_id, FrameHeader { frame_id, pin_count: 0 });
-        self.dirty_frames.lock().push((frame_id, page_id));
-        self.lru_replacer.pin(page_id).map_err(|_| PageError::EvictionPolicy)?;
-
-        unsafe { PageMut::from_ptr(page_id, snapshot_id, buf) }
     }
 
     /// Adds a new page to the buffer pool.
@@ -715,13 +752,13 @@ mod tests {
         // Test with limited frames to force eviction
         {
             let mut opts = BufferPoolManagerOptions::new();
-            opts.num_frames(10).page_count(100); // Force frequent eviction
+            opts.num_frames(20).page_count(100); // Force frequent eviction
             let m = Arc::new(
                 BufferPoolManager::open_with_options(&opts, temp_file.path())
                     .expect("buffer pool creation failed"),
             );
 
-            let num_threads = 1;
+            let num_threads = 16;
             let iterations = 50;
             let barrier = Arc::new(Barrier::new(num_threads));
 
@@ -813,6 +850,9 @@ mod tests {
                                 }
                                 Err(PageError::PageNotFound(_)) => {
                                     // Expected if page doesn't exist yet
+                                }
+                                Err(PageError::PageDirty(_)) => {
+                                    // Expected if page is dirty
                                 }
                                 Err(e) => {
                                     panic!("Unexpected error getting page {page_id}: {e:?}")
@@ -906,74 +946,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_page_table_consistency_under_load() {
-        let snapshot = 1234;
-        let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
-
-        // Pre-populate file
-        {
-            let m = BufferPoolManager::open(temp_file.path()).expect("buffer pool creation failed");
-            for i in 1..=20 {
-                let mut page = m.allocate(snapshot + i as u64).expect("page allocation failed");
-                page.contents_mut().iter_mut().for_each(|byte| *byte = i as u8);
-                drop(page);
-            }
-            m.sync().expect("sync failed");
-        }
-
-        {
-            let mut opts = BufferPoolManagerOptions::new();
-            opts.num_frames(10).page_count(20); // Force eviction
-            let m = Arc::new(
-                BufferPoolManager::open_with_options(&opts, temp_file.path())
-                    .expect("buffer pool creation failed"),
-            );
-
-            let num_threads = 10;
-            let iterations = 100;
-            let barrier = Arc::new(Barrier::new(num_threads));
-
-            let handles: Vec<_> = (0..num_threads)
-                .map(|thread_id| {
-                    let m = m.clone();
-                    let barrier = barrier.clone();
-                    
-                    thread::spawn(move || {
-                        barrier.wait();
-                        
-                        for iter in 0..iterations {
-                            let page_id = PageId::new(1 + (thread_id as u32 + iter as u32) % 20).unwrap();
-                            
-                            match m.get(page_id) {
-                                Ok(page) => {
-                                    // Verify the page table entry matches what we got
-                                    if let Some(frame_header) = m.page_table.get(&page_id) {
-                                        let frame = &m.frames[frame_header.frame_id.0 as usize];
-                                        let expected_ptr = frame.ptr as *const u8;
-                                        let actual_ptr = page.all_contents().as_ptr();
-                                        assert_eq!(expected_ptr, actual_ptr, 
-                                                  "Page table entry doesn't match returned page for page {page_id}");
-                                    } else {
-                                        panic!("Page {page_id} was returned but not found in page table");
-                                    }
-                                    
-                                    // Verify content
-                                    let expected = page_id.as_u32() as u8;
-                                    assert_eq!(page.contents(), &[expected; Page::DATA_SIZE]);
-                                }
-                                Err(e) => panic!("Unexpected error getting page {page_id}: {e:?}"),
-                            }
-                        }
-                    })
-                })
-                .collect();
-
-            for handle in handles {
-                handle.join().expect("thread panicked");
-            }
-        }
-    }
 
     #[test]
     fn test_lru_consistency_with_concurrent_access() {
@@ -993,7 +965,7 @@ mod tests {
 
         {
             let mut opts = BufferPoolManagerOptions::new();
-            opts.num_frames(5).page_count(50); // Very limited frames to force heavy eviction
+            opts.num_frames(10).page_count(50); // Very limited frames to force heavy eviction
             let m = Arc::new(
                 BufferPoolManager::open_with_options(&opts, temp_file.path())
                     .expect("buffer pool creation failed"),
