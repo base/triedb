@@ -6,11 +6,10 @@ use crate::{
     context::TransactionContext,
     database::Database,
     node::TrieValue,
-    path::{AddressPath, StoragePath},
+    path::{AddressPath, StoragePath, TriePath},
     storage::proofs::AccountProof,
 };
 use alloy_primitives::{StorageValue, B256};
-use alloy_trie::Nibbles;
 pub use error::TransactionError;
 pub use manager::TransactionManager;
 use sealed::sealed;
@@ -45,7 +44,7 @@ pub struct Transaction<DB, K: TransactionKind> {
     committed: bool,
     context: TransactionContext,
     database: DB,
-    pending_changes: HashMap<Nibbles, Option<TrieValue>>,
+    pending_changes: HashMap<TriePath, Option<TrieValue>>,
     _marker: std::marker::PhantomData<K>,
 }
 
@@ -120,7 +119,7 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
     ) -> Result<(), TransactionError> {
         self.database
             .storage_engine
-            .print_path(&self.context, address_path.to_nibbles(), output_file, verbosity_level)
+            .print_path(&self.context, &address_path.into(), output_file, verbosity_level)
             .unwrap();
         Ok(())
     }
@@ -160,7 +159,7 @@ impl<DB: Deref<Target = Database>> Transaction<DB, RW> {
 
     pub fn commit(mut self) -> Result<(), TransactionError> {
         let mut changes =
-            self.pending_changes.drain().collect::<Vec<(Nibbles, Option<TrieValue>)>>();
+            self.pending_changes.drain().collect::<Vec<(TriePath, Option<TrieValue>)>>();
 
         if !changes.is_empty() {
             self.database.storage_engine.set_values(&mut self.context, changes.as_mut()).unwrap();

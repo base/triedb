@@ -684,6 +684,10 @@ impl arbitrary::Arbitrary for Node {
         fn((Nibbles, NodeKind)) -> Self,
     >;
 
+    fn arbitrary() -> Self::Strategy {
+        Self::arbitrary_with((proptest::collection::SizeRange::new(0..=64), Default::default()))
+    }
+
     fn arbitrary_with(params: Self::Parameters) -> Self::Strategy {
         let (nibbles_params, kind_params) = params;
         Strategy::prop_map(
