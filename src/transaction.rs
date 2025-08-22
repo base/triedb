@@ -6,7 +6,7 @@ use crate::{
     context::TransactionContext,
     database::Database,
     node::TrieValue,
-    path::{AddressPath, Path, StoragePath},
+    path::{AddressPath, StoragePath, TriePath},
     storage::proofs::AccountProof,
 };
 use alloy_primitives::{StorageValue, B256};
@@ -44,7 +44,7 @@ pub struct Transaction<DB, K: TransactionKind> {
     committed: bool,
     context: TransactionContext,
     database: DB,
-    pending_changes: HashMap<Path, Option<TrieValue>>,
+    pending_changes: HashMap<TriePath, Option<TrieValue>>,
     _marker: std::marker::PhantomData<K>,
 }
 
@@ -158,7 +158,8 @@ impl<DB: Deref<Target = Database>> Transaction<DB, RW> {
     }
 
     pub fn commit(mut self) -> Result<(), TransactionError> {
-        let mut changes = self.pending_changes.drain().collect::<Vec<(Path, Option<TrieValue>)>>();
+        let mut changes =
+            self.pending_changes.drain().collect::<Vec<(TriePath, Option<TrieValue>)>>();
 
         if !changes.is_empty() {
             self.database.storage_engine.set_values(&mut self.context, changes.as_mut()).unwrap();

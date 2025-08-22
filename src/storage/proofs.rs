@@ -9,7 +9,7 @@ use crate::{
         TrieValue,
     },
     page::SlottedPage,
-    path::{AddressPath, Path, StoragePath, ADDRESS_PATH_LENGTH, STORAGE_PATH_LENGTH},
+    path::{AddressPath, StoragePath, TriePath, ADDRESS_PATH_LENGTH, STORAGE_PATH_LENGTH},
 };
 
 use alloy_primitives::{map::B256Map, Bytes, B256, U256};
@@ -59,7 +59,7 @@ impl StorageEngine {
     fn get_value_with_proof(
         &self,
         context: &TransactionContext,
-        path: Path,
+        path: TriePath,
     ) -> Result<Option<AccountProof>, Error> {
         assert!(
             path.len() == ADDRESS_PATH_LENGTH || path.len() == STORAGE_PATH_LENGTH,
@@ -84,7 +84,7 @@ impl StorageEngine {
     fn get_value_with_proof_from_page(
         &self,
         context: &TransactionContext,
-        original_path: &Path,
+        original_path: &TriePath,
         path_offset: usize,
         slotted_page: SlottedPage<'_>,
         page_index: u8,
@@ -101,7 +101,7 @@ impl StorageEngine {
         }
 
         let proof_node = node.rlp_encode();
-        let full_node_path = original_path.slice(0, path_offset);
+        let full_node_path = original_path.slice(..path_offset);
         proof.proof.insert(full_node_path.trunc_to_nibbles(), Bytes::from(proof_node.to_vec()));
 
         let remaining_path = original_path.with_offset(path_offset + common_prefix_length);
@@ -184,7 +184,7 @@ impl StorageEngine {
             Branch { ref children } => {
                 if !prefix.is_empty() {
                     // extension + branch
-                    let branch_path = original_path.slice(0, path_offset + common_prefix_length);
+                    let branch_path = original_path.slice(..path_offset + common_prefix_length);
                     let mut branch_rlp = BytesMut::new();
                     encode_branch(children, &mut branch_rlp);
                     proof.proof.insert(branch_path.trunc_to_nibbles(), branch_rlp.freeze().into());
@@ -230,7 +230,7 @@ impl StorageEngine {
     fn get_storage_proof_from_page(
         &self,
         context: &TransactionContext,
-        original_path: &Path,
+        original_path: &TriePath,
         path_offset: usize,
         slotted_page: SlottedPage<'_>,
         page_index: u8,
@@ -248,7 +248,7 @@ impl StorageEngine {
 
         let remaining_path = original_path.with_offset(path_offset + common_prefix_length);
         if remaining_path.is_empty() {
-            let full_node_path = original_path.slice(0, path_offset);
+            let full_node_path = original_path.slice(..path_offset);
             let proof_node = node.rlp_encode();
             proof.proof.insert(full_node_path.trunc_to_nibbles(), Bytes::from(proof_node.to_vec()));
             match node.value() {
@@ -276,7 +276,7 @@ impl StorageEngine {
         match node.kind() {
             Branch { ref children } => {
                 // update account subtree for branch node or branch+extension node
-                let full_node_path = original_path.slice(0, path_offset);
+                let full_node_path = original_path.slice(..path_offset);
                 let proof_node = node.rlp_encode();
                 proof
                     .proof
@@ -284,7 +284,7 @@ impl StorageEngine {
 
                 if !prefix.is_empty() {
                     // extension + branch
-                    let branch_path = original_path.slice(0, path_offset + common_prefix_length);
+                    let branch_path = original_path.slice(..path_offset + common_prefix_length);
                     let mut branch_rlp = BytesMut::new();
                     encode_branch(children, &mut branch_rlp);
                     proof.proof.insert(branch_path.trunc_to_nibbles(), branch_rlp.freeze().into());
