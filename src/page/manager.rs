@@ -1,5 +1,6 @@
 use crate::page::PageId;
 
+mod dirty;
 pub(super) mod mmap;
 pub(super) mod options;
 
