@@ -120,6 +120,7 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
     ) -> Result<(), TransactionError> {
         self.database
             .storage_engine
+            .debugger()
             .print_path(&self.context, address_path.to_nibbles(), output_file, verbosity_level)
             .unwrap();
         Ok(())
@@ -133,6 +134,7 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
     ) -> Result<(), TransactionError> {
         self.database
             .storage_engine
+            .debugger()
             .print_path(&self.context, &storage_path.full_path(), output_file, verbosity_level)
             .unwrap();
         Ok(())

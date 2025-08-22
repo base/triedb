@@ -159,47 +159,44 @@ impl Database {
         self.storage_engine.close()
     }
 
-    pub fn print_page<W: io::Write>(self, buf: W, page_id: Option<PageId>) -> Result<(), Error> {
+    pub fn print_page(&self, buf: impl io::Write, page_id: Option<PageId>) -> Result<(), Error> {
         let context = self.storage_engine.read_context();
-        // TODO: Must use `expect()` because `storage::engine::Error` and `database::Error` are not
-        // compatible. There's probably no reason to use two different error enums here, so maybe
-        // we should unify them. Or maybe we could just rely on `std::io::Error`.
-        self.storage_engine.print_page(&context, buf, page_id).expect("write failed");
-        Ok(())
+        self.storage_engine
+            .debugger()
+            .print_page(&context, buf, page_id)
+            .map_err(Error::EngineError)
     }
 
-    pub fn root_page_info<W: io::Write>(
-        self,
-        mut buf: W,
+    pub fn root_page_info(
+        &self,
+        buf: impl io::Write,
         file_path: impl AsRef<Path>,
     ) -> Result<(), OpenError> {
-        let db_file_path = file_path.as_ref();
-
-        let mut meta_file_path = db_file_path.to_path_buf();
-        meta_file_path.as_mut_os_string().push(".meta");
-        let mut meta_manager =
-            MetadataManager::open(meta_file_path).map_err(OpenError::MetadataError)?;
-
-        let page_count = meta_manager.active_slot().page_count();
-        let active_slot = meta_manager.active_slot();
-        let root_node_page_id = active_slot.root_node_page_id();
-        let orphaned_page_list = meta_manager.orphan_pages().iter().collect::<Vec<_>>();
-
-        writeln!(buf, "Root Node Page ID: {root_node_page_id:?}").expect("write failed");
-
-        //root subtrie pageID
-        writeln!(buf, "Total Page Count: {page_count:?}").expect("write failed");
-
-        //orphaned pages list (grouped by page)
-        writeln!(buf, "Orphaned Pages: {orphaned_page_list:?}").expect("write failed");
-
-        Ok(())
+        self.storage_engine.debugger().root_page_info(buf, file_path).map_err(|e| match e {
+            engine::Error::IO(io_err) => OpenError::IO(io_err),
+            engine::Error::PageError(page_err) => OpenError::PageError(page_err),
+            _ => OpenError::IO(io::Error::other("Root page info failed")),
+        })
     }
 
-    pub fn print_statistics<W: io::Write>(self, buf: W) -> Result<(), Error> {
+    pub fn print_statistics(&self, buf: impl io::Write) -> Result<(), Error> {
         let context = self.storage_engine.read_context();
-        self.storage_engine.debug_statistics(&context, buf).expect("write failed");
-        Ok(())
+        self.storage_engine.debugger().debug_statistics(&context, buf).map_err(Error::EngineError)
+    }
+
+    pub fn consistency_check(
+        &self,
+        buf: impl io::Write,
+        file_path: impl AsRef<Path>,
+    ) -> Result<(), OpenError> {
+        self.storage_engine
+            .debugger()
+            .database_consistency_check(buf, file_path, &self.storage_engine)
+            .map_err(|e| match e {
+                engine::Error::IO(io_err) => OpenError::IO(io_err),
+                engine::Error::PageError(page_err) => OpenError::PageError(page_err),
+                _ => OpenError::IO(io::Error::other("Consistency check failed")),
+            })
     }
 
     pub fn begin_ro(&self) -> Result<Transaction<&Self, RO>, TransactionError> {
