@@ -75,7 +75,7 @@ fn bench_account_reads(c: &mut Criterion) {
             |db| {
                 let mut tx = db.begin_ro().unwrap();
                 for addr in &addresses {
-                    let a = tx.get_account(addr.clone()).unwrap();
+                    let a = tx.get_account(addr).unwrap();
                     assert!(a.is_some());
                 }
                 tx.commit().unwrap();
@@ -311,7 +311,7 @@ fn bench_mixed_operations(c: &mut Criterion) {
                         0 => {
                             // Read
                             let address = existing_addresses[i].clone();
-                            let account = tx.get_account(address.clone()).unwrap();
+                            let account = tx.get_account(&address).unwrap();
                             assert!(account.is_some());
                         }
                         1 => {
@@ -339,8 +339,8 @@ fn bench_mixed_operations(c: &mut Criterion) {
                         }
                         4 => {
                             // Read storage
-                            let (storage_path, _) = existing_storage_slots[i].clone();
-                            let storage_value = tx.get_storage_slot(storage_path.clone()).unwrap();
+                            let (storage_path, _) = &existing_storage_slots[i];
+                            let storage_value = tx.get_storage_slot(storage_path).unwrap();
                             assert!(storage_value.is_some());
                         }
                         5 => {
@@ -405,7 +405,7 @@ fn bench_storage_reads(c: &mut Criterion) {
             |db| {
                 let mut tx = db.begin_ro().unwrap();
                 storage_paths_values.iter().for_each(|(storage_path, _)| {
-                    let a = tx.get_storage_slot(storage_path.clone()).unwrap();
+                    let a = tx.get_storage_slot(storage_path).unwrap();
                     assert!(a.is_some());
                 });
                 tx.commit().unwrap();

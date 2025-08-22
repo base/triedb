@@ -346,14 +346,14 @@ mod tests {
 
         // The read transaction was created before the write was committed, so it should not see the
         // changes.
-        let read_account = ro_tx.get_account(AddressPath::for_address(address)).unwrap();
+        let read_account = ro_tx.get_account(&AddressPath::for_address(address)).unwrap();
 
         assert_eq!(account1, read_account.unwrap());
 
         // The writer transaction is committed, so the read transaction should see the changes.
         let mut ro_tx = db.begin_ro().unwrap();
 
-        let read_account = ro_tx.get_account(AddressPath::for_address(address)).unwrap();
+        let read_account = ro_tx.get_account(&AddressPath::for_address(address)).unwrap();
 
         assert_eq!(account2, read_account.unwrap());
 
@@ -397,7 +397,7 @@ mod tests {
 
         let db = Database::open(&file_path).unwrap();
         let mut tx = db.begin_ro().unwrap();
-        let account = tx.get_account(AddressPath::for_address(address1)).unwrap().unwrap();
+        let account = tx.get_account(&AddressPath::for_address(address1)).unwrap().unwrap();
         assert_eq!(account, account1);
 
         tx.commit().unwrap();
@@ -413,10 +413,10 @@ mod tests {
         let db = Database::open(&file_path).unwrap();
         let mut tx = db.begin_ro().unwrap();
 
-        let account = tx.get_account(AddressPath::for_address(address1)).unwrap().unwrap();
+        let account = tx.get_account(&AddressPath::for_address(address1)).unwrap().unwrap();
         assert_eq!(account, account1);
 
-        let account = tx.get_account(AddressPath::for_address(address2)).unwrap().unwrap();
+        let account = tx.get_account(&AddressPath::for_address(address2)).unwrap().unwrap();
         assert_eq!(account, account2);
     }
 
@@ -507,7 +507,7 @@ mod tests {
         let mut read_tx = db.begin_ro().expect("ro transaction creation failed");
         for (address, account) in &initial_accounts {
             assert_eq!(
-                read_tx.get_account(address.clone()).expect("error while reading account"),
+                read_tx.get_account(address).expect("error while reading account"),
                 account.clone()
             );
         }
@@ -524,7 +524,7 @@ mod tests {
         read_tx.clear_cache();
         for (address, account) in &initial_accounts {
             assert_eq!(
-                read_tx.get_account(address.clone()).expect("error while reading account"),
+                read_tx.get_account(address).expect("error while reading account"),
                 account.clone()
             );
         }
@@ -548,7 +548,7 @@ mod tests {
         tx.commit().unwrap();
 
         let mut tx = begin_ro(db_arc).unwrap();
-        let account = tx.get_account(AddressPath::for_address(address)).unwrap().unwrap();
+        let account = tx.get_account(&AddressPath::for_address(address)).unwrap().unwrap();
         assert_eq!(account, Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY));
     }
 }
