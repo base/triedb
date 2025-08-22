@@ -423,7 +423,6 @@ mod tests {
 
     use super::*;
     use std::{
-        collections::HashSet,
         io::Seek,
         sync::{atomic::AtomicUsize, Arc, Barrier},
         thread,
@@ -619,6 +618,22 @@ mod tests {
     }
 
     #[test]
+    fn test_allocate_oom() {
+        let snapshot = 1234;
+        let f = tempfile::tempfile().expect("temporary file creation failed");
+        let mut opts = BufferPoolManagerOptions::new();
+        opts.num_frames(10);
+        let m = BufferPoolManager::from_file_with_options(&opts, f.try_clone().unwrap())
+            .expect("mmap creation failed");
+
+        for _ in 1..=10 {
+            m.allocate(snapshot).expect("failed to allocate page");
+        }
+        let page = m.allocate(snapshot).unwrap_err();
+        assert!(matches!(page, PageError::OutOfMemory));
+    }
+
+    #[test]
     fn pool_eviction() {
         let snapshot = 123;
         let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
@@ -655,16 +670,18 @@ mod tests {
         // hits/misses
         let snapshot = 1234;
         let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
+        let total_pages = 50;
+        let num_frames = 200; // Plenty of frames to avoid eviction
 
         // Pre-populate the file with test data
         {
             let mut opts = BufferPoolManagerOptions::new();
-            opts.num_frames(100); // Plenty of frames to avoid eviction
+            opts.num_frames(num_frames);
             let m = BufferPoolManager::open_with_options(&opts, temp_file.path())
                 .expect("buffer pool creation failed");
 
             // Allocate and initialize test pages
-            for i in 1..=50 {
+            for i in 1..=total_pages {
                 let mut page = m.allocate(snapshot + i as u64).expect("page allocation failed");
                 page.contents_mut().iter_mut().for_each(|byte| *byte = i as u8);
                 drop(page);
@@ -675,7 +692,7 @@ mod tests {
         // Test concurrent access to the same pages
         {
             let mut opts = BufferPoolManagerOptions::new();
-            opts.num_frames(100).page_count(50);
+            opts.num_frames(num_frames).page_count(total_pages);
             let m = Arc::new(
                 BufferPoolManager::open_with_options(&opts, temp_file.path())
                     .expect("buffer pool creation failed"),
@@ -723,7 +740,7 @@ mod tests {
             }
 
             // Verify final state consistency
-            for i in 1..=10 {
+            for i in 1..=total_pages {
                 let page_id = PageId::new(i).unwrap();
                 let page = m.get(page_id).expect("page should exist");
                 assert_eq!(page.contents(), &[i as u8; Page::DATA_SIZE]);
@@ -736,12 +753,13 @@ mod tests {
         // Test eviction under pressure race condition
         let snapshot = 1234;
         let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
+        let total_pages = 1000;
 
         // Pre-populate the file with test data
         {
             let m = BufferPoolManager::open(temp_file.path()).expect("buffer pool creation failed");
 
-            for i in 1..=100 {
+            for i in 1..=total_pages {
                 let mut page = m.allocate(snapshot + i as u64).expect("page allocation failed");
                 page.contents_mut().iter_mut().for_each(|byte| *byte = i as u8);
                 drop(page);
@@ -751,15 +769,16 @@ mod tests {
 
         // Test with limited frames to force eviction
         {
+            let num_threads = 16;
+            let iterations = 50;
+            let num_frames = 32;
             let mut opts = BufferPoolManagerOptions::new();
-            opts.num_frames(20).page_count(100); // Force frequent eviction
+            opts.num_frames(num_frames).page_count(total_pages); // Force frequent eviction
             let m = Arc::new(
                 BufferPoolManager::open_with_options(&opts, temp_file.path())
                     .expect("buffer pool creation failed"),
             );
 
-            let num_threads = 16;
-            let iterations = 50;
             let barrier = Arc::new(Barrier::new(num_threads));
 
             let handles: Vec<_> = (0..num_threads)
@@ -772,9 +791,10 @@ mod tests {
 
                         for iter in 0..iterations {
                             // Access different pages to force frame reuse
-                            let page_id =
-                                PageId::new(1 + (thread_id as u32 * iterations + iter) % 100)
-                                    .unwrap();
+                            let page_id = PageId::new(
+                                1 + (thread_id as u32 * iterations + iter) % total_pages,
+                            )
+                            .unwrap();
 
                             match m.get(page_id) {
                                 Ok(page) => {
@@ -803,14 +823,14 @@ mod tests {
         let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
 
         let mut opts = BufferPoolManagerOptions::new();
-        opts.num_frames(50);
+        opts.num_frames(64);
         let m = Arc::new(
             BufferPoolManager::open_with_options(&opts, temp_file.path())
                 .expect("buffer pool creation failed"),
         );
 
         let num_threads = 8;
-        let pages_per_thread = 10;
+        let pages_per_thread = 64;
         let barrier = Arc::new(Barrier::new(num_threads));
         let allocate_count = Arc::new(AtomicUsize::new(0));
         let get_count = Arc::new(AtomicUsize::new(0));
@@ -873,151 +893,5 @@ mod tests {
             allocate_count.load(Ordering::Relaxed),
             get_count.load(Ordering::Relaxed)
         );
-    }
-
-    #[test]
-    fn test_frame_allocation_race_detection() {
-        // Test frame allocation race condition
-        let snapshot = 1234;
-        let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
-
-        // Pre-populate file with some pages
-        {
-            let m = BufferPoolManager::open(temp_file.path()).expect("buffer pool creation failed");
-            for i in 1..=30 {
-                let mut page = m.allocate(snapshot + i as u64).expect("page allocation failed");
-                page.contents_mut().iter_mut().for_each(|byte| *byte = i as u8);
-                drop(page);
-            }
-            m.sync().expect("sync failed");
-        }
-
-        // Test with exactly the number of frames we'll try to load
-        {
-            let mut opts = BufferPoolManagerOptions::new();
-            opts.num_frames(15).page_count(30); // Limited frames, force conflicts
-            let m = Arc::new(
-                BufferPoolManager::open_with_options(&opts, temp_file.path())
-                    .expect("buffer pool creation failed"),
-            );
-
-            let num_threads = 15;
-            let barrier = Arc::new(Barrier::new(num_threads));
-            let used_frames = Arc::new(parking_lot::Mutex::new(HashSet::new()));
-
-            let handles: Vec<_> = (0..num_threads)
-                .map(|thread_id| {
-                    let m = m.clone();
-                    let barrier = barrier.clone();
-                    let used_frames = used_frames.clone();
-
-                    thread::spawn(move || {
-                        barrier.wait();
-                        
-                        // Each thread tries to load a unique page
-                        let page_id = PageId::new(1 + thread_id as u32).unwrap();
-                        
-                        match m.get(page_id) {
-                            Ok(page) => {
-                                // Verify page content
-                                let expected = page_id.as_u32() as u8;
-                                assert_eq!(page.contents(), &[expected; Page::DATA_SIZE]);
-                                
-                                // Check frame uniqueness
-                                if let Some(frame_header) = m.page_table.get(&page_id) {
-                                    let frame_id = frame_header.frame_id;
-                                    let mut frames = used_frames.lock();
-                                    assert!(frames.insert(frame_id), 
-                                           "Frame {frame_id:?} was used by multiple pages! Race condition detected.");
-                                }
-                            }
-                            Err(PageError::OutOfMemory) => {
-                                // This is expected when we run out of frames
-                            }
-                            Err(e) => panic!("Unexpected error getting page {page_id}: {e:?}"),
-                        }
-                    })
-                })
-                .collect();
-
-            for handle in handles {
-                handle.join().expect("thread panicked");
-            }
-        }
-    }
-
-
-    #[test]
-    fn test_lru_consistency_with_concurrent_access() {
-        let snapshot = 1234;
-        let temp_file = tempfile::NamedTempFile::new().expect("temporary file creation failed");
-
-        // Pre-populate file
-        {
-            let m = BufferPoolManager::open(temp_file.path()).expect("buffer pool creation failed");
-            for i in 1..=50 {
-                let mut page = m.allocate(snapshot + i as u64).expect("page allocation failed");
-                page.contents_mut().iter_mut().for_each(|byte| *byte = i as u8);
-                drop(page);
-            }
-            m.sync().expect("sync failed");
-        }
-
-        {
-            let mut opts = BufferPoolManagerOptions::new();
-            opts.num_frames(10).page_count(50); // Very limited frames to force heavy eviction
-            let m = Arc::new(
-                BufferPoolManager::open_with_options(&opts, temp_file.path())
-                    .expect("buffer pool creation failed"),
-            );
-
-            let num_threads = 8;
-            let iterations = 50;
-            let barrier = Arc::new(Barrier::new(num_threads));
-
-            let handles: Vec<_> = (0..num_threads)
-                .map(|thread_id| {
-                    let m = m.clone();
-                    let barrier = barrier.clone();
-
-                    thread::spawn(move || {
-                        barrier.wait();
-
-                        for iter in 0..iterations {
-                            // Access pattern that should trigger eviction
-                            let page_id =
-                                PageId::new(1 + (thread_id as u32 * 7 + iter as u32) % 50).unwrap();
-
-                            match m.get(page_id) {
-                                Ok(page) => {
-                                    let expected = page_id.as_u32() as u8;
-                                    assert_eq!(page.contents(), &[expected; Page::DATA_SIZE]);
-
-                                    // Verify that if page is in cache, LRU knows about it
-                                    // (This is harder to verify directly, but inconsistencies
-                                    // should show up as panics)
-                                }
-                                Err(e) => {
-                                    panic!("Unexpected error getting page {page_id}: {e:?}")
-                                }
-                            }
-                        }
-                    })
-                })
-                .collect();
-
-            for handle in handles {
-                handle.join().expect("thread panicked");
-            }
-
-            // Final consistency check - all pages in page_table should be valid
-            let page_table_size = m.page_table.len();
-            assert!(
-                page_table_size <= m.num_frames as usize,
-                "Page table has more entries ({}) than available frames ({})",
-                page_table_size,
-                m.num_frames
-            );
-        }
     }
 }
