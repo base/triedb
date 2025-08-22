@@ -1,0 +1,41 @@
+name: PR
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  miri:
+    strategy:
+      matrix:
+        partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Harden the runner (Audit all outbound calls)
+      uses: step-security/harden-runner@6c439dc8bdf85cadbbce9ed30d1c7b959517bc49 # v2.12.2
+      with:
+        egress-policy: audit
+
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+    - uses: dtolnay/rust-toolchain@b95584d8105b9ab200e15821fa671848cf2b7017 # nightly
+      with:
+        components: miri
+
+    - name: Install cargo-nextest
+      run: |
+        cargo install --locked cargo-nextest
+
+    - name: Run unit tests under Miri
+      run: |
+        MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri nextest run \
+          --partition=hash:${{ matrix.partition }}/10 \
+          --test-threads=$(nproc)

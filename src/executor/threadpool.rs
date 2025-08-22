@@ -61,6 +61,7 @@ mod tests {
     use std::panic;
 
     #[test]
+    #[cfg_attr(miri, ignore = "crossbeam (used by rayon) does not play nicely with miri")]
     fn defer() {
         let pool = builder().build().expect("building thread pool failed");
         let future = pool.defer(|| 123);
@@ -68,6 +69,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "crossbeam (used by rayon) does not play nicely with miri")]
     fn poisoning() {
         let pool = builder().build().expect("building thread pool failed");
         let future = pool.defer(|| panic!("something went wrong"));
