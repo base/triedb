@@ -521,7 +521,6 @@ mod tests {
 
         // Verify that the read transaction that we created before the delete can still access the
         // initial accounts
-        read_tx.clear_cache();
         for (address, account) in &initial_accounts {
             assert_eq!(
                 read_tx.get_account(address).expect("error while reading account"),
