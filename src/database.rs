@@ -2,7 +2,7 @@ use crate::{
     context::TransactionContext,
     meta::{MetadataManager, OpenMetadataError},
     metrics::DatabaseMetrics,
-    page::{PageError, PageId, PageManager},
+    page::{Page, PageError, PageId, PageManager, PageManagerOptions},
     storage::engine::{self, StorageEngine},
     transaction::{Transaction, TransactionError, TransactionManager, RO, RW},
 };
@@ -23,13 +23,14 @@ pub struct Database {
 }
 
 #[must_use]
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct DatabaseOptions {
     create: bool,
     create_new: bool,
     wipe: bool,
     meta_path: Option<PathBuf>,
     max_pages: u32,
+    num_frames: u32, // for PageManager implementation with buffer pool
 }
 
 #[derive(Debug)]
@@ -43,6 +44,26 @@ pub enum OpenError {
     PageError(PageError),
     MetadataError(OpenMetadataError),
     IO(io::Error),
+}
+
+impl Default for DatabaseOptions {
+    fn default() -> Self {
+        let num_frames = if cfg!(not(test)) {
+            PageManagerOptions::DEFAULT_NUM_FRAMES
+        } else {
+            // Use a smaller buffer pool for tests to reduce memory usage
+            1024
+        };
+
+        Self {
+            create: false,
+            create_new: false,
+            wipe: false,
+            meta_path: None,
+            max_pages: Page::MAX_COUNT,
+            num_frames,
+        }
+    }
 }
 
 impl DatabaseOptions {
@@ -83,6 +104,15 @@ impl DatabaseOptions {
     /// Sets the maximum number of pages that can be allocated.
     pub fn max_pages(&mut self, max_pages: u32) -> &mut Self {
         self.max_pages = max_pages;
+        self
+    }
+
+    /// Sets the number of frames for the PageManager.
+    ///
+    /// The default is [`PageManagerOptions::DEFAULT_NUM_FRAMES`], and be used for the buffer pool
+    /// backend.
+    pub fn num_frames(&mut self, num_frames: u32) -> &mut Self {
+        self.num_frames = num_frames;
         self
     }
 
@@ -141,6 +171,7 @@ impl Database {
             .create_new(opts.create_new)
             .wipe(opts.wipe)
             .page_count(page_count)
+            .num_frames(opts.num_frames)
             .open(db_path)
             .map_err(OpenError::PageError)?;
 
@@ -465,7 +496,7 @@ mod tests {
             assert_eq!(
                 db.storage_engine
                     .page_manager
-                    .get(1, *page_id)
+                    .get(*page_id)
                     .unwrap_or_else(|err| panic!("page {page_id} not found: {err:?}"))
                     .snapshot_id(),
                 1
@@ -494,7 +525,7 @@ mod tests {
             let page = db
                 .storage_engine
                 .page_manager
-                .get(1, *page_id)
+                .get(*page_id)
                 .unwrap_or_else(|err| panic!("page {page_id} not found: {err:?}"));
             if old_page_ids.contains(page_id) {
                 assert_eq!(page.snapshot_id(), 1);

@@ -100,7 +100,7 @@ impl StorageEngine {
         context: &mut TransactionContext,
         page_id: PageId,
     ) -> Result<PageMut<'_>, Error> {
-        let original_page = self.page_manager.get(context.snapshot_id, page_id)?;
+        let original_page = self.page_manager.get(page_id)?;
         context.transaction_metrics.inc_pages_read();
 
         // if the page already has the correct snapshot id, return it without cloning.
@@ -1488,7 +1488,7 @@ impl StorageEngine {
         context: &TransactionContext,
         page_id: PageId,
     ) -> Result<Page<'_>, Error> {
-        let page = self.page_manager.get(context.snapshot_id, page_id)?;
+        let page = self.page_manager.get(page_id)?;
         context.transaction_metrics.inc_pages_read();
         Ok(page)
     }
