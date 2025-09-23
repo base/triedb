@@ -24,6 +24,7 @@
 
 mod futures;
 mod inline;
+mod never;
 mod traits;
 
 pub mod threadpool;
@@ -31,3 +32,6 @@ pub mod threadpool;
 pub use futures::{Future, PoisonError};
 pub use inline::Inline;
 pub use traits::{Executor, Wait};
+
+#[cfg(test)]
+pub(crate) use never::Never;
