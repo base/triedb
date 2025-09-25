@@ -480,19 +480,33 @@ impl MetadataManager {
         dirty.inc_snapshot_id();
     }
 
+    /// Changes the size of the memory map.
+    ///
+    /// # Safety
+    ///
+    /// `new_len` must be within the size of `self.file`.
+    unsafe fn remap(&mut self, new_len: usize) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            unsafe { self.mmap.remap(new_len, memmap2::RemapOptions::new().may_move(true))? };
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.mmap = unsafe { memmap2::MmapOptions::new().len(new_len).map_mut(&self.file)? };
+        }
+
+        Ok(())
+    }
+
     /// Doubles the size of the metadata file.
     fn grow(&mut self) -> io::Result<()> {
         let cur_len = mem::size_of::<MetadataSlots>() + mem::size_of_val(self.raw_orphan_pages());
         let new_len = cur_len.saturating_mul(2);
         self.file.set_len(new_len as u64)?;
 
-        #[cfg(target_os = "linux")]
-        {
-            unsafe { self.mmap.remap(new_len, memmap2::RemapOptions::new().may_move(true))? };
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            self.mmap = unsafe { MmapMut::map_mut(&self.file)? };
+        unsafe {
+            self.remap(new_len)?;
         }
 
         Ok(())
@@ -550,9 +564,17 @@ impl MetadataManager {
 
     /// Erases the metadata contents.
     pub fn wipe(&mut self) -> io::Result<()> {
+        // Set the file length to its initial size
         let size = Self::SIZE_MIN;
         self.file.set_len(size)?;
-        self.mmap.as_mut()[size as usize..].fill(0);
+        unsafe {
+            self.remap(size as usize)?;
+        }
+
+        // Clear the contents, and re-populate with the initial values
+        self.mmap.as_mut()[..size as usize].fill(0);
+        self.populate_dirty_slot();
+
         Ok(())
     }
 
