@@ -6,15 +6,16 @@ use crate::{
     context::TransactionContext,
     database::Database,
     node::TrieValue,
+    overlay::OverlayState,
     path::{AddressPath, StoragePath},
-    storage::proofs::AccountProof,
+    storage::{overlay_root::OverlayedRoot, proofs::AccountProof},
 };
-use alloy_primitives::{StorageValue, B256};
+use alloy_primitives::{map::HashMap, StorageValue, B256};
 use alloy_trie::Nibbles;
 pub use error::TransactionError;
 pub use manager::TransactionManager;
 use sealed::sealed;
-use std::{collections::HashMap, fmt::Debug, ops::Deref, sync::Arc};
+use std::{fmt::Debug, ops::Deref, sync::Arc};
 
 #[sealed]
 pub trait TransactionKind: Debug {}
@@ -55,7 +56,7 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
             committed: false,
             context,
             database,
-            pending_changes: HashMap::new(),
+            pending_changes: HashMap::default(),
             _marker: std::marker::PhantomData,
         }
     }
@@ -82,6 +83,16 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
 
     pub fn state_root(&self) -> B256 {
         self.context.root_node_hash
+    }
+
+    pub fn compute_root_with_overlay(
+        &self,
+        overlay_state: OverlayState,
+    ) -> Result<OverlayedRoot, TransactionError> {
+        self.database
+            .storage_engine
+            .compute_state_root_with_overlay(&self.context, overlay_state)
+            .map_err(|_| TransactionError)
     }
 
     pub fn get_account_with_proof(
