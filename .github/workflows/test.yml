@@ -1,0 +1,10 @@
+name: CodeBuild Test
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  Hello-World-Job:
+    runs-on:
+      - codebuild-triedb-github-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - run: echo "test"
