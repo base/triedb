@@ -5,6 +5,7 @@ use crate::{
         PageId,
     },
     snapshot::SnapshotId,
+    PageManager,
 };
 use std::{fmt, marker::PhantomData, mem, ops::Deref};
 
@@ -22,21 +23,22 @@ compile_error!("This code only supports little-endian platforms");
 ///
 /// This struct mainly exists to allow safe transmutation from [`PageMut`] to [`Page`].
 #[derive(Copy, Clone)]
-struct UnsafePage {
+struct UnsafePage<'p> {
     id: PageId,
     ptr: *mut [u8; Page::SIZE],
+    page_manager: &'p PageManager,
 }
 
 #[repr(transparent)]
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct Page<'p> {
-    inner: UnsafePage,
+    inner: UnsafePage<'p>,
     phantom: PhantomData<&'p ()>,
 }
 
 #[repr(transparent)]
 pub struct PageMut<'p> {
-    inner: UnsafePage,
+    inner: UnsafePage<'p>,
     phantom: PhantomData<&'p ()>,
 }
 
@@ -48,7 +50,7 @@ fn fmt_page(name: &str, p: &Page<'_>, f: &mut fmt::Formatter<'_>) -> fmt::Result
         .finish()
 }
 
-impl Page<'_> {
+impl<'p> Page<'p> {
     pub const SIZE: usize = 4096;
     pub const HEADER_SIZE: usize = 8;
     pub const DATA_SIZE: usize = Self::SIZE - Self::HEADER_SIZE;
@@ -68,11 +70,15 @@ impl Page<'_> {
     ///
     /// [valid]: core::ptr#safety
     /// [memory model for page state access]: state#memory-model
-    pub unsafe fn from_ptr(id: PageId, ptr: *mut [u8; Page::SIZE]) -> Result<Self, PageError> {
+    pub unsafe fn from_ptr(
+        id: PageId,
+        ptr: *mut [u8; Page::SIZE],
+        page_manager: &'p PageManager,
+    ) -> Result<Self, PageError> {
         // SAFETY: guaranteed by the caller
         match RawPageState::from_ptr(ptr.cast()).load() {
             PageState::Occupied(_) => {
-                Ok(Self { inner: UnsafePage { id, ptr }, phantom: PhantomData })
+                Ok(Self { inner: UnsafePage { id, ptr, page_manager }, phantom: PhantomData })
             }
             PageState::Unused => Err(PageError::PageNotFound(id)),
             PageState::Dirty(_) => Err(PageError::PageDirty(id)),
@@ -111,11 +117,23 @@ impl Page<'_> {
     pub fn contents(&self) -> &[u8] {
         self.raw_contents()
     }
+
+    /// Returns all contents of the page, including the header
+    #[cfg(test)]
+    pub fn all_contents(&self) -> &[u8; Page::SIZE] {
+        unsafe { &*self.inner.ptr.cast() }
+    }
 }
 
 impl fmt::Debug for Page<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt_page("Page", self, f)
+    }
+}
+
+impl Drop for Page<'_> {
+    fn drop(&mut self) {
+        self.inner.page_manager.drop_page(self.id());
     }
 }
 
@@ -139,6 +157,7 @@ impl<'p> PageMut<'p> {
         id: PageId,
         snapshot_id: SnapshotId,
         ptr: *mut [u8; Page::SIZE],
+        page_manager: &'p PageManager,
     ) -> Result<Self, PageError> {
         let new_state = PageState::dirty(snapshot_id).expect("invalid value for `snapshot_id`");
 
@@ -147,7 +166,7 @@ impl<'p> PageMut<'p> {
             PageState::Unused | PageState::Occupied(_) => Some(new_state),
             PageState::Dirty(_) => None,
         }) {
-            Ok(_) => Ok(Self { inner: UnsafePage { id, ptr }, phantom: PhantomData }),
+            Ok(_) => Ok(Self { inner: UnsafePage { id, ptr, page_manager }, phantom: PhantomData }),
             Err(PageState::Unused) => Err(PageError::PageNotFound(id)),
             Err(PageState::Dirty(_)) => Err(PageError::PageDirty(id)),
             Err(PageState::Occupied(_)) => unreachable!(),
@@ -175,13 +194,15 @@ impl<'p> PageMut<'p> {
         id: PageId,
         snapshot_id: SnapshotId,
         ptr: *mut [u8; Page::SIZE],
+        page_manager: &'p PageManager,
     ) -> Result<Self, PageError> {
         let new_state = PageState::dirty(snapshot_id).expect("invalid value for `snapshot_id`");
 
         // SAFETY: guaranteed by the caller
         match RawPageStateMut::from_ptr(ptr.cast()).compare_exchange(PageState::Unused, new_state) {
             Ok(_) => {
-                let mut p = Self { inner: UnsafePage { id, ptr }, phantom: PhantomData };
+                let mut p =
+                    Self { inner: UnsafePage { id, ptr, page_manager }, phantom: PhantomData };
                 p.raw_contents_mut().fill(0);
                 Ok(p)
             }
@@ -219,11 +240,12 @@ impl<'p> PageMut<'p> {
         id: PageId,
         snapshot_id: SnapshotId,
         ptr: *mut [u8; Page::SIZE],
+        page_manager: &'p PageManager,
     ) -> Result<Self, PageError> {
         let new_state = PageState::dirty(snapshot_id).expect("invalid value for `snapshot_id`");
 
         RawPageStateMut::from_ptr(ptr.cast()).store(new_state);
-        let mut p = Self { inner: UnsafePage { id, ptr }, phantom: PhantomData };
+        let mut p = Self { inner: UnsafePage { id, ptr, page_manager }, phantom: PhantomData };
         p.raw_contents_mut().fill(0);
 
         Ok(p)
@@ -233,10 +255,15 @@ impl<'p> PageMut<'p> {
     ///
     /// This method is safe because the mutable reference ensures that there cannot be any other
     /// living reference to this page.
-    pub fn new(id: PageId, snapshot_id: SnapshotId, data: &'p mut [u8; Page::SIZE]) -> Self {
+    pub fn new(
+        id: PageId,
+        snapshot_id: SnapshotId,
+        data: &'p mut [u8; Page::SIZE],
+        page_manager: &'p PageManager,
+    ) -> Self {
         // SAFETY: `data` is behind a mutable reference, therefore we have exclusive access to the
         // data.
-        unsafe { Self::acquire(id, snapshot_id, data) }.unwrap()
+        unsafe { Self::acquire(id, snapshot_id, data, page_manager) }.unwrap()
     }
 
     #[inline]
@@ -327,8 +354,9 @@ mod tests {
         let snapshot = 123u64;
         let mut data = DataArray([0; Page::SIZE]);
         data.0[..8].copy_from_slice(&snapshot.to_le_bytes());
-
-        let page = unsafe { Page::from_ptr(id, &mut data.0).expect("loading page failed") };
+        let page_manager = PageManager::open_temp_file().unwrap();
+        let page =
+            unsafe { Page::from_ptr(id, &mut data.0, &page_manager).expect("loading page failed") };
 
         assert_eq!(page.id(), 42);
         assert_eq!(page.snapshot_id(), snapshot);
@@ -340,9 +368,10 @@ mod tests {
         let id = page_id!(42);
         let snapshot = 1337;
         let mut data = DataArray([0; Page::SIZE]);
-
+        let page_manager = PageManager::open_temp_file().unwrap();
         let page_mut = unsafe {
-            PageMut::from_ptr(id, snapshot, &mut data.0).expect("loading mutable page failed")
+            PageMut::from_ptr(id, snapshot, &mut data.0, &page_manager)
+                .expect("loading mutable page failed")
         };
 
         assert_eq!(page_mut.id(), 42);

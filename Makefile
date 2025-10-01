@@ -36,6 +36,13 @@ unit-tests:
 integration-tests: tests/fixtures
 	@cargo test --test '*' $(cargo_flags) -- $(test_flags)
 
+.PHONY: all-tests
+all-tests:
+	@echo "Running tests with mmap backend"
+	@cargo test --no-default-features --features mmap_backend $(cargo_flags) -- $(test_flags)
+	echo "Running tests with buffer pool backend"
+	@cargo test --no-default-features --features buffer_pool_backend $(cargo_flags) -- $(test_flags)
+
 tests/fixtures: tests/fixtures_stable.tar.gz
 	@tar -xzf $< -C $(@D)
 	@rm -rf tests/fixtures_stable.tar.gz
