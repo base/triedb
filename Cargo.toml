@@ -24,7 +24,7 @@ dashmap = "6.1.0"
 libc = "0.2.174"
 
 [features]
-default = ["mmap_backend"]
+default = ["buffer_pool_backend"]
 buffer_pool_backend = []
 mmap_backend = []
 

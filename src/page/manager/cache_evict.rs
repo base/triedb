@@ -1,5 +1,6 @@
-use std::fmt;
+use std::{fmt, ptr::NonNull};
 
+use dashmap::DashMap;
 use evict::{EvictResult, EvictionPolicy, LruReplacer};
 use parking_lot::Mutex;
 
@@ -48,4 +49,21 @@ impl CacheEvict {
     pub(crate) fn unpin(&self, page_id: PageId) -> EvictResult<(), PageId> {
         self.lru_replacer.unpin(page_id)
     }
+}
+
+pub type DefaultHasher = std::collections::hash_map::RandomState;
+
+struct KeyRef<K> {
+    k: *const K,
+}
+
+pub struct LruEntry<K> {
+    key: me,
+}
+
+pub struct LruCache<K, S = DefaultHasher> {
+    map: DashMap<KeyRef<K>, NonNull<LruEntry<K>>, S>,
+    cap: NonZeroUsize,
+    head: *mut LruEntry<K>,
+    tail: *mut LruEntry<K>,
 }
