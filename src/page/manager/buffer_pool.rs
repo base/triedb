@@ -160,7 +160,7 @@ impl PageManager {
             // Check if page is already in the cache
             if let Some(frame_id) = self.page_table.get(&page_id) {
                 self.lru_replacer
-                    .pin_write(frame_id, page_id)
+                    .pin_write(*frame_id, page_id)
                     .map_err(|_| PageError::EvictionPolicy)?;
                 let frame = &self.frames[frame_id.0 as usize];
                 return unsafe { PageMut::from_ptr(page_id, snapshot_id, frame.ptr, self) }
