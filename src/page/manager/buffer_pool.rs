@@ -231,7 +231,9 @@ impl PageManager {
         let file = &mut self.file.write();
         // Get all value at write_frames
         let mut dirty_pages = self.lru_replacer.write_frames.lock();
+        // remove duplicate pages
         dirty_pages.sort_by_key(|(_, page_id)| page_id.as_offset());
+        dirty_pages.dedup_by_key(|(_, page_id)| *page_id);
 
         // Group contiguous pages together
         let mut current_offset = None;
@@ -271,9 +273,10 @@ impl PageManager {
 
     #[inline]
     fn write(&self, batch: &mut Vec<IoSlice>, file: &mut File, offset: u64) -> io::Result<()> {
+        let total_len = batch.iter().map(|b| b.len()).sum::<usize>();
         file.seek(SeekFrom::Start(offset))?;
         let mut total_written: usize = 0;
-        while total_written < batch.iter().map(|b| b.len()).sum() {
+        while total_written < total_len {
             let written = file.write_vectored(batch)?;
             if written == 0 {
                 return Err(io::Error::new(
