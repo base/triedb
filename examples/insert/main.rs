@@ -30,7 +30,7 @@ pub fn setup_database(
 ) -> Result<(), TransactionError> {
     // Populate database with initial accounts
     let mut eoa_rng = StdRng::seed_from_u64(SEED_EOA);
-    let mut contract_rng = StdRng::seed_from_u64(SEED_CONTRACT);
+    // let mut contract_rng = StdRng::seed_from_u64(SEED_CONTRACT);
     for _i in 0..repeat {
         let mut tx = db.begin_rw()?;
         for i in 1..=eoa_size {
@@ -41,24 +41,24 @@ pub fn setup_database(
             tx.set_account(address, Some(account))?;
         }
 
-        for i in 1..=contract_size {
-            let address = generate_random_address(&mut contract_rng);
-            let account =
-                Account::new(i as u64, U256::from(i as u64), EMPTY_ROOT_HASH, KECCAK_EMPTY);
+        // for i in 1..=contract_size {
+        //     let address = generate_random_address(&mut contract_rng);
+        //     let account =
+        //         Account::new(i as u64, U256::from(i as u64), EMPTY_ROOT_HASH, KECCAK_EMPTY);
 
-            tx.set_account(address.clone(), Some(account))?;
+        //     tx.set_account(address.clone(), Some(account))?;
 
-            // add random storage to each account
-            for key in 1..=storage_per_contract {
-                let storage_key = StorageKey::from(U256::from(key));
-                let storage_path =
-                    StoragePath::for_address_path_and_slot(address.clone(), storage_key);
-                let storage_value =
-                    StorageValue::from_be_slice(storage_path.get_slot().pack().as_slice());
+        //     // add random storage to each account
+        //     for key in 1..=storage_per_contract {
+        //         let storage_key = StorageKey::from(U256::from(key));
+        //         let storage_path =
+        //             StoragePath::for_address_path_and_slot(address.clone(), storage_key);
+        //         let storage_value =
+        //             StorageValue::from_be_slice(storage_path.get_slot().pack().as_slice());
 
-                tx.set_storage_slot(storage_path, Some(storage_value))?;
-            }
-        }
+        //         tx.set_storage_slot(storage_path, Some(storage_value))?;
+        //     }
+        // }
 
         tx.commit()?;
     }
@@ -83,9 +83,7 @@ fn main() {
 
     let db = Database::create_new(db_path).unwrap();
 
-    println!("eoa size: {eoa_size}");
-    println!("repeat {repeat} times");
-    println!("contract size: {contract_size}, storage per contract: {storage_per_contract}");
+    println!("repeat {repeat} times, eoa size: {eoa_size}, contract size: {contract_size}, storage per contract: {storage_per_contract}");
 
     setup_database(&db, repeat, eoa_size, contract_size, storage_per_contract).unwrap();
 }
