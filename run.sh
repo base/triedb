@@ -9,9 +9,11 @@ mkdir -p target/db/buffer-pool
 for i in 1 2 1000 10000 100000; do
     echo "=============================================================================="
     echo "== Running for mmap/db_${i}"
+    echo "Time: $(date)"
     time ./target/release/examples/insert-mmap ./target/db/mmap/db_${i} ${i} 1000 100 10
     sleep 10
     echo "== Running for buffer-pool/db_${i}"
+    echo "Time: $(date)"
     time ./target/release/examples/insert-buffer-pool ./target/db/buffer-pool/db_${i} ${i} 1000 100 10
     sleep 10
 
