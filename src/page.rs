@@ -11,7 +11,12 @@ mod page;
 mod slotted_page;
 mod state;
 
-pub use manager::{mmap::PageManager, options::PageManagerOptions, PageError};
+#[cfg(feature = "buffer_pool_backend")]
+pub use manager::buffer_pool::PageManager;
+#[cfg(feature = "mmap_backend")]
+pub use manager::mmap::PageManager;
+
+pub use manager::{options::PageManagerOptions, PageError};
 pub use page::{Page, PageMut};
 pub use slotted_page::{SlottedPage, SlottedPageMut, CELL_POINTER_SIZE};
 

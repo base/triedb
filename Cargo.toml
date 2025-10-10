@@ -19,6 +19,14 @@ parking_lot = { version = "0.12.4", features = ["send_guard"] }
 fxhash = "0.2.1"
 static_assertions = "1.1.0"
 rayon = "1.10.0"
+evict = "0.3.1"
+dashmap = "6.1.0"
+libc = "0.2.174"
+
+[features]
+default = ["mmap_backend"]
+buffer_pool_backend = []
+mmap_backend = []
 
 [dev-dependencies]
 criterion = "0.6.0"

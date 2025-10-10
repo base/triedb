@@ -68,6 +68,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         profile: [dev, release]
+        backend: [mmap_backend, buffer_pool_backend]
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -79,13 +80,14 @@ jobs:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
     - name: Run unit tests
       run: |
-        make unit-tests cargo_flags='--verbose --profile=${{ matrix.profile }}'
+        make unit-tests cargo_flags='--verbose --profile=${{ matrix.profile }} --no-default-features --features ${{ matrix.backend }}'
 
   integration-tests:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
         profile: [dev, release]
+        backend: [mmap_backend, buffer_pool_backend]
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -97,7 +99,7 @@ jobs:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
     - name: Run integration tests
       run:
-        make integration-tests cargo_flags=--profile=${{ matrix.profile }} test_flags=--nocapture
+        make integration-tests cargo_flags='--profile=${{ matrix.profile }} --no-default-features --features ${{ matrix.backend }}' test_flags=--nocapture
 
   check-cli-lockfile:
     runs-on: ubuntu-latest

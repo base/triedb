@@ -117,6 +117,9 @@ impl PageManager {
         (self.mmap.len() / Page::SIZE).min(u32::MAX as usize) as u32
     }
 
+    #[inline]
+    pub fn drop_page(&self, _page_id: PageId) {}
+
     /// Grows the size of the underlying file to make room for additional pages.
     ///
     /// This will increase the file size by a constant factor of 1024 pages, or a relative factor
@@ -188,7 +191,7 @@ impl PageManager {
     }
 
     /// Retrieves a page from the memory mapped file.
-    pub fn get(&self, _snapshot_id: SnapshotId, page_id: PageId) -> Result<Page<'_>, PageError> {
+    pub fn get(&self, page_id: PageId) -> Result<Page<'_>, PageError> {
         if page_id > self.page_count.load(Ordering::Relaxed) {
             return Err(PageError::PageNotFound(page_id));
         }
@@ -199,7 +202,7 @@ impl PageManager {
 
         // SAFETY: All memory from the memory map is accessed through `Page` or `PageMut`, thus
         // respecting the page state access memory model.
-        unsafe { Page::from_ptr(page_id, data) }
+        unsafe { Page::from_ptr(page_id, data, self) }
     }
 
     /// Retrieves a mutable page from the memory mapped file.
@@ -218,7 +221,7 @@ impl PageManager {
 
         // TODO: This is actually unsafe, as it's possible to call `get()` arbitrary times before
         // calling this function (this will be fixed in a future commit).
-        unsafe { PageMut::from_ptr(page_id, snapshot_id, data) }
+        unsafe { PageMut::from_ptr(page_id, snapshot_id, data, self) }
     }
 
     /// Adds a new page.
@@ -243,7 +246,7 @@ impl PageManager {
         //   time, they would get a different `page_id`.
         // - All memory from the memory map is accessed through `Page` or `PageMut`, thus respecting
         //   the page state access memory model.
-        unsafe { PageMut::acquire_unchecked(page_id, snapshot_id, data) }
+        unsafe { PageMut::acquire_unchecked(page_id, snapshot_id, data, self) }
     }
 
     /// Checks if a page is currently in the Dirty state.
@@ -297,7 +300,7 @@ mod tests {
 
         for i in 1..=10 {
             let i = PageId::new(i).unwrap();
-            let err = manager.get(42, i).unwrap_err();
+            let err = manager.get(i).unwrap_err();
             assert!(matches!(err, PageError::PageNotFound(page_id) if page_id == i));
 
             let page = manager.allocate(42).unwrap();
@@ -306,7 +309,7 @@ mod tests {
             assert_eq!(page.snapshot_id(), 42);
             drop(page);
 
-            let page = manager.get(42, i).unwrap();
+            let page = manager.get(i).unwrap();
             assert_eq!(page.id(), i);
             assert_eq!(page.contents(), &mut [0; Page::DATA_SIZE]);
             assert_eq!(page.snapshot_id(), 42);
@@ -328,7 +331,7 @@ mod tests {
         page.contents_mut()[0] = 1;
         drop(page);
 
-        let old_page = manager.get(42, page_id!(1)).unwrap();
+        let old_page = manager.get(page_id!(1)).unwrap();
         assert_eq!(old_page.id(), page_id!(1));
         assert_eq!(old_page.contents()[0], 1);
         assert_eq!(old_page.snapshot_id(), 42);
@@ -353,7 +356,7 @@ mod tests {
         assert_eq!(page2_mut.contents()[0], 2);
         drop(page2_mut);
 
-        let page2 = manager.get(42, page_id!(2)).unwrap();
+        let page2 = manager.get(page_id!(2)).unwrap();
         assert_eq!(page2.contents()[0], 2);
     }
 
