@@ -5,6 +5,7 @@ use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
 use rand::prelude::*;
 use triedb::{
     account::Account,
+    database::DatabaseOptions,
     path::{AddressPath, StoragePath},
     transaction::TransactionError,
     Database,
@@ -81,11 +82,13 @@ fn main() {
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(DEFAULT_SETUP_DB_STORAGE_PER_CONTRACT);
 
-    let db = Database::create_new(db_path).unwrap();
+    let db = DatabaseOptions::default()
+        .create_new(true)
+        .num_frames(1024 * 1024 * 6)
+        .open(db_path)
+        .unwrap();
 
-    println!("eoa size: {eoa_size}");
-    println!("repeat {repeat} times");
-    println!("contract size: {contract_size}, storage per contract: {storage_per_contract}");
+    println!("eoa size: {eoa_size}, contract size: {contract_size}, storage per contract: {storage_per_contract}, repeat: {repeat}");
 
     setup_database(&db, repeat, eoa_size, contract_size, storage_per_contract).unwrap();
 }
