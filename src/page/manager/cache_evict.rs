@@ -1,4 +1,11 @@
-use std::fmt;
+use std::{
+    collections::HashMap,
+    fmt, mem,
+    num::NonZeroUsize,
+    ptr::{self, NonNull},
+};
+
+use core::hash::{BuildHasher, Hash, Hasher};
 
 use evict::{EvictResult, EvictionPolicy, LruReplacer};
 use parking_lot::Mutex;
@@ -79,5 +86,62 @@ impl CacheEvict {
 
     pub(crate) fn unpin(&self, page_id: PageId) -> EvictResult<(), PageId> {
         self.lru_replacer.unpin(page_id)
+    }
+}
+
+// LRU implementation inspired from https://github.com/jeromefroe/lru-rs/blob/master/src/lib.rs
+// Struct used to hold a reference to a key
+struct KeyRef<K> {
+    k: *const K,
+}
+
+struct LRUEntry<K> {
+    key: mem::MaybeUninit<K>,
+    prev: *mut LRUEntry<K>,
+    next: *mut LRUEntry<K>,
+}
+
+impl<K> LRUEntry<K> {
+    fn new(key: K) -> Self {
+        LRUEntry { key: mem::MaybeUninit::new(key), prev: ptr::null_mut(), next: ptr::null_mut() }
+    }
+
+    fn new_sigil() -> Self {
+        LRUEntry { key: mem::MaybeUninit::uninit(), prev: ptr::null_mut(), next: ptr::null_mut() }
+    }
+}
+
+type DefaultHasher = std::collections::hash_map::RandomState;
+
+// An LRU cache
+struct LruCache<K, S = DefaultHasher> {
+    map: HashMap<KeyRef<K>, NonNull<LRUEntry<K>>, S>,
+    cap: NonZeroUsize,
+    // head and tail are sigil nodes to facilitate inserting entries
+    head: *mut LRUEntry<K>,
+    tail: *mut LRUEntry<K>,
+}
+
+impl<K: Hash + Eq> LruCache<K> {
+    pub fn new(cap: NonZeroUsize) -> Self {
+        Self::construct(cap, HashMap::with_capacity(cap.get()))
+    }
+}
+
+impl<K: Hash + Eq, S: BuildHasher> LruCache<K, S> {
+    fn construct(cap: NonZeroUsize, map: HashMap<KeyRef<K>, NonNull<LRUEntry<K>>, S>) -> Self {
+        let cache = LruCache {
+            map,
+            cap,
+            head: Box::into_raw(Box::new(LRUEntry::new_sigil())),
+            tail: Box::into_raw(Box::new(LRUEntry::new_sigil())),
+        };
+
+        unsafe {
+            (*cache.head).next = cache.tail;
+            (*cache.tail).prev = cache.head;
+        }
+
+        cache
     }
 }
