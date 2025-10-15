@@ -1,10 +1,15 @@
+use crossbeam_channel::{Receiver, Sender};
 use std::{
     ffi::CString,
     fs::File,
     io::{self, IoSlice, Seek, SeekFrom, Write},
     os::{fd::FromRawFd, unix::fs::FileExt},
     path::Path,
-    sync::atomic::{AtomicU32, AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU32, AtomicU64, Ordering},
+        Arc,
+    },
+    thread::{self, JoinHandle},
 };
 
 use dashmap::{DashMap, DashSet};
@@ -33,19 +38,31 @@ unsafe impl Sync for Frame {}
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub(crate) struct FrameId(u32);
 
+enum WriteMessage {
+    Page((FrameId, PageId)),
+    Batch(Vec<(FrameId, PageId)>),
+    Shutdown,
+}
+
 #[derive(Debug)]
 pub struct PageManager {
     num_frames: u32,
     page_count: AtomicU32,
     file: RwLock<File>,
     file_len: AtomicU64,
-    frames: Vec<Frame>, /* list of frames that hold pages' data, indexed by frame id with fix
-                         * num_frames size */
+    frames: Arc<Vec<Frame>>, /* list of frames that hold pages' data, indexed by frame id with
+                              * fix num_frames size */
     page_table: DashMap<PageId, FrameId>, /* mapping between page id and buffer pool frames,
                                            * indexed by page id with fix num_frames size */
     original_free_frame_idx: AtomicU32,
     lru_replacer: CacheEvict, /* the replacer to find unpinned/candidate pages for eviction */
     loading_page: DashSet<PageId>, /* set of pages that are being loaded from disk */
+
+    // write worker
+    num_workers: usize,
+    worker_handles: Vec<JoinHandle<()>>,
+    tx_job: Sender<WriteMessage>,
+    rx_result: Receiver<Result<(), io::Error>>,
 }
 
 impl PageManager {
@@ -95,17 +112,122 @@ impl PageManager {
         }
         let lru_replacer = CacheEvict::new(num_frames as usize);
 
-        Ok(PageManager {
+        let (tx_job, rx_job) = crossbeam_channel::unbounded();
+        let (tx_result, rx_result) = crossbeam_channel::unbounded();
+
+        let mut page_manager = PageManager {
             num_frames,
             page_count,
             file: RwLock::new(file),
             file_len,
-            frames,
+            frames: Arc::new(frames),
             page_table,
             original_free_frame_idx: AtomicU32::new(0),
             lru_replacer,
             loading_page: DashSet::with_capacity(num_frames as usize),
-        })
+
+            num_workers: opts.num_workers,
+            worker_handles: Vec::with_capacity(opts.num_workers),
+            tx_job,
+            rx_result,
+        };
+        page_manager.start_write_workers(rx_job, tx_result)?;
+
+        Ok(page_manager)
+    }
+
+    fn start_write_workers(
+        &mut self,
+        rx_job: Receiver<WriteMessage>,
+        tx_result: Sender<Result<(), io::Error>>,
+    ) -> Result<(), PageError> {
+        let rx_job_arc = Arc::new(rx_job);
+        for _ in 0..self.num_workers {
+            let rx_job_arc = Arc::clone(&rx_job_arc);
+            let mut worker_file = self.file.write().try_clone().map_err(PageError::IO)?;
+            let frames = self.frames.clone();
+            let tx_result = tx_result.clone();
+            let handle = thread::spawn(move || loop {
+                match rx_job_arc.recv() {
+                    Ok(WriteMessage::Page((frame_id, page_id))) => {
+                        // write to file at specific offset
+                        let offset = page_id.as_offset() as u64;
+                        let frame = &frames[frame_id.0 as usize];
+                        unsafe {
+                            let page_data =
+                                std::slice::from_raw_parts(frame.ptr as *const u8, Page::SIZE);
+                            let result = worker_file.write_at(page_data, offset);
+                            tx_result.send(result.map(|_| ())).unwrap();
+                        }
+                    }
+                    Ok(WriteMessage::Batch(batch)) => {
+                        if batch.is_empty() {
+                            continue;
+                        }
+                        let mut batch_slices = Vec::with_capacity(batch.len());
+                        for (frame_id, _) in &batch {
+                            let frame = &frames[frame_id.0 as usize];
+                            unsafe {
+                                let page_data =
+                                    std::slice::from_raw_parts(frame.ptr as *const u8, Page::SIZE);
+                                batch_slices.push(IoSlice::new(page_data));
+                            }
+                        }
+                        let result = Self::write_batch(
+                            &mut batch_slices,
+                            &mut worker_file,
+                            batch[0].1.as_offset() as u64,
+                        );
+                        tx_result.send(result).unwrap();
+                    }
+                    Ok(WriteMessage::Shutdown) => {
+                        break; // Graceful shutdown
+                    }
+                    Err(_) => {
+                        break; // Channel closed
+                    }
+                }
+            });
+            self.worker_handles.push(handle);
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn write_batch(batch: &mut Vec<IoSlice>, file: &mut File, offset: u64) -> io::Result<()> {
+        let total_len = batch.iter().map(|b| b.len()).sum::<usize>();
+        file.seek(SeekFrom::Start(offset))?;
+        let mut total_written: usize = 0;
+        while total_written < total_len {
+            let written = file.write_vectored(batch)?;
+            if written == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write whole buffer",
+                ));
+            }
+            total_written += written;
+            // Remove fully written slices from the batch
+            let mut bytes_left = written;
+            while !batch.is_empty() && bytes_left >= batch[0].len() {
+                bytes_left -= batch[0].len();
+                batch.remove(0);
+            }
+            // Adjust the first slice if it was partially written
+            if !batch.is_empty() && bytes_left > 0 {
+                // SAFETY: IoSlice only needs a reference for the duration of the write call,
+                // and batch[0] is still valid here.
+                let ptr = batch[0].as_ptr();
+                let len = batch[0].len();
+                if bytes_left < len {
+                    let new_slice = unsafe {
+                        std::slice::from_raw_parts(ptr.add(bytes_left), len - bytes_left)
+                    };
+                    batch[0] = IoSlice::new(new_slice);
+                }
+            }
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -160,7 +282,7 @@ impl PageManager {
             // Check if page is already in the cache
             if let Some(frame_id) = self.page_table.get(&page_id) {
                 self.lru_replacer
-                    .pin_write(*frame_id, page_id)
+                    .pin_write_update_page(*frame_id, page_id)
                     .map_err(|_| PageError::EvictionPolicy)?;
                 let frame = &self.frames[frame_id.0 as usize];
                 return unsafe { PageMut::from_ptr(page_id, snapshot_id, frame.ptr, self) }
@@ -178,7 +300,7 @@ impl PageManager {
                 }
                 self.page_table.insert(page_id, frame_id);
                 self.lru_replacer
-                    .pin_write(frame_id, page_id)
+                    .pin_write_update_page(frame_id, page_id)
                     .map_err(|_| PageError::EvictionPolicy)?;
                 self.loading_page.remove(&page_id);
                 return unsafe { PageMut::from_ptr(page_id, snapshot_id, buf, self) }
@@ -200,7 +322,9 @@ impl PageManager {
         self.grow_if_needed(new_count as u64 * Page::SIZE as u64)?;
 
         self.page_table.insert(page_id, frame_id);
-        self.lru_replacer.pin_write(frame_id, page_id).map_err(|_| PageError::EvictionPolicy)?;
+        self.lru_replacer
+            .pin_write_new_page(frame_id, page_id)
+            .map_err(|_| PageError::EvictionPolicy)?;
 
         let data = self.frames[frame_id.0 as usize].ptr;
         unsafe { PageMut::acquire_unchecked(page_id, snapshot_id, data, self) }
@@ -232,82 +356,44 @@ impl PageManager {
     /// Could explore the parallel write strategy to improve performance.
     pub fn sync(&self) -> io::Result<()> {
         let file = &mut self.file.write();
-        // Get all value at write_frames
-        let mut dirty_pages = self.lru_replacer.write_frames.lock();
-        // remove duplicate pages
-        dirty_pages.sort_by_key(|(_, page_id)| page_id.as_offset());
-        dirty_pages.dedup_by_key(|(_, page_id)| *page_id);
 
-        // Group contiguous pages together
-        let mut current_offset = None;
-        let mut batch: Vec<IoSlice> = Vec::new();
+        // Get all value at update_frames and new_frames
+        let mut update_pages = self.lru_replacer.update_frames.lock();
+        update_pages.sort_by_key(|(_, page_id)| page_id.as_offset());
+        update_pages.dedup_by_key(|(_, page_id)| *page_id);
+        // New pages should be sorted by page_id ascending and no duplicate
+        let mut new_pages = self.lru_replacer.new_frames.lock();
 
-        for (frame_id, page_id) in dirty_pages.iter() {
-            let offset = page_id.as_offset() as u64;
-            if let Some(prev_offset) = current_offset {
-                if offset != prev_offset + (batch.len() * Page::SIZE) as u64 {
-                    // write the current batch
-                    self.write(&mut batch, file, prev_offset)?;
-                    batch.clear();
-                }
-            }
-            if batch.is_empty() {
-                current_offset = Some(offset);
-            }
-            let frame = &self.frames[frame_id.0 as usize];
-            unsafe {
-                let page_data = std::slice::from_raw_parts(frame.ptr as *const u8, Page::SIZE);
-                batch.push(IoSlice::new(page_data));
+        let mut write_num = 0;
+
+        // Write new pages first, since this group could be large and take time to write
+        if !new_pages.is_empty() {
+            write_num += 1;
+            let write_message = WriteMessage::Batch(new_pages.clone());
+            self.tx_job.send(write_message).unwrap();
+        }
+
+        // Follow by the individual update pages
+        if !update_pages.is_empty() {
+            write_num += update_pages.len();
+            for (frame_id, page_id) in update_pages.iter() {
+                let page = WriteMessage::Page((*frame_id, *page_id));
+                self.tx_job.send(page).unwrap();
             }
         }
-        // Write final batch
-        if !batch.is_empty() {
-            self.write(&mut batch, file, current_offset.unwrap())?;
+
+        // Waiting for all write workers to finish
+        for _ in 0..write_num {
+            _ = self.rx_result.recv().unwrap();
         }
+
         file.flush()?;
-        for (_, page_id) in dirty_pages.iter() {
-            self.lru_replacer
-                .unpin(*page_id)
-                .map_err(|e| io::Error::other(format!("eviction policy error: {e:?}")))?;
-        }
-        dirty_pages.clear();
-        Ok(())
-    }
-
-    #[inline]
-    fn write(&self, batch: &mut Vec<IoSlice>, file: &mut File, offset: u64) -> io::Result<()> {
-        let total_len = batch.iter().map(|b| b.len()).sum::<usize>();
-        file.seek(SeekFrom::Start(offset))?;
-        let mut total_written: usize = 0;
-        while total_written < total_len {
-            let written = file.write_vectored(batch)?;
-            if written == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "failed to write whole buffer",
-                ));
-            }
-            total_written += written;
-            // Remove fully written slices from the batch
-            let mut bytes_left = written;
-            while !batch.is_empty() && bytes_left >= batch[0].len() {
-                bytes_left -= batch[0].len();
-                batch.remove(0);
-            }
-            // Adjust the first slice if it was partially written
-            if !batch.is_empty() && bytes_left > 0 {
-                // SAFETY: IoSlice only needs a reference for the duration of the write call,
-                // and batch[0] is still valid here.
-                let ptr = batch[0].as_ptr();
-                let len = batch[0].len();
-                if bytes_left < len {
-                    let new_slice = unsafe {
-                        std::slice::from_raw_parts(ptr.add(bytes_left), len - bytes_left)
-                    };
-                    batch[0] = IoSlice::new(new_slice);
-                }
-            }
-        }
+        new_pages
+            .iter()
+            .chain(update_pages.iter())
+            .for_each(|(_, page_id)| self.lru_replacer.unpin(*page_id).unwrap());
+        new_pages.clear();
+        update_pages.clear();
         Ok(())
     }
 
@@ -395,7 +481,23 @@ impl PageManager {
 
 impl Drop for PageManager {
     fn drop(&mut self) {
-        self.sync().expect("sync failed");
+        // Sync the remaining work
+        if let Err(e) = self.sync() {
+            eprintln!("Warning: Sync failed during drop: {}", e);
+        }
+        // Then send shutdown messages to workers
+        for _ in 0..self.num_workers {
+            if let Err(_) = self.tx_job.send(WriteMessage::Shutdown) {
+                // Ignore the error
+                break;
+            }
+        }
+        // Wait for all worker threads to finish
+        for handle in self.worker_handles.drain(..) {
+            if let Err(_) = handle.join() {
+                eprintln!("Warning: Worker thread panicked during shutdown");
+            }
+        }
     }
 }
 
@@ -468,7 +570,7 @@ mod tests {
         for i in 1..=10 {
             let i = PageId::new(i).unwrap();
             let frame_id = m.page_table.get(&i).expect("page not in cache");
-            let dirty_frames = m.lru_replacer.write_frames.lock();
+            let dirty_frames = m.lru_replacer.new_frames.lock();
             assert!(dirty_frames.iter().any(|x| x.0 == *frame_id && x.1 == i));
         }
     }
