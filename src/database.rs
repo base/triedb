@@ -344,6 +344,46 @@ mod tests {
     }
 
     #[test]
+    fn test_wipe() {
+        let tmp_dir = TempDir::new("test_db").expect("temporary dir creation failed");
+        let db_path = tmp_dir.path().join("db-file");
+
+        let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
+
+        // First create a new database and put some records in it
+        {
+            let db = Database::create_new(&db_path).expect("creating a new database failed");
+            let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
+            let mut tx = db.begin_rw().expect("creating read/write transaction failed");
+            tx.set_account(AddressPath::for_address(address), Some(account1.clone())).unwrap();
+            tx.commit().expect("commit failed");
+        }
+
+        // Verify that the database exists, and contains some data
+        {
+            let db = Database::open(&db_path).expect("opening an existing database failed");
+            let mut tx = db.begin_ro().expect("creating read transaction failed");
+            assert!(tx
+                .get_account(&AddressPath::for_address(address))
+                .expect("retrieving account failed")
+                .is_some());
+        }
+
+        // Now open with `wipe(true)`, and verify that the contents are gone
+        {
+            let db = Database::options()
+                .wipe(true)
+                .open(&db_path)
+                .expect("opening an existing database failed");
+            let mut tx = db.begin_ro().expect("creating read transaction failed");
+            assert!(tx
+                .get_account(&AddressPath::for_address(address))
+                .expect("retrieving account failed")
+                .is_none());
+        }
+    }
+
+    #[test]
     fn test_set_get_account() {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
