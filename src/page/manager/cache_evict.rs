@@ -95,6 +95,21 @@ struct KeyRef<K> {
     k: *const K,
 }
 
+impl<K: Hash> Hash for KeyRef<K> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        unsafe { (*self.k).hash(state) }
+    }
+}
+
+impl<K: PartialEq> PartialEq for KeyRef<K> {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { (*self.k).eq(&*other.k) }
+    }
+}
+
+// Eq extends PartialEq
+impl<K: Eq> Eq for KeyRef<K> {}
+
 struct LRUEntry<K> {
     key: mem::MaybeUninit<K>,
     prev: *mut LRUEntry<K>,
@@ -113,8 +128,13 @@ impl<K> LRUEntry<K> {
 
 type DefaultHasher = std::collections::hash_map::RandomState;
 
+#[derive(Debug)]
+enum Error {
+    CacheIsFull,
+}
+
 // An LRU cache
-struct LruCache<K, S = DefaultHasher> {
+struct TLruReplacer<K, S = DefaultHasher> {
     map: HashMap<KeyRef<K>, NonNull<LRUEntry<K>>, S>,
     cap: NonZeroUsize,
     // head and tail are sigil nodes to facilitate inserting entries
@@ -122,15 +142,15 @@ struct LruCache<K, S = DefaultHasher> {
     tail: *mut LRUEntry<K>,
 }
 
-impl<K: Hash + Eq> LruCache<K> {
+impl<K: Hash + Eq> TLruReplacer<K> {
     pub fn new(cap: NonZeroUsize) -> Self {
         Self::construct(cap, HashMap::with_capacity(cap.get()))
     }
 }
 
-impl<K: Hash + Eq, S: BuildHasher> LruCache<K, S> {
+impl<K: Hash + Eq, S: BuildHasher> TLruReplacer<K, S> {
     fn construct(cap: NonZeroUsize, map: HashMap<KeyRef<K>, NonNull<LRUEntry<K>>, S>) -> Self {
-        let cache = LruCache {
+        let lru_replacer = TLruReplacer {
             map,
             cap,
             head: Box::into_raw(Box::new(LRUEntry::new_sigil())),
@@ -138,10 +158,76 @@ impl<K: Hash + Eq, S: BuildHasher> LruCache<K, S> {
         };
 
         unsafe {
-            (*cache.head).next = cache.tail;
-            (*cache.tail).prev = cache.head;
+            (*lru_replacer.head).next = lru_replacer.tail;
+            (*lru_replacer.tail).prev = lru_replacer.head;
         }
 
-        cache
+        lru_replacer
+    }
+
+    fn is_empty(&self) -> bool {
+        todo!()
+    }
+
+    /// Touches a key in replacer. This shifts the key to head of LRU
+    fn touch(&mut self, k: K) -> Result<(), Error> {
+        let node_ref = self.map.get_mut(&KeyRef { k: &k });
+
+        match node_ref {
+            Some(node_ref) => {
+                // If the key is already in the cache, just move it to the front of the list
+                let node_ptr = node_ref.as_ptr();
+                self.detach(node_ptr);
+                self.attach(node_ptr);
+            }
+            None => {}
+        }
+    }
+
+    fn peak(&self) -> Option<K> {
+        todo!()
+    }
+
+    fn pin(&self, k: K) -> Result<bool, Error> {
+        todo!()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+
+    use crate::page::manager::cache_evict::TLruReplacer;
+
+    #[test]
+    fn test_touch_and_evict() {
+        let mut cache = TLruReplacer::new(NonZeroUsize::new(2).unwrap());
+        assert!(cache.is_empty());
+
+        assert_eq!(cache.touch(12), None);
+        assert_eq!(cache.touch(13), None);
+        assert_eq!(cache.len(), 2);
+        assert!(!cache.is_empty());
+        assert_eq!(cache.peak(), 13);
+        assert_eq!(cache.touch(12), None);
+        assert_eq!(cache.peak(), 12);
+
+        assert_eq!(cache.evict(), 12);
+        assert_eq!(cache.peak(), 13);
+        assert_eq!(cache.len(), 1);
+
+        assert_eq!(cache.evict(), 13);
+        assert_eq!(cache.evict(), None);
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn test_pin() {
+        let mut cache = TLruReplacer::new(NonZeroUsize::new(2).unwrap());
+        assert_eq!(cache.touch(12), None);
+        assert_eq!(cache.touch(13), None);
+        assert_eq!(cache.pin(12), None);
+        assert_eq!(cache.peak(), Some(13));
+        assert_eq!(cache.len(), 1);
     }
 }

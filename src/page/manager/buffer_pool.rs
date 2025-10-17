@@ -244,7 +244,7 @@ impl PageManager {
             // Check if page is already in the cache
             if let Some(frame_id) = self.page_table.get(&page_id) {
                 let frame = &self.frames[frame_id.0 as usize];
-                self.lru_replacer.touch(page_id).map_err(|_| PageError::EvictionPolicy)?;
+                self.lru_replacer.pin_read(page_id).map_err(|_| PageError::EvictionPolicy)?;
                 return unsafe { Page::from_ptr(page_id, frame.ptr, self) }
             }
 
