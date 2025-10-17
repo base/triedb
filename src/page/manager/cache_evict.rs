@@ -111,9 +111,9 @@ impl<K: PartialEq> PartialEq for KeyRef<K> {
 impl<K: Eq> Eq for KeyRef<K> {}
 
 struct LruEntry<K> {
-    key: mem::MaybeUninit<K>,
     prev: *mut LruEntry<K>,
     next: *mut LruEntry<K>,
+    key: mem::MaybeUninit<K>,
 }
 
 impl<K> LruEntry<K> {
@@ -216,14 +216,19 @@ impl<K: Hash + Eq, S: BuildHasher> TLruReplacer<K, S> {
             }
         }
     }
-    fn pin(&mut self, k: K) -> bool {
-        let node_ref = self.map.get_mut(&KeyRef { k: &k });
+
+    /// Removes the key from the queue.
+    /// Return true if the key is in the queue, false otherwise.
+    fn remove(&mut self, k: K) -> bool {
+        let key_ref = &KeyRef { k: &k };
+        let node_ref = self.map.remove(key_ref);
 
         match node_ref {
             Some(node_ref) => {
                 // If the key is already in the cache, just remove it
                 let node_ptr = node_ref.as_ptr();
                 self.detach(node_ptr);
+
                 true
             }
             None => false,
@@ -244,7 +249,7 @@ impl<K: Hash + Eq, S: BuildHasher> TLruReplacer<K, S> {
         Some(key)
     }
 
-    fn detach(&mut self, node: *mut LruEntry<K>) {
+    fn detach(&mut self, node: *const LruEntry<K>) {
         unsafe {
             (*(*node).prev).next = (*node).next;
             (*(*node).next).prev = (*node).prev;
@@ -300,9 +305,12 @@ mod tests {
         let mut cache = TLruReplacer::new(NonZeroUsize::new(2).unwrap());
         cache.touch(2).expect("should add key");
         cache.touch(3).expect("should add key");
-        assert_eq!(cache.pin(2), true);
-        assert_eq!(cache.pin(20), false);
-
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.remove(2), true);
+        assert_eq!(cache.remove(20), false);
+        assert_eq!(cache.len(), 1);
         assert_eq!(cache.peek_lru(), Some(&3));
+        assert_eq!(cache.remove(3), true);
+        assert_eq!(cache.len(), 0);
     }
 }
