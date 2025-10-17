@@ -216,6 +216,19 @@ impl<K: Hash + Eq, S: BuildHasher> TLruReplacer<K, S> {
             }
         }
     }
+    fn pin(&mut self, k: K) -> bool {
+        let node_ref = self.map.get_mut(&KeyRef { k: &k });
+
+        match node_ref {
+            Some(node_ref) => {
+                // If the key is already in the cache, just remove it
+                let node_ptr = node_ref.as_ptr();
+                self.detach(node_ptr);
+                true
+            }
+            None => false,
+        }
+    }
 
     /// Returns the value recorresponding to the least recently used item or None if the cache is
     /// empty.
@@ -229,10 +242,6 @@ impl<K: Hash + Eq, S: BuildHasher> TLruReplacer<K, S> {
             key = &(*(*node).key.as_ptr()) as &K;
         };
         Some(key)
-    }
-
-    fn pin(&self, k: K) -> Result<bool, Error> {
-        todo!()
     }
 
     fn detach(&mut self, node: *mut LruEntry<K>) {
@@ -263,12 +272,13 @@ mod tests {
         let mut cache = TLruReplacer::new(NonZeroUsize::new(2).unwrap());
         assert!(cache.is_empty());
 
-        cache.touch(12).expect("could add key");
-        cache.touch(13).expect("could add key");
+        cache.touch(12).expect("should add key");
+        cache.touch(13).expect("should add key");
+        assert_eq!(cache.touch(14), Err(Error::CacheIsFull));
         assert_eq!(cache.len(), 2);
 
         assert_eq!(cache.peek_lru(), Some(&12));
-        cache.touch(12).expect("could update key");
+        cache.touch(12).expect("should update key");
         assert_eq!(cache.peek_lru(), Some(&13));
 
         assert_eq!(cache.touch(14), Err(Error::CacheIsFull));
@@ -277,7 +287,7 @@ mod tests {
         assert_eq!(cache.peek_lru(), Some(&12));
         assert_eq!(cache.len(), 1);
 
-        cache.touch(14).expect("could add key");
+        cache.touch(14).expect("should add key");
         assert_eq!(cache.len(), 2);
         assert_eq!(cache.evict(), Some(&12));
         assert_eq!(cache.evict(), Some(&14));
@@ -287,11 +297,12 @@ mod tests {
 
     #[test]
     fn test_pin() {
-        // let mut cache = TLruReplacer::new(NonZeroUsize::new(2).unwrap());
-        // assert_eq!(cache.touch(12), None);
-        // assert_eq!(cache.touch(13), None);
-        // assert_eq!(cache.pin(12), None);
-        // assert_eq!(cache.peak(), Some(13));
-        // assert_eq!(cache.len(), 1);
+        let mut cache = TLruReplacer::new(NonZeroUsize::new(2).unwrap());
+        cache.touch(2).expect("should add key");
+        cache.touch(3).expect("should add key");
+        assert_eq!(cache.pin(2), true);
+        assert_eq!(cache.pin(20), false);
+
+        assert_eq!(cache.peek_lru(), Some(&3));
     }
 }
