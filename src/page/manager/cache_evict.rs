@@ -128,7 +128,7 @@ impl<K> LruEntry<K> {
 
 type DefaultHasher = std::collections::hash_map::RandomState;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Error {
     CacheIsFull,
 }
@@ -176,7 +176,16 @@ impl<K: Hash + Eq, S: BuildHasher> TLruReplacer<K, S> {
     }
 
     fn evict(&mut self) -> Option<&K> {
-        todo!()
+        if self.len() == 0 {
+            return None;
+        }
+        let node = unsafe { (*self.tail).prev };
+        self.detach(node);
+
+        let key_ref = unsafe { (*node).key.as_ptr() };
+        self.map.remove(&KeyRef { k: key_ref });
+        let key: &K = unsafe { &(*(*node).key.as_ptr()) as &K };
+        Some(key)
     }
 
     /// Touches a key in replacer. This shifts the key to head of LRU
@@ -193,7 +202,7 @@ impl<K: Hash + Eq, S: BuildHasher> TLruReplacer<K, S> {
             }
             None => {
                 // Add new key to the head of the list
-                if self.map.len() > self.cap.get() {
+                if self.map.len() >= self.cap.get() {
                     return Err(Error::CacheIsFull)
                 }
                 let node =
@@ -247,7 +256,7 @@ impl<K: Hash + Eq, S: BuildHasher> TLruReplacer<K, S> {
 mod tests {
     use std::num::NonZeroUsize;
 
-    use crate::page::manager::cache_evict::TLruReplacer;
+    use super::*;
 
     #[test]
     fn test_touch_and_evict() {
@@ -257,17 +266,23 @@ mod tests {
         cache.touch(12).expect("could add key");
         cache.touch(13).expect("could add key");
         assert_eq!(cache.len(), 2);
+
         assert_eq!(cache.peek_lru(), Some(&12));
         cache.touch(12).expect("could update key");
         assert_eq!(cache.peek_lru(), Some(&13));
 
-        assert_eq!(cache.evict(), Some(&13));
-        // assert_eq!(cache.peak(), 13);
-        // assert_eq!(cache.len(), 1);
+        assert_eq!(cache.touch(14), Err(Error::CacheIsFull));
 
-        // assert_eq!(cache.evict(), 13);
-        // assert_eq!(cache.evict(), None);
-        // assert!(cache.is_empty());
+        assert_eq!(cache.evict(), Some(&13));
+        assert_eq!(cache.peek_lru(), Some(&12));
+        assert_eq!(cache.len(), 1);
+
+        cache.touch(14).expect("could add key");
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.evict(), Some(&12));
+        assert_eq!(cache.evict(), Some(&14));
+        assert_eq!(cache.evict(), None);
+        assert_eq!(cache.len(), 0);
     }
 
     #[test]
