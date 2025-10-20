@@ -4,7 +4,7 @@ use std::{
     ptr::{self, NonNull},
 };
 
-use core::hash::{Hash, Hasher};
+use core::hash::Hash;
 use dashmap::DashMap;
 
 use parking_lot::{Mutex, RwLock};
@@ -37,10 +37,6 @@ impl CacheEvict {
     pub(crate) fn evict(&self) -> Option<PageId> {
         self.lru_replacer.evict().copied()
     }
-
-    // pub(crate) fn touch(&self, page_id: PageId) -> EvictResult<(), PageId> {
-    //     self.lru_replacer.touch(page_id)
-    // }
 
     /// Returns true if page_id was in the cache list.
     pub(crate) fn pin_read(&self, page_id: PageId) {
@@ -89,11 +85,23 @@ struct LruEntry<K> {
     key: mem::MaybeUninit<K>,
 }
 
-// // SAFETY: LruEntry<K> contains raw pointers that form a doubly-linked list.
-// // These pointers are all heap-allocated and managed by LruReplacer.
-// // Access to the linked list is synchronized through the RwLock in LruReplacer.
-// // It is safe to send LruEntry<K> across threads when K is Send.
-// unsafe impl<K: Send> Send for LruEntry<K> {}
+// Wrapper around NonNull to safely implement Send
+struct LruEntryPtr<K>(NonNull<LruEntry<K>>);
+
+// SAFETY: LruEntryPtr<K> contains a NonNull pointer to a heap-allocated LruEntry<K>.
+// These pointers are managed by LruReplacer where:
+// 1. All heap allocations are owned and cleaned up properly
+// 2. Access to the linked list structure is synchronized via RwLock<Terminals<K>>
+// 3. The DashMap provides its own synchronization for concurrent access
+// It is safe to send LruEntryPtr<K> across threads when K is Send.
+unsafe impl<K: Send> Send for LruEntryPtr<K> {}
+
+// SAFETY: LruEntryPtr<K> can be safely shared between threads because:
+// 1. The underlying linked list is protected by RwLock<Terminals<K>>
+// 2. All mutations to the list structure happen through synchronized methods
+// 3. DashMap provides synchronization for accessing the map itself
+// It is safe to share LruEntryPtr<K> across threads when K is Send + Sync.
+unsafe impl<K: Send + Sync> Sync for LruEntryPtr<K> {}
 
 impl<K> LruEntry<K> {
     fn new(key: K) -> Self {
@@ -105,10 +113,18 @@ impl<K> LruEntry<K> {
     }
 }
 
-type DefaultHasher = std::collections::hash_map::RandomState;
+impl<K> LruEntryPtr<K> {
+    fn new(ptr: NonNull<LruEntry<K>>) -> Self {
+        Self(ptr)
+    }
+
+    fn as_ptr(&self) -> *mut LruEntry<K> {
+        self.0.as_ptr()
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
-enum Error {
+pub(crate) enum Error {
     CacheIsFull,
 }
 
@@ -117,14 +133,21 @@ struct Terminals<K> {
     tail: *mut LruEntry<K>,
 }
 
-// // SAFETY: Terminals<K> contains raw pointers to heap-allocated LruEntry<K> nodes.
-// // These pointers are owned by LruReplacer and access is synchronized via RwLock.
-// // It is safe to send Terminals<K> across threads when K is Send.
+// SAFETY: Terminals<K> contains raw pointers to heap-allocated LruEntry<K> nodes.
+// These pointers are owned by LruReplacer and access is synchronized via RwLock.
+// It is safe to send Terminals<K> across threads when K is Send.
 unsafe impl<K: Send> Send for Terminals<K> {}
+
+// SAFETY: Terminals<K> can be safely shared between threads because:
+// 1. The raw pointers are just addresses that can be safely read from multiple threads
+// 2. All actual dereferencing and mutation happens under RwLock protection
+// 3. The RwLock ensures proper synchronization of access to the linked list structure
+// It is safe to share Terminals<K> across threads when K is Send + Sync.
+unsafe impl<K: Send + Sync> Sync for Terminals<K> {}
 
 // An LRU cache
 struct LruReplacer<K> {
-    map: DashMap<K, NonNull<LruEntry<K>>>,
+    map: DashMap<K, LruEntryPtr<K>>,
     cap: NonZeroUsize,
     // head and tail are sigil nodes to facilitate inserting entries
     terminals: RwLock<Terminals<K>>,
@@ -141,7 +164,7 @@ impl<K: Hash + Eq + Copy> LruReplacer<K> {
         Self::construct(cap, DashMap::with_capacity(cap.get()))
     }
 
-    fn construct(cap: NonZeroUsize, map: DashMap<K, NonNull<LruEntry<K>>>) -> Self {
+    fn construct(cap: NonZeroUsize, map: DashMap<K, LruEntryPtr<K>>) -> Self {
         let terminals: Terminals<K> = Terminals {
             head: Box::into_raw(Box::new(LruEntry::new_sigil())),
             tail: Box::into_raw(Box::new(LruEntry::new_sigil())),
@@ -199,7 +222,7 @@ impl<K: Hash + Eq + Copy> LruReplacer<K> {
                     unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(LruEntry::new(k)))) };
                 let node_ptr = node.as_ptr();
                 self.attach(node_ptr);
-                self.map.insert(k, node);
+                self.map.insert(k, LruEntryPtr::new(node));
 
                 Ok(())
             }
