@@ -1,18 +1,16 @@
 use std::{
-    collections::HashMap,
     fmt, mem,
     num::NonZeroUsize,
     ptr::{self, NonNull},
 };
 
-use core::hash::{BuildHasher, Hash, Hasher};
+use core::hash::{Hash, Hasher};
+use dashmap::DashMap;
 
-use evict::{EvictResult, EvictionPolicy, LruReplacer};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 
 use crate::page::{manager::buffer_pool::FrameId, PageId};
 
-// TODO: Temporarily use LruReplacer as the eviction policy, replace with a better eviction policy
 pub(crate) struct CacheEvict {
     lru_replacer: LruReplacer<PageId>,
     read_frames: Mutex<Vec<PageId>>,
@@ -29,7 +27,7 @@ impl fmt::Debug for CacheEvict {
 impl CacheEvict {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
-            lru_replacer: LruReplacer::new(capacity),
+            lru_replacer: LruReplacer::new(NonZeroUsize::new(capacity).unwrap()),
             read_frames: Mutex::new(Vec::with_capacity(capacity)),
             update_frames: Mutex::new(Vec::with_capacity(capacity)),
             new_frames: Mutex::new(Vec::with_capacity(capacity)),
@@ -37,23 +35,20 @@ impl CacheEvict {
     }
 
     pub(crate) fn evict(&self) -> Option<PageId> {
-        self.lru_replacer.evict()
+        self.lru_replacer.evict().copied()
     }
 
-    pub(crate) fn touch(&self, page_id: PageId) -> EvictResult<(), PageId> {
-        self.lru_replacer.touch(page_id)
-    }
+    // pub(crate) fn touch(&self, page_id: PageId) -> EvictResult<(), PageId> {
+    //     self.lru_replacer.touch(page_id)
+    // }
 
-    pub(crate) fn pin_read(&self, page_id: PageId) -> EvictResult<(), PageId> {
+    /// Returns true if page_id was in the cache list.
+    pub(crate) fn pin_read(&self, page_id: PageId) {
         self.read_frames.lock().push(page_id);
-        self.lru_replacer.pin(page_id)
+        self.lru_replacer.remove(&page_id);
     }
 
-    pub(crate) fn pin_write_update_page(
-        &self,
-        frame_id: FrameId,
-        page_id: PageId,
-    ) -> EvictResult<(), PageId> {
+    pub(crate) fn pin_write_update_page(&self, frame_id: FrameId, page_id: PageId) {
         if let Some((_, first_page_id)) = self.new_frames.lock().first() {
             if page_id.as_u32() < first_page_id.as_u32() {
                 self.update_frames.lock().push((frame_id, page_id));
@@ -62,14 +57,10 @@ impl CacheEvict {
             self.update_frames.lock().push((frame_id, page_id));
         }
 
-        self.lru_replacer.pin(page_id)
+        self.lru_replacer.remove(&page_id);
     }
 
-    pub(crate) fn pin_write_new_page(
-        &self,
-        frame_id: FrameId,
-        page_id: PageId,
-    ) -> EvictResult<(), PageId> {
+    pub(crate) fn pin_write_new_page(&self, frame_id: FrameId, page_id: PageId) {
         let mut new_frames = self.new_frames.lock();
         if let Some((_, last_page_id)) = new_frames.last() {
             debug_assert!(
@@ -81,40 +72,28 @@ impl CacheEvict {
         }
         new_frames.push((frame_id, page_id));
 
-        self.lru_replacer.pin(page_id)
+        self.lru_replacer.remove(&page_id);
     }
 
-    pub(crate) fn unpin(&self, page_id: PageId) -> EvictResult<(), PageId> {
-        self.lru_replacer.unpin(page_id)
+    pub(crate) fn unpin(&self, page_id: PageId) -> Result<(), Error> {
+        self.lru_replacer.touch(page_id)
     }
 }
 
 // LRU implementation inspired from https://github.com/jeromefroe/lru-rs/blob/master/src/lib.rs
 // Struct used to hold a reference to a key
-struct KeyRef<K> {
-    k: *const K,
-}
-
-impl<K: Hash> Hash for KeyRef<K> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        unsafe { (*self.k).hash(state) }
-    }
-}
-
-impl<K: PartialEq> PartialEq for KeyRef<K> {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { (*self.k).eq(&*other.k) }
-    }
-}
-
-// Eq extends PartialEq
-impl<K: Eq> Eq for KeyRef<K> {}
 
 struct LruEntry<K> {
     prev: *mut LruEntry<K>,
     next: *mut LruEntry<K>,
     key: mem::MaybeUninit<K>,
 }
+
+// // SAFETY: LruEntry<K> contains raw pointers that form a doubly-linked list.
+// // These pointers are all heap-allocated and managed by LruReplacer.
+// // Access to the linked list is synchronized through the RwLock in LruReplacer.
+// // It is safe to send LruEntry<K> across threads when K is Send.
+// unsafe impl<K: Send> Send for LruEntry<K> {}
 
 impl<K> LruEntry<K> {
     fn new(key: K) -> Self {
@@ -129,40 +108,49 @@ impl<K> LruEntry<K> {
 type DefaultHasher = std::collections::hash_map::RandomState;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Error {
+enum Error {
     CacheIsFull,
 }
 
-// An LRU cache
-pub(crate) struct TLruReplacer<K, S = DefaultHasher> {
-    map: HashMap<KeyRef<K>, NonNull<LruEntry<K>>, S>,
-    cap: NonZeroUsize,
-    // head and tail are sigil nodes to facilitate inserting entries
+struct Terminals<K> {
     head: *mut LruEntry<K>,
     tail: *mut LruEntry<K>,
 }
 
-impl<K: Hash + Eq> TLruReplacer<K> {
-    pub(crate) fn new(cap: NonZeroUsize) -> Self {
-        Self::construct(cap, HashMap::with_capacity(cap.get()))
-    }
+// // SAFETY: Terminals<K> contains raw pointers to heap-allocated LruEntry<K> nodes.
+// // These pointers are owned by LruReplacer and access is synchronized via RwLock.
+// // It is safe to send Terminals<K> across threads when K is Send.
+unsafe impl<K: Send> Send for Terminals<K> {}
+
+// An LRU cache
+struct LruReplacer<K> {
+    map: DashMap<K, NonNull<LruEntry<K>>>,
+    cap: NonZeroUsize,
+    // head and tail are sigil nodes to facilitate inserting entries
+    terminals: RwLock<Terminals<K>>,
 }
 
-impl<K: Hash + Eq, S: BuildHasher> TLruReplacer<K, S> {
-    fn construct(cap: NonZeroUsize, map: HashMap<KeyRef<K>, NonNull<LruEntry<K>>, S>) -> Self {
-        let lru_replacer = TLruReplacer {
-            map,
-            cap,
+// Compile-time assertion to ensure that `LruReplacer` is `Send`
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<LruReplacer<u32>>();
+};
+
+impl<K: Hash + Eq + Copy> LruReplacer<K> {
+    fn new(cap: NonZeroUsize) -> Self {
+        Self::construct(cap, DashMap::with_capacity(cap.get()))
+    }
+
+    fn construct(cap: NonZeroUsize, map: DashMap<K, NonNull<LruEntry<K>>>) -> Self {
+        let terminals: Terminals<K> = Terminals {
             head: Box::into_raw(Box::new(LruEntry::new_sigil())),
             tail: Box::into_raw(Box::new(LruEntry::new_sigil())),
         };
-
         unsafe {
-            (*lru_replacer.head).next = lru_replacer.tail;
-            (*lru_replacer.tail).prev = lru_replacer.head;
+            (*terminals.head).next = terminals.tail;
+            (*terminals.tail).prev = terminals.head;
         }
-
-        lru_replacer
+        LruReplacer { map, cap, terminals: RwLock::new(terminals) }
     }
 
     #[inline]
@@ -175,28 +163,30 @@ impl<K: Hash + Eq, S: BuildHasher> TLruReplacer<K, S> {
         self.map.len() == 0
     }
 
-    fn evict(&mut self) -> Option<&K> {
+    /// Returns the key at the tail if exist
+    fn evict(&self) -> Option<&K> {
         if self.len() == 0 {
             return None;
         }
-        let node = unsafe { (*self.tail).prev };
-        self.detach(node);
+        let terminals = self.terminals.read();
+        let node = unsafe { (*terminals.tail).prev };
+        Self::detach(node);
 
-        let key_ref = unsafe { (*node).key.as_ptr() };
-        self.map.remove(&KeyRef { k: key_ref });
+        let key = unsafe { (*node).key.assume_init() };
+        self.map.remove(&key);
         let key: &K = unsafe { &(*(*node).key.as_ptr()) as &K };
         Some(key)
     }
 
     /// Touches a key in replacer. This shifts the key to head of LRU
-    pub(crate) fn touch(&mut self, k: K) -> Result<(), Error> {
-        let node_ref = self.map.get_mut(&KeyRef { k: &k });
+    pub(crate) fn touch(&self, k: K) -> Result<(), Error> {
+        let node_ptr =
+            if let Some(node_ref) = self.map.get_mut(&k) { Some(node_ref.as_ptr()) } else { None };
 
-        match node_ref {
-            Some(node_ref) => {
+        match node_ptr {
+            Some(node_ptr) => {
                 // If the key is already in the cache, just move it to the head of the list
-                let node_ptr = node_ref.as_ptr();
-                self.detach(node_ptr);
+                Self::detach(node_ptr);
                 self.attach(node_ptr);
                 Ok(())
             }
@@ -209,8 +199,7 @@ impl<K: Hash + Eq, S: BuildHasher> TLruReplacer<K, S> {
                     unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(LruEntry::new(k)))) };
                 let node_ptr = node.as_ptr();
                 self.attach(node_ptr);
-                let key_ref = unsafe { (*node_ptr).key.as_ptr() };
-                self.map.insert(KeyRef { k: key_ref }, node);
+                self.map.insert(k, node);
 
                 Ok(())
             }
@@ -219,15 +208,14 @@ impl<K: Hash + Eq, S: BuildHasher> TLruReplacer<K, S> {
 
     /// Removes the key from the queue.
     /// Return true if the key is in the queue, false otherwise.
-    fn remove(&mut self, k: K) -> bool {
-        let key_ref = &KeyRef { k: &k };
-        let node_ref = self.map.remove(key_ref);
+    fn remove(&self, k: &K) -> bool {
+        let node_ref = self.map.remove(k);
 
         match node_ref {
-            Some(node_ref) => {
+            Some((_, node)) => {
                 // If the key is already in the cache, just remove it
-                let node_ptr = node_ref.as_ptr();
-                self.detach(node_ptr);
+                let node_ptr = node.as_ptr();
+                Self::detach(node_ptr);
 
                 true
             }
@@ -235,32 +223,34 @@ impl<K: Hash + Eq, S: BuildHasher> TLruReplacer<K, S> {
         }
     }
 
-    /// Returns the value recorresponding to the least recently used item or None if the cache is
+    /// Returns the value corresponding to the least recently used item or None if the cache is
     /// empty.
     fn peek_lru(&self) -> Option<&K> {
         if self.is_empty() {
             return None;
         }
         let key;
+        let terminals = self.terminals.read();
         unsafe {
-            let node = (*self.tail).prev;
+            let node = (*terminals.tail).prev;
             key = &(*(*node).key.as_ptr()) as &K;
         };
         Some(key)
     }
 
-    fn detach(&mut self, node: *const LruEntry<K>) {
+    fn detach(node: *const LruEntry<K>) {
         unsafe {
             (*(*node).prev).next = (*node).next;
             (*(*node).next).prev = (*node).prev;
         }
     }
 
-    fn attach(&mut self, node: *mut LruEntry<K>) {
+    fn attach(&self, node: *mut LruEntry<K>) {
+        let mut terminals = self.terminals.write();
         unsafe {
-            (*node).next = (*self.head).next;
-            (*node).prev = self.head;
-            (*self.head).next = node;
+            (*node).next = (*terminals.head).next;
+            (*node).prev = terminals.head;
+            (*terminals.head).next = node;
             (*(*node).next).prev = node;
         }
     }
@@ -274,7 +264,7 @@ mod tests {
 
     #[test]
     fn test_touch_and_evict() {
-        let mut cache = TLruReplacer::new(NonZeroUsize::new(2).unwrap());
+        let cache = LruReplacer::new(NonZeroUsize::new(2).unwrap());
         assert!(cache.is_empty());
 
         cache.touch(12).expect("should add key");
@@ -302,15 +292,15 @@ mod tests {
 
     #[test]
     fn test_pin() {
-        let mut cache = TLruReplacer::new(NonZeroUsize::new(2).unwrap());
+        let cache = LruReplacer::new(NonZeroUsize::new(2).unwrap());
         cache.touch(2).expect("should add key");
         cache.touch(3).expect("should add key");
         assert_eq!(cache.len(), 2);
-        assert_eq!(cache.remove(2), true);
-        assert_eq!(cache.remove(20), false);
+        assert_eq!(cache.remove(&2), true);
+        assert_eq!(cache.remove(&20), false);
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.peek_lru(), Some(&3));
-        assert_eq!(cache.remove(3), true);
+        assert_eq!(cache.remove(&3), true);
         assert_eq!(cache.len(), 0);
     }
 }

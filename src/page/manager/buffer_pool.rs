@@ -244,7 +244,7 @@ impl PageManager {
             // Check if page is already in the cache
             if let Some(frame_id) = self.page_table.get(&page_id) {
                 let frame = &self.frames[frame_id.0 as usize];
-                self.lru_replacer.pin_read(page_id).map_err(|_| PageError::EvictionPolicy)?;
+                self.lru_replacer.pin_read(page_id);
                 return unsafe { Page::from_ptr(page_id, frame.ptr, self) }
             }
 
@@ -260,7 +260,7 @@ impl PageManager {
                         .map_err(PageError::IO)?;
                 }
                 self.page_table.insert(page_id, frame_id);
-                self.lru_replacer.pin_read(page_id).map_err(|_| PageError::EvictionPolicy)?;
+                self.lru_replacer.pin_read(page_id);
                 self.loading_page.remove(&page_id);
                 return unsafe { Page::from_ptr(page_id, buf, self) }
             }
@@ -281,9 +281,7 @@ impl PageManager {
         loop {
             // Check if page is already in the cache
             if let Some(frame_id) = self.page_table.get(&page_id) {
-                self.lru_replacer
-                    .pin_write_update_page(*frame_id, page_id)
-                    .map_err(|_| PageError::EvictionPolicy)?;
+                self.lru_replacer.pin_write_update_page(*frame_id, page_id);
                 let frame = &self.frames[frame_id.0 as usize];
                 return unsafe { PageMut::from_ptr(page_id, snapshot_id, frame.ptr, self) }
             }
@@ -299,9 +297,7 @@ impl PageManager {
                         .map_err(PageError::IO)?;
                 }
                 self.page_table.insert(page_id, frame_id);
-                self.lru_replacer
-                    .pin_write_update_page(frame_id, page_id)
-                    .map_err(|_| PageError::EvictionPolicy)?;
+                self.lru_replacer.pin_write_update_page(frame_id, page_id);
                 self.loading_page.remove(&page_id);
                 return unsafe { PageMut::from_ptr(page_id, snapshot_id, buf, self) }
             } else {
@@ -322,9 +318,7 @@ impl PageManager {
         self.grow_if_needed(new_count as u64 * Page::SIZE as u64)?;
 
         self.page_table.insert(page_id, frame_id);
-        self.lru_replacer
-            .pin_write_new_page(frame_id, page_id)
-            .map_err(|_| PageError::EvictionPolicy)?;
+        self.lru_replacer.pin_write_new_page(frame_id, page_id);
 
         let data = self.frames[frame_id.0 as usize].ptr;
         unsafe { PageMut::acquire_unchecked(page_id, snapshot_id, data, self) }
