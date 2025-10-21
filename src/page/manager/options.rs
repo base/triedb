@@ -9,9 +9,12 @@ pub struct PageManagerOptions {
     pub(super) open_options: OpenOptions,
     pub(super) page_count: u32,
     pub(super) max_pages: u32,
+    pub(super) num_frames: u32, // for buffer pool backend
 }
 
 impl PageManagerOptions {
+    pub const DEFAULT_NUM_FRAMES: u32 = 1024 * 1024 * 2;
+
     pub fn new() -> Self {
         let mut open_options = File::options();
         open_options.read(true).write(true).create(true).truncate(false);
@@ -24,7 +27,14 @@ impl PageManagerOptions {
             Page::MAX_COUNT / 1024
         };
 
-        Self { open_options, page_count: 0, max_pages }
+        let num_frames = if cfg!(not(test)) {
+            Self::DEFAULT_NUM_FRAMES
+        } else {
+            // Use a smaller buffer pool for tests to reduce memory usage
+            1024
+        };
+
+        Self { open_options, page_count: 0, max_pages, num_frames }
     }
 
     /// Sets the option to create a new file, or open it if it already exists.
@@ -58,6 +68,14 @@ impl PageManagerOptions {
     /// The default is [`PageId::MAX`].
     pub fn max_pages(&mut self, max_pages: u32) -> &mut Self {
         self.max_pages = max_pages;
+        self
+    }
+
+    /// Sets the number of frames for the buffer pool backend.
+    ///
+    /// The default is [`DEFAULT_NUM_FRAMES`].
+    pub fn num_frames(&mut self, num_frames: u32) -> &mut Self {
+        self.num_frames = num_frames;
         self
     }
 

@@ -134,10 +134,11 @@ impl<'a> StorageDebugger<'a> {
                 new_indent.push('\t');
 
                 if let Some(direct_child) = storage_root {
+                    let slotted_page_id = slotted_page.id();
                     let (new_slotted_page, cell_index) =
                         self.get_slotted_page_and_index(context, direct_child, slotted_page)?;
                     // child is on different page, and we are only printing the current page
-                    if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
+                    if new_slotted_page.id() != slotted_page_id && !print_whole_db {
                         let child_page_id = direct_child.location().page_id().unwrap();
                         writeln!(buf, "{new_indent}Child on new page: {child_page_id:?}")?;
                         Ok(())
@@ -165,7 +166,7 @@ impl<'a> StorageDebugger<'a> {
 
                     //check if child is on same page
                     let (new_slotted_page, cell_index) =
-                        self.get_slotted_page_and_index(context, child, slotted_page)?;
+                        self.get_slotted_page_and_index(context, child, slotted_page.clone())?;
                     // child is on new page, and we are only printing the current page
                     if new_slotted_page.id() != slotted_page.id() && !print_whole_db {
                         let child_page_id = child.location().page_id().unwrap();
@@ -277,11 +278,12 @@ impl<'a> StorageDebugger<'a> {
 
         match child_pointer {
             Some(child_pointer) => {
+                let slotted_page_id = slotted_page.id();
                 let (child_slotted_page, child_cell_index) =
                     self.get_slotted_page_and_index(context, child_pointer, slotted_page)?;
 
                 // If we're moving to a new page and extra_verbose is true, print the new page
-                if child_slotted_page.id() != slotted_page.id() {
+                if child_slotted_page.id() != slotted_page_id {
                     if verbosity_level == 2 {
                         //extra verbose; print new page contents
                         writeln!(buf, "\n\n\nNEW PAGE: {}\n", child_slotted_page.id())?;
@@ -421,10 +423,11 @@ impl<'a> StorageDebugger<'a> {
             AccountLeaf { ref storage_root, .. } => {
                 //Note: direct child is not counted as part of stats.num_children
                 if let Some(direct_child) = storage_root {
+                    let slotted_page_id = slotted_page.id();
                     let (new_slotted_page, cell_index) =
                         self.get_slotted_page_and_index(context, direct_child, slotted_page)?;
                     //if we move to a new page, update relevent stats
-                    if new_slotted_page.id() != slotted_page.id() {
+                    if new_slotted_page.id() != slotted_page_id {
                         let occupied_bytes = new_slotted_page.num_occupied_bytes();
                         let occupied_cells = new_slotted_page.num_occupied_cells();
 
@@ -465,7 +468,7 @@ impl<'a> StorageDebugger<'a> {
                 for child in child_iter {
                     //check if child is on same page
                     let (new_slotted_page, cell_index) =
-                        self.get_slotted_page_and_index(context, child, slotted_page)?;
+                        self.get_slotted_page_and_index(context, child, slotted_page.clone())?;
                     //update page depth if we move to a new page
                     if new_slotted_page.id() != slotted_page.id() {
                         let occupied_bytes = new_slotted_page.num_occupied_bytes();
@@ -702,7 +705,7 @@ impl<'a> StorageDebugger<'a> {
             Branch { ref children } => {
                 for child in children.iter().flatten() {
                     let (new_slotted_page, new_cell_index) =
-                        self.get_slotted_page_and_index(context, child, slotted_page)?;
+                        self.get_slotted_page_and_index(context, child, slotted_page.clone())?;
                     if new_slotted_page.id() != page_id {
                         reachable.insert(new_slotted_page.id());
                         self.consistency_check_helper(
@@ -772,8 +775,8 @@ impl<'a> StorageDebugger<'a> {
     }
 
     /// Helper function to get a page from the page manager.
-    fn get_page(&self, context: &TransactionContext, page_id: PageId) -> Result<Page<'_>, Error> {
-        self.page_manager.get(context.snapshot_id, page_id).map_err(Error::PageError)
+    fn get_page(&self, _context: &TransactionContext, page_id: PageId) -> Result<Page<'_>, Error> {
+        self.page_manager.get(page_id).map_err(Error::PageError)
     }
 
     /// Prints information about the root page and database metadata.
