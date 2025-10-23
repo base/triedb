@@ -438,16 +438,12 @@ impl PageManager {
                     Ordering::Relaxed,
                     Ordering::Relaxed,
                 ) {
-                    Ok(_) => {
-                        println!("original free frame_id: {:?}", FrameId(original_free_frame_idx));
-                        return Some(FrameId(original_free_frame_idx))
-                    }
+                    Ok(_) => return Some(FrameId(original_free_frame_idx)),
                     Err(val) => original_free_frame_idx = val, /* Another thread modified original_free_frame_idx, retry. */
                 }
             } else {
                 let evicted_page = self.lru_replacer.evict();
                 if let Some(page_id) = evicted_page {
-                    println!("evicted page: {page_id}");
                     let frame_id = self
                         .page_table
                         .remove(&page_id)
@@ -882,8 +878,6 @@ mod tests {
             }
             m.sync().expect("sync failed");
         }
-
-        println!("------");
 
         // Test with limited frames to force eviction
         {
