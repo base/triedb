@@ -5,15 +5,20 @@ use std::{
 };
 
 use core::hash::Hash;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 
 use parking_lot::{Mutex, RwLock};
 
-use crate::page::{manager::buffer_pool::FrameId, PageId};
+use crate::page::{self, manager::buffer_pool::FrameId, PageId};
 
+// Another option is LruReplacer has a map with value contain frame status (read/update/new), with
+// the linked list are sectioned in to different zone: new, updated, read (all pinned), and the
+// rest.
+// With this, the pin() would simply move one page from "the cache" section to related pinned
+// section. And getting list of updated/new pages would be going thru a list.
 pub(crate) struct CacheEvict {
     lru_replacer: LruReplacer<PageId>,
-    read_frames: Mutex<Vec<PageId>>,
+    read_frames: DashSet<PageId>,
     pub(crate) update_frames: Mutex<Vec<(FrameId, PageId)>>,
     pub(crate) new_frames: Mutex<Vec<(FrameId, PageId)>>,
 }
@@ -28,7 +33,7 @@ impl CacheEvict {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
             lru_replacer: LruReplacer::new(NonZeroUsize::new(capacity).unwrap()),
-            read_frames: Mutex::new(Vec::with_capacity(capacity)),
+            read_frames: DashSet::with_capacity(capacity),
             update_frames: Mutex::new(Vec::with_capacity(capacity)),
             new_frames: Mutex::new(Vec::with_capacity(capacity)),
         }
@@ -38,10 +43,13 @@ impl CacheEvict {
         self.lru_replacer.evict().copied()
     }
 
-    /// Returns true if page_id was in the cache list.
-    pub(crate) fn pin_read(&self, page_id: PageId) {
-        self.read_frames.lock().push(page_id);
-        self.lru_replacer.remove(&page_id);
+    // Returns true if the page hasn't pinned yet
+    pub(crate) fn pin_read(&self, page_id: PageId) -> bool {
+        if !self.read_frames.insert(page_id) {
+            self.lru_replacer.remove(&page_id);
+            return true;
+        }
+        return false
     }
 
     pub(crate) fn pin_write_update_page(&self, frame_id: FrameId, page_id: PageId) {
@@ -71,8 +79,29 @@ impl CacheEvict {
         self.lru_replacer.remove(&page_id);
     }
 
-    pub(crate) fn unpin(&self, page_id: PageId) -> Result<(), Error> {
-        self.lru_replacer.touch(page_id)
+    // Only unpin read pages
+    // TODO: merge with unpin_new_frames and unpin_update_frames
+    pub(crate) fn unpin_from_drop(&self, page_id: PageId) -> Result<(), Error> {
+        if let Some(_) = self.read_frames.remove(&page_id) {
+            self.lru_replacer.touch(page_id)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn unpin_new_frames(&self) -> Result<(), Error> {
+        let mut new_frames = self.new_frames.lock();
+        for (_, page_id) in new_frames.drain(..) {
+            self.lru_replacer.touch(page_id)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn unpin_update_frames(&self) -> Result<(), Error> {
+        let mut update_frames = self.update_frames.lock();
+        for (_, page_id) in update_frames.drain(..) {
+            self.lru_replacer.touch(page_id)?;
+        }
+        Ok(())
     }
 }
 
@@ -191,7 +220,7 @@ impl<K: Hash + Eq + Copy> LruReplacer<K> {
         if self.len() == 0 {
             return None;
         }
-        let terminals = self.terminals.read();
+        let terminals = self.terminals.write();
         let node = unsafe { (*terminals.tail).prev };
         Self::detach(node);
 
@@ -215,6 +244,7 @@ impl<K: Hash + Eq + Copy> LruReplacer<K> {
             }
             None => {
                 // Add new key to the head of the list
+                // TODO: map + all lists
                 if self.map.len() >= self.cap.get() {
                     return Err(Error::CacheIsFull)
                 }

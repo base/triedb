@@ -356,7 +356,7 @@ impl PageManager {
         update_pages.sort_by_key(|(_, page_id)| page_id.as_offset());
         update_pages.dedup_by_key(|(_, page_id)| *page_id);
         // New pages should be sorted by page_id ascending and no duplicate
-        let mut new_pages = self.lru_replacer.new_frames.lock();
+        let new_pages = self.lru_replacer.new_frames.lock();
 
         let mut write_num = 0;
 
@@ -382,12 +382,10 @@ impl PageManager {
         }
 
         file.flush()?;
-        new_pages
-            .iter()
-            .chain(update_pages.iter())
-            .for_each(|(_, page_id)| self.lru_replacer.unpin(*page_id).unwrap());
-        new_pages.clear();
-        update_pages.clear();
+        drop(update_pages);
+        drop(new_pages);
+        self.lru_replacer.unpin_new_frames().unwrap();
+        self.lru_replacer.unpin_update_frames().unwrap();
         Ok(())
     }
 
@@ -410,7 +408,7 @@ impl PageManager {
     #[inline]
     pub fn drop_page(&self, page_id: PageId) {
         // unpin() must be successful, or an indication of a bug in the code
-        self.lru_replacer.unpin(page_id).unwrap();
+        self.lru_replacer.unpin_from_drop(page_id).unwrap();
     }
 
     fn next_page_id(&self) -> Option<(PageId, u32)> {
@@ -440,15 +438,24 @@ impl PageManager {
                     Ordering::Relaxed,
                     Ordering::Relaxed,
                 ) {
-                    Ok(_) => return Some(FrameId(original_free_frame_idx)),
+                    Ok(_) => {
+                        println!("original free frame_id: {:?}", FrameId(original_free_frame_idx));
+                        return Some(FrameId(original_free_frame_idx))
+                    }
                     Err(val) => original_free_frame_idx = val, /* Another thread modified original_free_frame_idx, retry. */
                 }
             } else {
                 let evicted_page = self.lru_replacer.evict();
                 if let Some(page_id) = evicted_page {
-                    return self.page_table.remove(&page_id).map(|(_, frame_id)| frame_id)
+                    println!("evicted page: {page_id}");
+                    let frame_id = self
+                        .page_table
+                        .remove(&page_id)
+                        .map(|(_, frame_id)| frame_id)
+                        .expect("page_id not found in page_table");
+                    return Some(frame_id);
                 } else {
-                    return None
+                    return None;
                 }
             }
         }
@@ -876,11 +883,13 @@ mod tests {
             m.sync().expect("sync failed");
         }
 
+        println!("------");
+
         // Test with limited frames to force eviction
         {
-            let num_threads = 16;
+            let num_threads: usize = 16;
             let iterations = 50;
-            let num_frames = 32;
+            let num_frames = num_threads as u32;
             let mut opts = PageManagerOptions::new();
             opts.num_frames(num_frames).page_count(total_pages); // Force frequent eviction
             let m = Arc::new(
