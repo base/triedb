@@ -3,13 +3,15 @@ use std::{
     ffi::CString,
     fs::File,
     io::{self, IoSlice, Seek, SeekFrom, Write},
-    os::{fd::FromRawFd, unix::fs::FileExt},
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::fs::FileExt,
+    },
     path::Path,
     sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
     },
-    thread::{self, JoinHandle},
 };
 
 use dashmap::{DashMap, DashSet};
@@ -38,7 +40,6 @@ unsafe impl Sync for Frame {}
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub(crate) struct FrameId(u32);
 
-#[derive(Debug)]
 pub struct PageManager {
     num_frames: u32,
     page_count: AtomicU32,
@@ -53,6 +54,23 @@ pub struct PageManager {
     loading_page: DashSet<PageId>, /* set of pages that are being loaded from disk */
 
     io_uring: RwLock<IoUring>,
+}
+
+impl std::fmt::Debug for PageManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PageManager")
+            .field("num_frames", &self.num_frames)
+            .field("page_count", &self.page_count)
+            .field("file", &self.file)
+            .field("file_len", &self.file_len)
+            .field("frames", &self.frames)
+            .field("page_table", &self.page_table)
+            .field("original_free_frame_idx", &self.original_free_frame_idx)
+            .field("lru_replacer", &self.lru_replacer)
+            .field("loading_page", &self.loading_page)
+            .field("io_uring", &"<IoUring>")
+            .finish()
+    }
 }
 
 impl PageManager {
@@ -124,44 +142,6 @@ impl PageManager {
         Ok(page_manager)
     }
 
-
-    #[inline]
-    fn write_batch(batch: &mut Vec<IoSlice>, file: &mut File, offset: u64) -> io::Result<()> {
-        let total_len = batch.iter().map(|b| b.len()).sum::<usize>();
-        file.seek(SeekFrom::Start(offset))?;
-        let mut total_written: usize = 0;
-        while total_written < total_len {
-            let written = file.write_vectored(batch)?;
-            if written == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "failed to write whole buffer",
-                ));
-            }
-            total_written += written;
-            // Remove fully written slices from the batch
-            let mut bytes_left = written;
-            while !batch.is_empty() && bytes_left >= batch[0].len() {
-                bytes_left -= batch[0].len();
-                batch.remove(0);
-            }
-            // Adjust the first slice if it was partially written
-            if !batch.is_empty() && bytes_left > 0 {
-                // SAFETY: IoSlice only needs a reference for the duration of the write call,
-                // and batch[0] is still valid here.
-                let ptr = batch[0].as_ptr();
-                let len = batch[0].len();
-                if bytes_left < len {
-                    let new_slice = unsafe {
-                        std::slice::from_raw_parts(ptr.add(bytes_left), len - bytes_left)
-                    };
-                    batch[0] = IoSlice::new(new_slice);
-                }
-            }
-        }
-        Ok(())
-    }
-
     #[cfg(test)]
     pub fn open_temp_file() -> Result<Self, PageError> {
         Self::options().open_temp_file()
@@ -177,7 +157,7 @@ impl PageManager {
             if let Some(frame_id) = self.page_table.get(&page_id) {
                 let frame = &self.frames[frame_id.0 as usize];
                 self.lru_replacer.touch(page_id).map_err(|_| PageError::EvictionPolicy)?;
-                return unsafe { Page::from_ptr(page_id, frame.ptr, self) }
+                return unsafe { Page::from_ptr(page_id, frame.ptr, self) };
             }
 
             // Otherwise, need to load the page from disk
@@ -194,7 +174,7 @@ impl PageManager {
                 self.page_table.insert(page_id, frame_id);
                 self.lru_replacer.pin_read(page_id).map_err(|_| PageError::EvictionPolicy)?;
                 self.loading_page.remove(&page_id);
-                return unsafe { Page::from_ptr(page_id, buf, self) }
+                return unsafe { Page::from_ptr(page_id, buf, self) };
             }
             // Another thread is already loading this page, spin/yield and retry
             std::thread::yield_now();
@@ -217,7 +197,7 @@ impl PageManager {
                     .pin_write_update_page(*frame_id, page_id)
                     .map_err(|_| PageError::EvictionPolicy)?;
                 let frame = &self.frames[frame_id.0 as usize];
-                return unsafe { PageMut::from_ptr(page_id, snapshot_id, frame.ptr, self) }
+                return unsafe { PageMut::from_ptr(page_id, snapshot_id, frame.ptr, self) };
             }
             // Otherwise, need to load the page from disk
             if self.loading_page.insert(page_id) {
@@ -235,7 +215,7 @@ impl PageManager {
                     .pin_write_update_page(frame_id, page_id)
                     .map_err(|_| PageError::EvictionPolicy)?;
                 self.loading_page.remove(&page_id);
-                return unsafe { PageMut::from_ptr(page_id, snapshot_id, buf, self) }
+                return unsafe { PageMut::from_ptr(page_id, snapshot_id, buf, self) };
             } else {
                 // Another thread is already loading this page, spin/yield and retry
                 std::thread::yield_now();
@@ -287,7 +267,8 @@ impl PageManager {
     ///
     /// Could explore the parallel write strategy to improve performance.
     pub fn sync(&self) -> io::Result<()> {
-        let file = &mut self.file.read();
+        let file = self.file.read();
+        let fd = file.as_raw_fd();
 
         // Get all value at update_frames and new_frames
         let mut update_pages = self.lru_replacer.update_frames.lock();
@@ -322,7 +303,7 @@ impl PageManager {
                 // Submit to ring
                 loop {
                     let mut sq = ring.submission();
-                    match unsafe { sq.push(&write_op) } {
+                    match sq.push(&write_op) {
                         Ok(_) => break,
                         Err(_) => {
                             // Submission queue is full, submit and wait
@@ -420,9 +401,9 @@ impl PageManager {
             } else {
                 let evicted_page = self.lru_replacer.evict();
                 if let Some(page_id) = evicted_page {
-                    return self.page_table.remove(&page_id).map(|(_, frame_id)| frame_id)
+                    return self.page_table.remove(&page_id).map(|(_, frame_id)| frame_id);
                 } else {
-                    return None
+                    return None;
                 }
             }
         }
