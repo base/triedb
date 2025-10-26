@@ -1,4 +1,5 @@
 use crossbeam_channel::{Receiver, Sender};
+use io_uring::{opcode, types, IoUring};
 use std::{
     ffi::CString,
     fs::File,
@@ -38,12 +39,6 @@ unsafe impl Sync for Frame {}
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub(crate) struct FrameId(u32);
 
-enum WriteMessage {
-    Page((FrameId, PageId)),
-    Batch(Vec<(FrameId, PageId)>),
-    Shutdown,
-}
-
 #[derive(Debug)]
 pub struct PageManager {
     num_frames: u32,
@@ -58,11 +53,7 @@ pub struct PageManager {
     lru_replacer: CacheEvict, /* the replacer to find unpinned/candidate pages for eviction */
     loading_page: DashSet<PageId>, /* set of pages that are being loaded from disk */
 
-    // write worker
-    num_workers: usize,
-    worker_handles: Vec<JoinHandle<()>>,
-    tx_job: Sender<WriteMessage>,
-    rx_result: Receiver<Result<(), io::Error>>,
+    io_uring: RwLock<IoUring>,
 }
 
 impl PageManager {
@@ -112,8 +103,10 @@ impl PageManager {
         }
         let lru_replacer = CacheEvict::new(num_frames as usize);
 
-        let (tx_job, rx_job) = crossbeam_channel::unbounded();
-        let (tx_result, rx_result) = crossbeam_channel::unbounded();
+        // Initialize io)uring with queue depth base on num_frames
+        let queue_depth = num_frames.max(2048) as u32;
+        let io_uring = IoUring::new(queue_depth)
+            .map_err(|e| PageError::IO(io::Error::new(io::ErrorKind::Other, e)))?;
 
         let mut page_manager = PageManager {
             num_frames,
@@ -126,10 +119,7 @@ impl PageManager {
             lru_replacer,
             loading_page: DashSet::with_capacity(num_frames as usize),
 
-            num_workers: opts.num_workers,
-            worker_handles: Vec::with_capacity(opts.num_workers),
-            tx_job,
-            rx_result,
+            io_uring: RwLock::new(io_uring),
         };
         page_manager.start_write_workers(rx_job, tx_result)?;
 
@@ -355,7 +345,7 @@ impl PageManager {
     ///
     /// Could explore the parallel write strategy to improve performance.
     pub fn sync(&self) -> io::Result<()> {
-        let file = &mut self.file.write();
+        let file = &mut self.file.read();
 
         // Get all value at update_frames and new_frames
         let mut update_pages = self.lru_replacer.update_frames.lock();
@@ -364,30 +354,66 @@ impl PageManager {
         // New pages should be sorted by page_id ascending and no duplicate
         let mut new_pages = self.lru_replacer.new_frames.lock();
 
-        let mut write_num = 0;
-
-        // Write new pages first, since this group could be large and take time to write
-        if !new_pages.is_empty() {
-            write_num += 1;
-            let write_message = WriteMessage::Batch(new_pages.clone());
-            self.tx_job.send(write_message).unwrap();
+        let total_writes = new_pages.len() + update_pages.len();
+        if total_writes == 0 {
+            return Ok(());
         }
+        // Combine all writes
+        let all_writes = new_pages.iter().chain(update_pages.iter());
 
-        // Follow by the individual update pages
-        if !update_pages.is_empty() {
-            write_num += update_pages.len();
-            for (frame_id, page_id) in update_pages.iter() {
-                let page = WriteMessage::Page((*frame_id, *page_id));
-                self.tx_job.send(page).unwrap();
+        // Submit writes to io_uring
+        let mut ring = self.io_uring.write();
+
+        // Build submission queue
+        for (i, (frame_id, page_id)) in all_writes.enumerate() {
+            let frame = &self.frames[frame_id.0 as usize];
+            let offset = page_id.as_offset();
+
+            unsafe {
+                let page_data = std::slice::from_raw_parts(frame.ptr as *const u8, Page::SIZE);
+                // Create write operation
+                let write_op =
+                    opcode::Write::new(types::Fd(fd), page_data.as_ptr(), Page::SIZE as u32)
+                        .offset(offset as u64)
+                        .build()
+                        .user_data(i as u64);
+                // Submit to ring
+                loop {
+                    let mut sq = ring.submission();
+                    match unsafe { sq.push(&write_op) } {
+                        Ok(_) => break,
+                        Err(_) => {
+                            // Submission queue is full, submit and wait
+                            drop(sq);
+                            ring.submit_and_wait(1)?;
+                        }
+                    }
+                }
             }
         }
-
-        // Waiting for all write workers to finish
-        for _ in 0..write_num {
-            _ = self.rx_result.recv().unwrap();
+        // Submit all pending operations
+        ring.submit()?;
+        // Wait for all completions
+        let mut completed = 0;
+        while completed < total_writes {
+            let cq = ring.completion();
+            for cqe in cq {
+                let result = cqe.result();
+                if result < 0 {
+                    return Err(io::Error::from_raw_os_error(-result));
+                }
+                completed += 1;
+            }
+            if completed < total_writes {
+                // Wait for more completions
+                ring.submit_and_wait(1)?;
+            }
         }
+        // Drop the write lock on io_uring before calling file operations
+        drop(ring);
+        drop(file);
 
-        file.flush()?;
+        self.file.write().flush()?;
         new_pages
             .iter()
             .chain(update_pages.iter())
@@ -484,19 +510,6 @@ impl Drop for PageManager {
         // Sync the remaining work
         if let Err(e) = self.sync() {
             eprintln!("Warning: Sync failed during drop: {}", e);
-        }
-        // Then send shutdown messages to workers
-        for _ in 0..self.num_workers {
-            if let Err(_) = self.tx_job.send(WriteMessage::Shutdown) {
-                // Ignore the error
-                break;
-            }
-        }
-        // Wait for all worker threads to finish
-        for handle in self.worker_handles.drain(..) {
-            if let Err(_) = handle.join() {
-                eprintln!("Warning: Worker thread panicked during shutdown");
-            }
         }
     }
 }
