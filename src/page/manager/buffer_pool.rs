@@ -1,4 +1,3 @@
-use crossbeam_channel::{Receiver, Sender};
 use io_uring::{opcode, types, IoUring};
 use std::{
     ffi::CString,
@@ -108,7 +107,7 @@ impl PageManager {
         let io_uring = IoUring::new(queue_depth)
             .map_err(|e| PageError::IO(io::Error::new(io::ErrorKind::Other, e)))?;
 
-        let mut page_manager = PageManager {
+        let page_manager = PageManager {
             num_frames,
             page_count,
             file: RwLock::new(file),
@@ -121,67 +120,10 @@ impl PageManager {
 
             io_uring: RwLock::new(io_uring),
         };
-        page_manager.start_write_workers(rx_job, tx_result)?;
 
         Ok(page_manager)
     }
 
-    fn start_write_workers(
-        &mut self,
-        rx_job: Receiver<WriteMessage>,
-        tx_result: Sender<Result<(), io::Error>>,
-    ) -> Result<(), PageError> {
-        let rx_job_arc = Arc::new(rx_job);
-        for _ in 0..self.num_workers {
-            let rx_job_arc = Arc::clone(&rx_job_arc);
-            let mut worker_file = self.file.write().try_clone().map_err(PageError::IO)?;
-            let frames = self.frames.clone();
-            let tx_result = tx_result.clone();
-            let handle = thread::spawn(move || loop {
-                match rx_job_arc.recv() {
-                    Ok(WriteMessage::Page((frame_id, page_id))) => {
-                        // write to file at specific offset
-                        let offset = page_id.as_offset() as u64;
-                        let frame = &frames[frame_id.0 as usize];
-                        unsafe {
-                            let page_data =
-                                std::slice::from_raw_parts(frame.ptr as *const u8, Page::SIZE);
-                            let result = worker_file.write_at(page_data, offset);
-                            tx_result.send(result.map(|_| ())).unwrap();
-                        }
-                    }
-                    Ok(WriteMessage::Batch(batch)) => {
-                        if batch.is_empty() {
-                            continue;
-                        }
-                        let mut batch_slices = Vec::with_capacity(batch.len());
-                        for (frame_id, _) in &batch {
-                            let frame = &frames[frame_id.0 as usize];
-                            unsafe {
-                                let page_data =
-                                    std::slice::from_raw_parts(frame.ptr as *const u8, Page::SIZE);
-                                batch_slices.push(IoSlice::new(page_data));
-                            }
-                        }
-                        let result = Self::write_batch(
-                            &mut batch_slices,
-                            &mut worker_file,
-                            batch[0].1.as_offset() as u64,
-                        );
-                        tx_result.send(result).unwrap();
-                    }
-                    Ok(WriteMessage::Shutdown) => {
-                        break; // Graceful shutdown
-                    }
-                    Err(_) => {
-                        break; // Channel closed
-                    }
-                }
-            });
-            self.worker_handles.push(handle);
-        }
-        Ok(())
-    }
 
     #[inline]
     fn write_batch(batch: &mut Vec<IoSlice>, file: &mut File, offset: u64) -> io::Result<()> {
