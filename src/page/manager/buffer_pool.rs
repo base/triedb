@@ -121,7 +121,7 @@ impl PageManager {
         let lru_replacer = CacheEvict::new(num_frames as usize);
 
         // Initialize io)uring with queue depth base on num_frames
-        let queue_depth = num_frames.max(2048) as u32;
+        let queue_depth = num_frames.min(2048) as u32;
         let io_uring = IoUring::new(queue_depth)
             .map_err(|e| PageError::IO(io::Error::new(io::ErrorKind::Other, e)))?;
 
