@@ -1,17 +1,12 @@
+use fxhash::{FxBuildHasher, FxHasher};
 use io_uring::{opcode, types, IoUring};
 use std::{
-    ffi::CString,
-    fs::File,
-    io::{self, IoSlice, Seek, SeekFrom, Write},
-    os::{
+    ffi::CString, fs::File, hash::BuildHasherDefault, io::{self, IoSlice, Seek, SeekFrom, Write}, os::{
         fd::{AsRawFd, FromRawFd},
         unix::fs::FileExt,
-    },
-    path::Path,
-    sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
-        Arc,
-    },
+    }, path::Path, sync::{
+        Arc, atomic::{AtomicU32, AtomicU64, Ordering}
+    }
 };
 
 use dashmap::{DashMap, DashSet};
@@ -47,11 +42,11 @@ pub struct PageManager {
     file_len: AtomicU64,
     frames: Arc<Vec<Frame>>, /* list of frames that hold pages' data, indexed by frame id with
                               * fix num_frames size */
-    page_table: DashMap<PageId, FrameId>, /* mapping between page id and buffer pool frames,
+    page_table: DashMap<PageId, FrameId, BuildHasherDefault<FxHasher>>, /* mapping between page id and buffer pool frames,
                                            * indexed by page id with fix num_frames size */
     original_free_frame_idx: AtomicU32,
     lru_replacer: CacheEvict, /* the replacer to find unpinned/candidate pages for eviction */
-    loading_page: DashSet<PageId>, /* set of pages that are being loaded from disk */
+    loading_page: DashSet<PageId, BuildHasherDefault<FxHasher>>, /* set of pages that are being loaded from disk */
 
     io_uring: RwLock<IoUring>,
 }
@@ -111,7 +106,7 @@ impl PageManager {
         let num_frames = opts.num_frames;
         let page_count = AtomicU32::new(opts.page_count);
         let file_len = AtomicU64::new(file.metadata().map_err(PageError::IO)?.len());
-        let page_table = DashMap::with_capacity(num_frames as usize);
+        let page_table = DashMap::with_capacity_and_hasher(num_frames as usize, FxBuildHasher::default());
         let mut frames = Vec::with_capacity(num_frames as usize);
         for _ in 0..num_frames {
             let boxed_array = Box::new([0; Page::SIZE]);
@@ -119,6 +114,7 @@ impl PageManager {
             frames.push(Frame { ptr });
         }
         let lru_replacer = CacheEvict::new(num_frames as usize);
+        let loading_page = DashSet::with_capacity_and_hasher(num_frames as usize, FxBuildHasher::default());
 
         // Initialize io)uring with queue depth base on num_frames
         let queue_depth = num_frames.min(2048) as u32;
@@ -134,7 +130,7 @@ impl PageManager {
             page_table,
             original_free_frame_idx: AtomicU32::new(0),
             lru_replacer,
-            loading_page: DashSet::with_capacity(num_frames as usize),
+            loading_page,
 
             io_uring: RwLock::new(io_uring),
         };
