@@ -1,13 +1,16 @@
 use fxhash::{FxBuildHasher, FxHasher};
 use io_uring::{opcode, types, IoUring};
 use std::{
-    ffi::CString, fs::File, hash::BuildHasherDefault, io::{self, IoSlice, Seek, SeekFrom, Write}, os::{
+    ffi::CString, fs::File, hash::BuildHasherDefault, io::{self, Write}, os::{
         fd::{AsRawFd, FromRawFd},
         unix::fs::FileExt,
     }, path::Path, sync::{
         Arc, atomic::{AtomicU32, AtomicU64, Ordering}
     }
 };
+
+#[cfg(test)]
+use std::io::SeekFrom;
 
 use dashmap::{DashMap, DashSet};
 use parking_lot::RwLock;
@@ -261,7 +264,8 @@ impl PageManager {
 
     /// Syncs the buffer pool to the file.
     ///
-    /// Could explore the parallel write strategy to improve performance.
+    /// New pages at the end of the file are batch written using vectored I/O Writev, since they are guaranteed to be contiguous.
+    /// Update pages are usually random pages scattered throughout the file, and written individually with Write.
     pub fn sync(&self) -> io::Result<()> {
         let file = self.file.read();
         let fd = file.as_raw_fd();
@@ -273,18 +277,62 @@ impl PageManager {
         // New pages should be sorted by page_id ascending and no duplicate
         let mut new_pages = self.lru_replacer.new_frames.lock();
 
-        let total_writes = new_pages.len() + update_pages.len();
-        if total_writes == 0 {
+        if new_pages.is_empty() && update_pages.is_empty() {
             return Ok(());
         }
-        // Combine all writes
-        let all_writes = new_pages.iter().chain(update_pages.iter());
 
         // Submit writes to io_uring
         let mut ring = self.io_uring.write();
+        let mut op_count = 0;
 
-        // Build submission queue
-        for (i, (frame_id, page_id)) in all_writes.enumerate() {
+        // Write contiguous new pages as a batch using writev.
+        // Note: iovecs must stay alive until operations complete, so we define it outside the scope
+        let _iovecs = if !new_pages.is_empty() {
+            // Collect iovec for new pages
+            let iovecs: Vec<libc::iovec> = new_pages
+                .iter()
+                .map(|(frame_id, _)| {
+                    let frame = &self.frames[frame_id.0 as usize];
+                    libc::iovec {
+                        iov_base: frame.ptr as *mut libc::c_void,
+                        iov_len: Page::SIZE,
+                    }
+                })
+                .collect();
+
+            // Get the offset of the first new page
+            let first_offset = new_pages[0].1.as_offset() as u64;
+
+            unsafe {
+                let writev_op = opcode::Writev::new(types::Fd(fd), iovecs.as_ptr(), iovecs.len() as u32)
+                    .offset(first_offset)
+                    .build()
+                    .user_data(op_count);
+
+                // Submit to ring
+                loop {
+                    let mut sq = ring.submission();
+                    match sq.push(&writev_op) {
+                        Ok(_) => {
+                            op_count += 1;
+                            break;
+                        }
+                        Err(_) => {
+                            // Submission queue is full, submit and wait
+                            drop(sq);
+                            ring.submit_and_wait(1)?;
+                        }
+                    }
+                }
+            }
+            
+            Some(iovecs)
+        } else {
+            None
+        };
+
+        // Write update_pages individually (they may not be contiguous)
+        for (frame_id, page_id) in update_pages.iter() {
             let frame = &self.frames[frame_id.0 as usize];
             let offset = page_id.as_offset();
 
@@ -295,12 +343,15 @@ impl PageManager {
                     opcode::Write::new(types::Fd(fd), page_data.as_ptr(), Page::SIZE as u32)
                         .offset(offset as u64)
                         .build()
-                        .user_data(i as u64);
+                        .user_data(op_count);
                 // Submit to ring
                 loop {
                     let mut sq = ring.submission();
                     match sq.push(&write_op) {
-                        Ok(_) => break,
+                        Ok(_) => {
+                            op_count += 1;
+                            break;
+                        }
                         Err(_) => {
                             // Submission queue is full, submit and wait
                             drop(sq);
@@ -310,11 +361,13 @@ impl PageManager {
                 }
             }
         }
+
         // Submit all pending operations
         ring.submit()?;
+
         // Wait for all completions
         let mut completed = 0;
-        while completed < total_writes {
+        while completed < op_count {
             let cq = ring.completion();
             for cqe in cq {
                 let result = cqe.result();
@@ -323,11 +376,12 @@ impl PageManager {
                 }
                 completed += 1;
             }
-            if completed < total_writes {
+            if completed < op_count {
                 // Wait for more completions
                 ring.submit_and_wait(1)?;
             }
         }
+
         // Drop the write lock on io_uring before calling file operations
         drop(ring);
         drop(file);
