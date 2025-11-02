@@ -341,27 +341,25 @@ impl PageManager {
             let frame = &self.frames[frame_id.0 as usize];
             let offset = page_id.as_offset();
 
-            unsafe {
-                let page_data = std::slice::from_raw_parts(frame.ptr as *const u8, Page::SIZE);
-                // Create write operation
-                let write_op =
-                    opcode::Write::new(types::Fd(fd), page_data.as_ptr(), Page::SIZE as u32)
-                        .offset(offset as u64)
-                        .build()
-                        .user_data(op_count);
-                // Submit to ring
-                loop {
-                    let mut sq = ring.submission();
-                    match sq.push(&write_op) {
-                        Ok(_) => {
-                            op_count += 1;
-                            break;
-                        }
-                        Err(_) => {
-                            // Submission queue is full, submit and wait
-                            drop(sq);
-                            ring.submit_and_wait(1)?;
-                        }
+            let page_data =
+                unsafe { std::slice::from_raw_parts(frame.ptr as *const u8, Page::SIZE) };
+            // Create write operation
+            let write_op = opcode::Write::new(types::Fd(fd), page_data.as_ptr(), Page::SIZE as u32)
+                .offset(offset as u64)
+                .build()
+                .user_data(op_count);
+            // Submit to ring
+            loop {
+                let mut sq = ring.submission();
+                match unsafe { sq.push(&write_op) } {
+                    Ok(_) => {
+                        op_count += 1;
+                        break;
+                    }
+                    Err(_) => {
+                        // Submission queue is full, submit and wait
+                        drop(sq);
+                        ring.submit_and_wait(1)?;
                     }
                 }
             }
@@ -394,9 +392,7 @@ impl PageManager {
         // println!("sync, new_pages: {:?}", new_pages);
         // println!("sync, update_pages: {:?}", update_pages);
         self.file.write().flush()?;
-        new_pages
-            .iter()
-            .for_each(|(_, page_id)| self.lru_replacer.unpin(*page_id).unwrap());
+        new_pages.iter().for_each(|(_, page_id)| self.lru_replacer.unpin(*page_id).unwrap());
         new_pages.clear();
 
         // TODO: is there any race condition here?
