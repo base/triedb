@@ -1,12 +1,19 @@
 use fxhash::{FxBuildHasher, FxHasher};
 use io_uring::{opcode, types, IoUring};
 use std::{
-    ffi::CString, fs::File, hash::BuildHasherDefault, io::{self, Write}, os::{
+    ffi::CString,
+    fs::File,
+    hash::BuildHasherDefault,
+    io::{self, Write},
+    os::{
         fd::{AsRawFd, FromRawFd},
         unix::fs::FileExt,
-    }, path::Path, sync::{
-        Arc, atomic::{AtomicU32, AtomicU64, Ordering}
-    }
+    },
+    path::Path,
+    sync::{
+        atomic::{AtomicU32, AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 #[cfg(test)]
@@ -46,7 +53,7 @@ pub struct PageManager {
     frames: Arc<Vec<Frame>>, /* list of frames that hold pages' data, indexed by frame id with
                               * fix num_frames size */
     page_table: DashMap<PageId, FrameId, BuildHasherDefault<FxHasher>>, /* mapping between page id and buffer pool frames,
-                                           * indexed by page id with fix num_frames size */
+                                                                         * indexed by page id with fix num_frames size */
     original_free_frame_idx: AtomicU32,
     lru_replacer: CacheEvict, /* the replacer to find unpinned/candidate pages for eviction */
     loading_page: DashSet<PageId, BuildHasherDefault<FxHasher>>, /* set of pages that are being loaded from disk */
@@ -109,7 +116,8 @@ impl PageManager {
         let num_frames = opts.num_frames;
         let page_count = AtomicU32::new(opts.page_count);
         let file_len = AtomicU64::new(file.metadata().map_err(PageError::IO)?.len());
-        let page_table = DashMap::with_capacity_and_hasher(num_frames as usize, FxBuildHasher::default());
+        let page_table =
+            DashMap::with_capacity_and_hasher(num_frames as usize, FxBuildHasher::default());
         let mut frames = Vec::with_capacity(num_frames as usize);
         for _ in 0..num_frames {
             let boxed_array = Box::new([0; Page::SIZE]);
@@ -117,7 +125,8 @@ impl PageManager {
             frames.push(Frame { ptr });
         }
         let lru_replacer = CacheEvict::new(num_frames as usize);
-        let loading_page = DashSet::with_capacity_and_hasher(num_frames as usize, FxBuildHasher::default());
+        let loading_page =
+            DashSet::with_capacity_and_hasher(num_frames as usize, FxBuildHasher::default());
 
         // Initialize io)uring with queue depth base on num_frames
         let queue_depth = num_frames.min(2048) as u32;
@@ -293,10 +302,7 @@ impl PageManager {
                 .iter()
                 .map(|(frame_id, _)| {
                     let frame = &self.frames[frame_id.0 as usize];
-                    libc::iovec {
-                        iov_base: frame.ptr as *mut libc::c_void,
-                        iov_len: Page::SIZE,
-                    }
+                    libc::iovec { iov_base: frame.ptr as *mut libc::c_void, iov_len: Page::SIZE }
                 })
                 .collect();
 
@@ -304,10 +310,11 @@ impl PageManager {
             let first_offset = new_pages[0].1.as_offset() as u64;
 
             unsafe {
-                let writev_op = opcode::Writev::new(types::Fd(fd), iovecs.as_ptr(), iovecs.len() as u32)
-                    .offset(first_offset)
-                    .build()
-                    .user_data(op_count);
+                let writev_op =
+                    opcode::Writev::new(types::Fd(fd), iovecs.as_ptr(), iovecs.len() as u32)
+                        .offset(first_offset)
+                        .build()
+                        .user_data(op_count);
 
                 // Submit to ring
                 loop {
@@ -325,7 +332,7 @@ impl PageManager {
                     }
                 }
             }
-            
+
             Some(iovecs)
         } else {
             None
