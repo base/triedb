@@ -3,7 +3,6 @@ use io_uring::{opcode, types, IoUring};
 use std::{
     ffi::CString,
     fs::File,
-    hash::BuildHasherDefault,
     io::{self, Write},
     os::{
         fd::{AsRawFd, FromRawFd},
@@ -45,6 +44,9 @@ unsafe impl Sync for Frame {}
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub(crate) struct FrameId(u32);
 
+pub(crate) type FxMap<K, V> = DashMap<K, V, FxBuildHasher>;
+pub(crate) type FxSet<K> = DashSet<K, FxBuildHasher>;
+
 pub struct PageManager {
     num_frames: u32,
     page_count: AtomicU32,
@@ -52,11 +54,11 @@ pub struct PageManager {
     file_len: AtomicU64,
     frames: Arc<Vec<Frame>>, /* list of frames that hold pages' data, indexed by frame id with
                               * fix num_frames size */
-    page_table: DashMap<PageId, FrameId, BuildHasherDefault<FxHasher>>, /* mapping between page id and buffer pool frames,
-                                                                         * indexed by page id with fix num_frames size */
+    page_table: FxMap<PageId, FrameId>, /* mapping between page id and buffer pool frames,
+                                         * indexed by page id with fix num_frames size */
     original_free_frame_idx: AtomicU32,
     lru_replacer: CacheEvict, /* the replacer to find unpinned/candidate pages for eviction */
-    loading_page: DashSet<PageId, BuildHasherDefault<FxHasher>>, /* set of pages that are being loaded from disk */
+    loading_page: FxSet<PageId>, /* set of pages that are being loaded from disk */
 
     io_uring: RwLock<IoUring>,
 }
@@ -279,14 +281,8 @@ impl PageManager {
         let file = self.file.read();
         let fd = file.as_raw_fd();
 
-        // Get all value at update_frames and new_frames
-        let mut update_pages = self.lru_replacer.update_frames.lock();
-        update_pages.sort_by_key(|(_, page_id)| page_id.as_offset());
-        update_pages.dedup_by_key(|(_, page_id)| *page_id);
-        // New pages should be sorted by page_id ascending and no duplicate
         let mut new_pages = self.lru_replacer.new_frames.lock();
-
-        if new_pages.is_empty() && update_pages.is_empty() {
+        if new_pages.is_empty() && self.lru_replacer.update_frames.is_empty() {
             return Ok(());
         }
 
@@ -339,7 +335,9 @@ impl PageManager {
         };
 
         // Write update_pages individually (they may not be contiguous)
-        for (frame_id, page_id) in update_pages.iter() {
+        for entry in self.lru_replacer.update_frames.iter() {
+            let frame_id = *entry.value();
+            let page_id = *entry.key();
             let frame = &self.frames[frame_id.0 as usize];
             let offset = page_id.as_offset();
 
@@ -393,13 +391,21 @@ impl PageManager {
         drop(ring);
         drop(file);
 
+        // println!("sync, new_pages: {:?}", new_pages);
+        // println!("sync, update_pages: {:?}", update_pages);
         self.file.write().flush()?;
         new_pages
             .iter()
-            .chain(update_pages.iter())
             .for_each(|(_, page_id)| self.lru_replacer.unpin(*page_id).unwrap());
         new_pages.clear();
-        update_pages.clear();
+
+        // TODO: is there any race condition here?
+        self.lru_replacer
+            .update_frames
+            .iter()
+            .for_each(|entry| self.lru_replacer.unpin(*entry.key()).unwrap());
+        self.lru_replacer.update_frames.clear();
+
         Ok(())
     }
 
@@ -421,7 +427,15 @@ impl PageManager {
 
     #[inline]
     pub fn drop_page(&self, page_id: PageId) {
-        // unpin() must be successful, or an indication of a bug in the code
+        // println!("drop_page: {:?}", page_id);
+        // // if the drop_page is in the dirty page list, save it
+        // let updated_page = self.lru_replacer.new_frames.lock();
+        // if (page_id.as_u32() >= updated_page[0].1.as_u32())
+        //     || (page_id.as_u32() <= updated_page[updated_page.len() - 1].1.as_u32())
+        // {
+        //     // todo: could check if this already inserted
+        //     self.lru_replacer.drop_pages.insert(page_id);
+        // }
         self.lru_replacer.unpin(page_id).unwrap();
     }
 

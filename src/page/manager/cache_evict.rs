@@ -1,15 +1,20 @@
 use std::fmt;
 
+use dashmap::DashMap;
 use evict::{EvictResult, EvictionPolicy, LruReplacer};
+use fxhash::FxBuildHasher;
 use parking_lot::Mutex;
 
-use crate::page::{manager::buffer_pool::FrameId, PageId};
+use crate::page::{
+    manager::buffer_pool::{FrameId, FxMap},
+    PageId,
+};
 
 // TODO: Temporarily use LruReplacer as the eviction policy, replace with a better eviction policy
 pub(crate) struct CacheEvict {
     lru_replacer: LruReplacer<PageId>,
     read_frames: Mutex<Vec<PageId>>,
-    pub(crate) update_frames: Mutex<Vec<(FrameId, PageId)>>,
+    pub(crate) update_frames: FxMap<PageId, FrameId>,
     pub(crate) new_frames: Mutex<Vec<(FrameId, PageId)>>,
 }
 
@@ -24,7 +29,7 @@ impl CacheEvict {
         Self {
             lru_replacer: LruReplacer::new(capacity),
             read_frames: Mutex::new(Vec::with_capacity(capacity)),
-            update_frames: Mutex::new(Vec::with_capacity(capacity)),
+            update_frames: DashMap::with_capacity_and_hasher(capacity, FxBuildHasher::default()),
             new_frames: Mutex::new(Vec::with_capacity(capacity)),
         }
     }
@@ -49,10 +54,10 @@ impl CacheEvict {
     ) -> EvictResult<(), PageId> {
         if let Some((_, first_page_id)) = self.new_frames.lock().first() {
             if page_id.as_u32() < first_page_id.as_u32() {
-                self.update_frames.lock().push((frame_id, page_id));
+                self.update_frames.insert(page_id, frame_id);
             }
         } else {
-            self.update_frames.lock().push((frame_id, page_id));
+            self.update_frames.insert(page_id, frame_id);
         }
 
         self.lru_replacer.pin(page_id)
