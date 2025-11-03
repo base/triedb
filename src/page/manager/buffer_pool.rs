@@ -368,7 +368,17 @@ impl PageManager {
         // Submit all pending operations
         ring.submit()?;
 
-        // Wait for all completions
+        // Do cleanup work
+        new_pages.iter().for_each(|(_, page_id)| self.lru_replacer.unpin(*page_id).unwrap());
+        new_pages.clear();
+        // TODO: is there any race condition here?
+        self.lru_replacer
+            .update_frames
+            .iter()
+            .for_each(|entry| self.lru_replacer.unpin(*entry.key()).unwrap());
+        self.lru_replacer.update_frames.clear();
+
+        // Wait for all jobs to complete
         let mut completed = 0;
         while completed < op_count {
             let cq = ring.completion();
@@ -380,7 +390,6 @@ impl PageManager {
                 completed += 1;
             }
             if completed < op_count {
-                // Wait for more completions
                 ring.submit_and_wait(1)?;
             }
         }
@@ -392,15 +401,6 @@ impl PageManager {
         // println!("sync, new_pages: {:?}", new_pages);
         // println!("sync, update_pages: {:?}", update_pages);
         self.file.write().flush()?;
-        new_pages.iter().for_each(|(_, page_id)| self.lru_replacer.unpin(*page_id).unwrap());
-        new_pages.clear();
-
-        // TODO: is there any race condition here?
-        self.lru_replacer
-            .update_frames
-            .iter()
-            .for_each(|entry| self.lru_replacer.unpin(*entry.key()).unwrap());
-        self.lru_replacer.update_frames.clear();
 
         Ok(())
     }
