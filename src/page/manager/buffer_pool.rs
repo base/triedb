@@ -1,4 +1,4 @@
-use fxhash::{FxBuildHasher, FxHasher};
+use fxhash::FxBuildHasher;
 use io_uring::{opcode, types, IoUring};
 use std::{
     ffi::CString,
@@ -369,6 +369,16 @@ impl PageManager {
         ring.submit()?;
 
         // Do cleanup work
+        // println!(
+        //     "drop len: {:?}, update len: {:?}, new len: {:?}",
+        //     self.lru_replacer.drop_pages.len(),
+        //     self.lru_replacer.update_frames.len(),
+        //     new_pages.len()
+        // );
+        // println!("drop_pages: {:?}", self.lru_replacer.drop_pages);
+        // println!("update_pages: {:?}", self.lru_replacer.update_frames);
+        // println!("new_pages: {:?}", new_pages);
+
         new_pages.iter().for_each(|(_, page_id)| self.lru_replacer.unpin(*page_id).unwrap());
         new_pages.clear();
         // TODO: is there any race condition here?
@@ -377,6 +387,7 @@ impl PageManager {
             .iter()
             .for_each(|entry| self.lru_replacer.unpin(*entry.key()).unwrap());
         self.lru_replacer.update_frames.clear();
+        self.lru_replacer.drop_pages.clear();
 
         // Wait for all jobs to complete
         let mut completed = 0;
@@ -423,15 +434,16 @@ impl PageManager {
 
     #[inline]
     pub fn drop_page(&self, page_id: PageId) {
-        // println!("drop_page: {:?}", page_id);
-        // // if the drop_page is in the dirty page list, save it
-        // let updated_page = self.lru_replacer.new_frames.lock();
-        // if (page_id.as_u32() >= updated_page[0].1.as_u32())
-        //     || (page_id.as_u32() <= updated_page[updated_page.len() - 1].1.as_u32())
-        // {
-        //     // todo: could check if this already inserted
-        //     self.lru_replacer.drop_pages.insert(page_id);
-        // }
+        self.lru_replacer.unpin(page_id).unwrap();
+    }
+
+    #[inline]
+    pub fn drop_page_mut(&self, page_id: PageId) {
+        if self.lru_replacer.update_frames.get(&page_id).is_some() {
+            self.lru_replacer.drop_pages.insert(page_id);
+            // println!("drop_page from update_frames: {:?}", page_id);
+        } 
+
         self.lru_replacer.unpin(page_id).unwrap();
     }
 

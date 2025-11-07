@@ -1,21 +1,21 @@
 use std::fmt;
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use evict::{EvictResult, EvictionPolicy, LruReplacer};
 use fxhash::FxBuildHasher;
 use parking_lot::Mutex;
 
 use crate::page::{
-    manager::buffer_pool::{FrameId, FxMap},
-    PageId,
+    PageId, manager::buffer_pool::{FrameId, FxMap, FxSet}
 };
 
 // TODO: Temporarily use LruReplacer as the eviction policy, replace with a better eviction policy
 pub(crate) struct CacheEvict {
     lru_replacer: LruReplacer<PageId>,
-    read_frames: Mutex<Vec<PageId>>,
+    pub(crate) read_frames: FxSet<PageId>,
     pub(crate) update_frames: FxMap<PageId, FrameId>,
     pub(crate) new_frames: Mutex<Vec<(FrameId, PageId)>>,
+    pub(crate) drop_pages: FxSet<PageId>,
 }
 
 impl fmt::Debug for CacheEvict {
@@ -28,9 +28,10 @@ impl CacheEvict {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
             lru_replacer: LruReplacer::new(capacity),
-            read_frames: Mutex::new(Vec::with_capacity(capacity)),
+            read_frames: DashSet::with_capacity_and_hasher(capacity, FxBuildHasher::default()),
             update_frames: DashMap::with_capacity_and_hasher(capacity, FxBuildHasher::default()),
             new_frames: Mutex::new(Vec::with_capacity(capacity)),
+            drop_pages: DashSet::with_capacity_and_hasher(capacity, FxBuildHasher::default())
         }
     }
 
@@ -43,7 +44,7 @@ impl CacheEvict {
     }
 
     pub(crate) fn pin_read(&self, page_id: PageId) -> EvictResult<(), PageId> {
-        self.read_frames.lock().push(page_id);
+        self.read_frames.insert(page_id);
         self.lru_replacer.pin(page_id)
     }
 

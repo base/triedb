@@ -336,7 +336,8 @@ impl fmt::Debug for PageMut<'_> {
 
 impl Drop for PageMut<'_> {
     fn drop(&mut self) {
-        self.commit_internal()
+        self.commit_internal();
+        self.inner.page_manager.drop_page_mut(self.id());
     }
 }
 
