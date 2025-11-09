@@ -1,3 +1,4 @@
+use crossbeam_channel::{Receiver, Sender};
 use fxhash::FxBuildHasher;
 use io_uring::{opcode, types, IoUring};
 use std::{
@@ -13,10 +14,8 @@ use std::{
         atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
     },
+    thread,
 };
-
-#[cfg(test)]
-use std::io::SeekFrom;
 
 use dashmap::{DashMap, DashSet};
 use parking_lot::RwLock;
@@ -61,6 +60,13 @@ pub struct PageManager {
     loading_page: FxSet<PageId>, /* set of pages that are being loaded from disk */
 
     io_uring: RwLock<IoUring>,
+    tx_job: Sender<WriteMessage>,
+}
+
+enum WriteMessage {
+    Pages(Vec<(PageId, FrameId)>),
+    Sync,
+    Shutdown,
 }
 
 impl std::fmt::Debug for PageManager {
@@ -135,6 +141,7 @@ impl PageManager {
         let io_uring = IoUring::new(queue_depth)
             .map_err(|e| PageError::IO(io::Error::new(io::ErrorKind::Other, e)))?;
 
+        let (tx_job, rx_job) = crossbeam_channel::unbounded();
         let page_manager = PageManager {
             num_frames,
             page_count,
@@ -147,9 +154,111 @@ impl PageManager {
             loading_page,
 
             io_uring: RwLock::new(io_uring),
+            tx_job,
         };
 
+        page_manager.start_write_worker(rx_job)?;
+
         Ok(page_manager)
+    }
+
+    fn start_write_worker(&self, rx_job: Receiver<WriteMessage>) -> Result<(), PageError> {
+        let rx_job = Arc::new(rx_job);
+        thread::spawn(move || {
+            loop {
+                match rx_job.recv() {
+                    Ok(WriteMessage::Pages(pages)) => {
+                        Self::write_updated_pages(&pages);
+                        // let file = self.file.read();
+                        // let fd = file.as_raw_fd();
+                        // let mut op_count = 0;
+                        // let mut ring = self.io_uring.write();
+                        // for page_id in self.lru_replacer.drop_pages.iter() {
+                        //     let frame_id = self.page_table.get(&page_id);
+                        //     if let Some(frame_id) = frame_id {
+                        //         let x = frame_id.value();
+                        //         let frame = self.frames.get(x.0 as usize);
+                        //         if let Some(frame) = frame {
+                        //             let offset = page_id.as_offset();
+                        //             let page_data = unsafe {
+                        //                 std::slice::from_raw_parts(
+                        //                     frame.ptr as *const u8,
+                        //                     Page::SIZE,
+                        //                 )
+                        //             };
+                        //             // Create write operation
+                        //             let write_op = opcode::Write::new(
+                        //                 types::Fd(fd),
+                        //                 page_data.as_ptr(),
+                        //                 Page::SIZE as u32,
+                        //             )
+                        //             .offset(offset as u64)
+                        //             .build()
+                        //             .user_data(op_count);
+                        //             // Submit to ring
+                        //             loop {
+                        //                 let mut sq = ring.submission();
+                        //                 match unsafe { sq.push(&write_op) } {
+                        //                     Ok(_) => {
+                        //                         op_count += 1;
+                        //                         break;
+                        //                     }
+                        //                     Err(_) => {
+                        //                         // Submission queue is full, submit and wait
+                        //                         drop(sq);
+                        //                         // TODO: send back the error
+                        //                         ring.submit_and_wait(1).unwrap();
+                        //                     }
+                        //                 }
+                        //             }
+                        //         }
+                        //     }
+                        // }
+                        // // Submit all pending operations
+                        // // TODO: send back the error
+                        // ring.submit().unwrap();
+                        // // Wait for jobs to complete
+                        // let mut completed = 0;
+                        // while completed < op_count {
+                        //     let cq = ring.completion();
+                        //     for cqe in cq {
+                        //         let result = cqe.result();
+                        //         if result < 0 {
+                        //             // TODO: send back the error
+                        //             // return Err(io::Error::from_raw_os_error(-result));
+                        //             panic!("failed to get entry result");
+                        //         }
+                        //         completed += 1;
+                        //     }
+                        //     if completed < op_count {
+                        //         // TODO: send back the error
+                        //         ring.submit_and_wait(1).unwrap();
+                        //     }
+                        // }
+                    }
+                    Ok(WriteMessage::Sync) => {
+                        Self::write_new_pages();
+                    }
+                    Ok(WriteMessage::Shutdown) => {
+                        println!("Shutdown");
+                        // ignore for now
+                    }
+                    Err(_) => {
+                        // Channel closed
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(())
+    }
+
+    fn write_updated_pages(pages: &[(PageId, FrameId)]) {
+        println!("Write updated pages: {:?}", pages);
+    }
+
+    fn write_new_pages() {
+        println!("Write new pages");
     }
 
     #[cfg(test)]
@@ -440,9 +549,23 @@ impl PageManager {
     #[inline]
     pub fn drop_page_mut(&self, page_id: PageId) {
         if self.lru_replacer.update_frames.get(&page_id).is_some() {
-            self.lru_replacer.drop_pages.insert(page_id);
+            if self.lru_replacer.drop_pages.insert(page_id) {
+                if self.lru_replacer.drop_pages.len() > 10 {
+                    // iter thru all items in drop_pages and remove from the drop_pages
+                    let mut pages = Vec::with_capacity(10);
+                    self.lru_replacer.drop_pages.retain(|p| {
+                        if let Some(f) = self.page_table.get(p) {
+                            pages.push((*f.key(), *f.value()));
+                        }
+                        true
+                    });
+
+                    self.tx_job.send(WriteMessage::Pages(pages)).unwrap();
+
+                }
+            }
             // println!("drop_page from update_frames: {:?}", page_id);
-        } 
+        }
 
         self.lru_replacer.unpin(page_id).unwrap();
     }
@@ -519,6 +642,7 @@ impl Drop for PageManager {
 #[cfg(test)]
 mod tests {
     use crate::page_id;
+    use std::io::SeekFrom;
 
     use super::*;
     use std::{

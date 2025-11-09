@@ -23,6 +23,7 @@ evict = "0.3.1"
 dashmap = "6.1.0"
 libc = "0.2.174"
 io-uring = "0.7.10"
+crossbeam-channel = "0.5.15"
 
 [features]
 default = ["buffer_pool_backend"]
