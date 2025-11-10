@@ -56,7 +56,7 @@ pub struct PageManager {
     page_table: FxMap<PageId, FrameId>, /* mapping between page id and buffer pool frames,
                                          * indexed by page id with fix num_frames size */
     original_free_frame_idx: AtomicU32,
-    lru_replacer: CacheEvict, /* the replacer to find unpinned/candidate pages for eviction */
+    lru_replacer: Arc<CacheEvict>, /* the replacer to find unpinned/candidate pages for eviction */
     loading_page: FxSet<PageId>, /* set of pages that are being loaded from disk */
 
     io_uring: Arc<RwLock<IoUring>>,
@@ -134,7 +134,7 @@ impl PageManager {
             let ptr = Box::into_raw(boxed_array);
             frames.push(Frame { ptr });
         }
-        let lru_replacer = CacheEvict::new(num_frames as usize);
+        let lru_replacer = Arc::new(CacheEvict::new(num_frames as usize));
         let loading_page =
             DashSet::with_capacity_and_hasher(num_frames as usize, FxBuildHasher::default());
 
@@ -169,6 +169,7 @@ impl PageManager {
         let worker_file = self.file.write().try_clone().map_err(PageError::IO)?;
         let frames = self.frames.clone();
         let io_uring = self.io_uring.clone();
+        let lru_replacer = self.lru_replacer.clone();
         thread::spawn(move || {
             loop {
                 match rx_job.recv() {
@@ -183,6 +184,12 @@ impl PageManager {
                         if result.is_err() {
                             panic!("{:?}", result);
                         }
+                        // Note: it's possible that when a mut page get dropped, before it's wrote to the disk, the same page is used again as mut page.
+                        // If the page_id is removed from update_frames while its data is being updated, we will lost the data.
+                        // Thought in the current schema doesn't allow this, any further change needs to consider this.
+                        pages.iter().for_each(|(page_id, _)| {
+                            lru_replacer.update_frames.remove(page_id);
+                        });
                     }
                     Ok(WriteMessage::Sync) => {
                         Self::write_new_pages();
