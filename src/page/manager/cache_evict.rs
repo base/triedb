@@ -6,7 +6,8 @@ use fxhash::FxBuildHasher;
 use parking_lot::Mutex;
 
 use crate::page::{
-    PageId, manager::buffer_pool::{FrameId, FxMap, FxSet}
+    manager::buffer_pool::{FrameId, FxMap, FxSet},
+    PageId,
 };
 
 // TODO: Temporarily use LruReplacer as the eviction policy, replace with a better eviction policy
@@ -31,7 +32,7 @@ impl CacheEvict {
             read_frames: DashSet::with_capacity_and_hasher(capacity, FxBuildHasher::default()),
             update_frames: DashMap::with_capacity_and_hasher(capacity, FxBuildHasher::default()),
             new_frames: Mutex::new(Vec::with_capacity(capacity)),
-            drop_pages: DashSet::with_capacity_and_hasher(capacity, FxBuildHasher::default())
+            drop_pages: DashSet::with_capacity_and_hasher(capacity, FxBuildHasher::default()),
         }
     }
 

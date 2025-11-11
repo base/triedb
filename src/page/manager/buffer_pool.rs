@@ -57,7 +57,7 @@ pub struct PageManager {
                                          * indexed by page id with fix num_frames size */
     original_free_frame_idx: AtomicU32,
     lru_replacer: Arc<CacheEvict>, /* the replacer to find unpinned/candidate pages for eviction */
-    loading_page: FxSet<PageId>, /* set of pages that are being loaded from disk */
+    loading_page: FxSet<PageId>,   /* set of pages that are being loaded from disk */
 
     io_uring: Arc<RwLock<IoUring>>,
     tx_job: Sender<WriteMessage>,
@@ -65,8 +65,6 @@ pub struct PageManager {
 
 enum WriteMessage {
     Pages(Vec<(PageId, FrameId)>),
-    #[allow(dead_code)]
-    Sync,
     #[allow(dead_code)]
     Shutdown,
 }
@@ -165,7 +163,6 @@ impl PageManager {
     }
 
     fn start_write_worker(&self, rx_job: Receiver<WriteMessage>) -> Result<(), PageError> {
-        // let rx_job = Arc::new(rx_job);
         let worker_file = self.file.write().try_clone().map_err(PageError::IO)?;
         let frames = self.frames.clone();
         let io_uring = self.io_uring.clone();
@@ -184,15 +181,15 @@ impl PageManager {
                         if result.is_err() {
                             panic!("{:?}", result);
                         }
-                        // Note: it's possible that when a mut page get dropped, before it's wrote to the disk, the same page is used again as mut page.
-                        // If the page_id is removed from update_frames while its data is being updated, we will lost the data.
-                        // Thought in the current schema doesn't allow this, any further change needs to consider this.
+                        // Note: it's possible that when a mut page get dropped, before it's wrote
+                        // to the disk, the same page is used again as mut page.  If the page_id is
+                        // removed from update_frames while its data is being updated, we will lost
+                        // the data. Thought in the current schema doesn't allow this, any further
+                        // change needs to consider this.
+                        println!("Wrote to disk: {:?}", pages.len());
                         pages.iter().for_each(|(page_id, _)| {
                             lru_replacer.update_frames.remove(page_id);
                         });
-                    }
-                    Ok(WriteMessage::Sync) => {
-                        Self::write_new_pages();
                     }
                     Ok(WriteMessage::Shutdown) => {
                         println!("Shutdown");
@@ -208,7 +205,12 @@ impl PageManager {
         Ok(())
     }
 
-    fn write_updated_pages(ring: Arc<RwLock<IoUring>>, frames: Arc<Vec<Frame>>, pages: &[(PageId, FrameId)], file: File) -> io::Result<()> {
+    fn write_updated_pages(
+        ring: Arc<RwLock<IoUring>>,
+        frames: Arc<Vec<Frame>>,
+        pages: &[(PageId, FrameId)],
+        file: File,
+    ) -> io::Result<()> {
         println!("Write updated pages: {:?}", pages.len());
         let fd = file.as_raw_fd();
         let mut op_count = 0;
@@ -263,10 +265,6 @@ impl PageManager {
             }
         }
         Ok(())
-    }
-
-    fn write_new_pages() {
-        println!("Write new pages");
     }
 
     #[cfg(test)]
@@ -392,8 +390,9 @@ impl PageManager {
 
     /// Syncs the buffer pool to the file.
     ///
-    /// New pages at the end of the file are batch written using vectored I/O Writev, since they are guaranteed to be contiguous.
-    /// Update pages are usually random pages scattered throughout the file, and written individually with Write.
+    /// New pages at the end of the file are batch written using vectored I/O Writev, since they are
+    /// guaranteed to be contiguous. Update pages are usually random pages scattered throughout
+    /// the file, and written individually with Write.
     pub fn sync(&self) -> io::Result<()> {
         let file = self.file.read();
         let fd = file.as_raw_fd();
@@ -492,9 +491,10 @@ impl PageManager {
         //     self.lru_replacer.update_frames.len(),
         //     new_pages.len()
         // );
-        // println!("drop_pages: {:?}", self.lru_replacer.drop_pages);
-        // println!("update_pages: {:?}", self.lru_replacer.update_frames);
-        // println!("new_pages: {:?}", new_pages);
+        println!("syncing");
+        println!("drop_pages: {:?}", self.lru_replacer.drop_pages.len());
+        println!("update_pages: {:?}", self.lru_replacer.update_frames.len());
+        println!("new_pages: {:?}", new_pages.len());
 
         new_pages.iter().for_each(|(_, page_id)| self.lru_replacer.unpin(*page_id).unwrap());
         new_pages.clear();
@@ -557,8 +557,8 @@ impl PageManager {
     #[inline]
     pub fn drop_page_mut(&self, page_id: PageId) {
         if self.lru_replacer.update_frames.get(&page_id).is_some() {
-            if self.lru_replacer.drop_pages.insert(page_id)
-                && self.lru_replacer.drop_pages.len() >= 10
+            if self.lru_replacer.drop_pages.insert(page_id) &&
+                self.lru_replacer.drop_pages.len() >= 10
             {
                 // iter thru all items in drop_pages and remove from the drop_pages
                 let mut pages = Vec::with_capacity(10);
