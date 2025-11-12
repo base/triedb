@@ -18,7 +18,7 @@ use std::{
 };
 
 use dashmap::{DashMap, DashSet};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 use crate::{
     page::{
@@ -61,6 +61,7 @@ pub struct PageManager {
 
     io_uring: Arc<RwLock<IoUring>>,
     tx_job: Sender<WriteMessage>,
+    drop_pages: Mutex<Vec<PageId>>,
 }
 
 enum WriteMessage {
@@ -155,6 +156,7 @@ impl PageManager {
 
             io_uring: Arc::new(RwLock::new(io_uring)),
             tx_job,
+            drop_pages: Mutex::new(Vec::new()),
         };
 
         page_manager.start_write_worker(rx_job)?;
@@ -186,7 +188,6 @@ impl PageManager {
                         // removed from update_frames while its data is being updated, we will lost
                         // the data. Thought in the current schema doesn't allow this, any further
                         // change needs to consider this.
-                        println!("Wrote to disk: {:?}", pages.len());
                         pages.iter().for_each(|(page_id, _)| {
                             lru_replacer.update_frames.remove(page_id);
                         });
@@ -211,7 +212,7 @@ impl PageManager {
         pages: &[(PageId, FrameId)],
         file: File,
     ) -> io::Result<()> {
-        println!("Write updated pages: {:?}", pages.len());
+        // println!("Write updated pages: {:?}", pages.len());
         let fd = file.as_raw_fd();
         let mut op_count = 0;
         let mut ring_guard = ring.write();
@@ -485,16 +486,10 @@ impl PageManager {
         ring_guard.submit()?;
 
         // Do cleanup work
-        // println!(
-        //     "drop len: {:?}, update len: {:?}, new len: {:?}",
-        //     self.lru_replacer.drop_pages.len(),
-        //     self.lru_replacer.update_frames.len(),
-        //     new_pages.len()
-        // );
-        println!("syncing");
-        println!("drop_pages: {:?}", self.lru_replacer.drop_pages.len());
-        println!("update_pages: {:?}", self.lru_replacer.update_frames.len());
-        println!("new_pages: {:?}", new_pages.len());
+        // println!("sync");
+        // println!("\tdrop_pages: {:?}", self.lru_replacer.drop_pages.len());
+        // println!("\tupdate_pages: {:?}", self.lru_replacer.update_frames.len());
+        // println!("\tnew_pages: {:?}", new_pages.len());
 
         new_pages.iter().for_each(|(_, page_id)| self.lru_replacer.unpin(*page_id).unwrap());
         new_pages.clear();
@@ -504,7 +499,7 @@ impl PageManager {
             .iter()
             .for_each(|entry| self.lru_replacer.unpin(*entry.key()).unwrap());
         self.lru_replacer.update_frames.clear();
-        self.lru_replacer.drop_pages.clear();
+        self.drop_pages.lock().clear();
 
         // Wait for all jobs to complete
         let mut completed = 0;
@@ -557,23 +552,20 @@ impl PageManager {
     #[inline]
     pub fn drop_page_mut(&self, page_id: PageId) {
         if self.lru_replacer.update_frames.get(&page_id).is_some() {
-            if self.lru_replacer.drop_pages.insert(page_id) &&
-                self.lru_replacer.drop_pages.len() >= 10
-            {
+            let mut drop_pages = self.drop_pages.lock();
+            drop_pages.push(page_id);
+            if drop_pages.len() >= 10 {
                 // iter thru all items in drop_pages and remove from the drop_pages
                 let mut pages = Vec::with_capacity(10);
-                self.lru_replacer.drop_pages.retain(|p| {
+                drop_pages.iter().for_each(|p| {
                     if let Some(f) = self.page_table.get(p) {
                         pages.push((*f.key(), *f.value()));
                     }
-                    false
                 });
-
                 self.tx_job.send(WriteMessage::Pages(pages)).unwrap();
+                drop_pages.clear();
             }
         }
-
-        self.lru_replacer.unpin(page_id).unwrap();
     }
 
     fn next_page_id(&self) -> Option<(PageId, u32)> {

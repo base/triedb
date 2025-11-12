@@ -16,7 +16,6 @@ pub(crate) struct CacheEvict {
     pub(crate) read_frames: FxSet<PageId>,
     pub(crate) update_frames: FxMap<PageId, FrameId>,
     pub(crate) new_frames: Mutex<Vec<(FrameId, PageId)>>,
-    pub(crate) drop_pages: FxSet<PageId>,
 }
 
 impl fmt::Debug for CacheEvict {
@@ -32,7 +31,6 @@ impl CacheEvict {
             read_frames: DashSet::with_capacity_and_hasher(capacity, FxBuildHasher::default()),
             update_frames: DashMap::with_capacity_and_hasher(capacity, FxBuildHasher::default()),
             new_frames: Mutex::new(Vec::with_capacity(capacity)),
-            drop_pages: DashSet::with_capacity_and_hasher(capacity, FxBuildHasher::default()),
         }
     }
 
