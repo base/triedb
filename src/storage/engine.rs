@@ -20,6 +20,7 @@ use crate::{
 use alloy_primitives::StorageValue;
 use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
 use parking_lot::Mutex;
+use rayon::ThreadPool;
 use std::{
     fmt::Debug,
     io,
@@ -37,6 +38,8 @@ pub struct StorageEngine {
     pub(crate) page_manager: PageManager,
     pub(crate) meta_manager: Mutex<MetadataManager>,
     pub(crate) alive_snapshot: AtomicU64,
+    #[allow(dead_code)]
+    thread_pool: ThreadPool,
 }
 
 #[derive(Debug)]
@@ -47,12 +50,17 @@ enum PointerChange {
 }
 
 impl StorageEngine {
-    pub fn new(page_manager: PageManager, meta_manager: MetadataManager) -> Self {
+    pub fn new(
+        page_manager: PageManager,
+        meta_manager: MetadataManager,
+        thread_pool: ThreadPool,
+    ) -> Self {
         let alive_snapshot = meta_manager.active_slot().snapshot_id();
         Self {
             page_manager,
             meta_manager: Mutex::new(meta_manager),
             alive_snapshot: AtomicU64::new(alive_snapshot),
+            thread_pool,
         }
     }
 
@@ -2102,7 +2110,7 @@ mod tests {
                 )
                 .unwrap();
 
-            let test_cases = vec![
+            let test_cases = [
                 (
                     b256!("0x0000000000000000000000000000000000000000000000000000000000000000"),
                     b256!("0x0000000000000000000000000000000000000000000000000000000062617365"),

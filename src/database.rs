@@ -1,5 +1,6 @@
 use crate::{
     context::TransactionContext,
+    executor::threadpool,
     meta::{MetadataManager, OpenMetadataError},
     metrics::DatabaseMetrics,
     page::{PageError, PageId, PageManager},
@@ -8,9 +9,11 @@ use crate::{
 };
 use alloy_primitives::B256;
 use parking_lot::Mutex;
+use rayon::ThreadPoolBuildError;
 use std::{
     fs::File,
     io,
+    num::NonZero,
     ops::Deref,
     path::{Path, PathBuf},
 };
@@ -30,6 +33,7 @@ pub struct DatabaseOptions {
     wipe: bool,
     meta_path: Option<PathBuf>,
     max_pages: u32,
+    num_threads: Option<NonZero<usize>>,
 }
 
 #[derive(Debug)]
@@ -42,6 +46,7 @@ pub enum Error {
 pub enum OpenError {
     PageError(PageError),
     MetadataError(OpenMetadataError),
+    ThreadPoolError(ThreadPoolBuildError),
     IO(io::Error),
 }
 
@@ -83,6 +88,16 @@ impl DatabaseOptions {
     /// Sets the maximum number of pages that can be allocated.
     pub fn max_pages(&mut self, max_pages: u32) -> &mut Self {
         self.max_pages = max_pages;
+        self
+    }
+
+    /// Sets the maximum number of threads used to CPU-intensive computations (like hashing).
+    ///
+    /// By default, the number of threads is selected automatically based on the number of
+    /// available CPUs on the system. The algorithm for deciding the default number is not
+    /// specified and may change in the future.
+    pub fn num_threads(&mut self, num_threads: NonZero<usize>) -> &mut Self {
+        self.num_threads = Some(num_threads);
         self
     }
 
@@ -144,7 +159,12 @@ impl Database {
             .open(db_path)
             .map_err(OpenError::PageError)?;
 
-        Ok(Self::new(StorageEngine::new(page_manager, meta_manager)))
+        let thread_pool = threadpool::builder()
+            .num_threads(opts.num_threads.map(NonZero::get).unwrap_or(0))
+            .build()
+            .map_err(OpenError::ThreadPoolError)?;
+
+        Ok(Self::new(StorageEngine::new(page_manager, meta_manager, thread_pool)))
     }
 
     pub fn new(storage_engine: StorageEngine) -> Self {
@@ -321,6 +341,46 @@ mod tests {
         assert!(db_path.exists());
         assert!(custom_meta_path.exists());
         assert!(!auto_meta_path.exists());
+    }
+
+    #[test]
+    fn test_wipe() {
+        let tmp_dir = TempDir::new("test_db").expect("temporary dir creation failed");
+        let db_path = tmp_dir.path().join("db-file");
+
+        let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
+
+        // First create a new database and put some records in it
+        {
+            let db = Database::create_new(&db_path).expect("creating a new database failed");
+            let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
+            let mut tx = db.begin_rw().expect("creating read/write transaction failed");
+            tx.set_account(AddressPath::for_address(address), Some(account1.clone())).unwrap();
+            tx.commit().expect("commit failed");
+        }
+
+        // Verify that the database exists, and contains some data
+        {
+            let db = Database::open(&db_path).expect("opening an existing database failed");
+            let mut tx = db.begin_ro().expect("creating read transaction failed");
+            assert!(tx
+                .get_account(&AddressPath::for_address(address))
+                .expect("retrieving account failed")
+                .is_some());
+        }
+
+        // Now open with `wipe(true)`, and verify that the contents are gone
+        {
+            let db = Database::options()
+                .wipe(true)
+                .open(&db_path)
+                .expect("opening an existing database failed");
+            let mut tx = db.begin_ro().expect("creating read transaction failed");
+            assert!(tx
+                .get_account(&AddressPath::for_address(address))
+                .expect("retrieving account failed")
+                .is_none());
+        }
     }
 
     #[test]

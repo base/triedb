@@ -1,20 +1,23 @@
 #![cfg(test)]
 
+use crate::{
+    account::Account, context::TransactionContext, executor::threadpool, meta::MetadataManager,
+    storage::engine::StorageEngine, PageManager,
+};
 use alloy_primitives::U256;
 use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
 use rand::{rngs::StdRng, RngCore};
-
-use crate::{
-    account::Account, context::TransactionContext, meta::MetadataManager,
-    storage::engine::StorageEngine, PageManager,
-};
 
 pub(crate) fn create_test_engine(max_pages: u32) -> (StorageEngine, TransactionContext) {
     let meta_manager =
         MetadataManager::from_file(tempfile::tempfile().expect("failed to create temporary file"))
             .expect("failed to open metadata file");
-    let page_manager = PageManager::options().max_pages(max_pages).open_temp_file().unwrap();
-    let storage_engine = StorageEngine::new(page_manager, meta_manager);
+    let page_manager = PageManager::options()
+        .max_pages(max_pages)
+        .open_temp_file()
+        .expect("failed to create page manager");
+    let thread_pool = threadpool::builder().build().expect("failed to create thread pool");
+    let storage_engine = StorageEngine::new(page_manager, meta_manager, thread_pool);
     let context = storage_engine.write_context();
     (storage_engine, context)
 }
@@ -34,24 +37,26 @@ pub(crate) fn assert_metrics(
     pages_reallocated: u32,
     pages_split: u32,
 ) {
-    assert_eq!(
-        context.transaction_metrics.get_pages_read(),
-        pages_read,
-        "unexpected number of pages read"
-    );
-    assert_eq!(
-        context.transaction_metrics.get_pages_allocated(),
-        pages_allocated,
-        "unexpected number of pages allocated"
-    );
-    assert_eq!(
-        context.transaction_metrics.get_pages_reallocated(),
-        pages_reallocated,
-        "unexpected number of pages reallocated"
-    );
-    assert_eq!(
-        context.transaction_metrics.get_pages_split(),
-        pages_split,
-        "unexpected number of pages split"
+    /// Struct used to make error messages easier to read
+    #[derive(PartialEq, Eq, Debug)]
+    struct Metrics {
+        pages_read: u32,
+        pages_allocated: u32,
+        pages_reallocated: u32,
+        pages_split: u32,
+    }
+
+    let expected = Metrics { pages_read, pages_allocated, pages_reallocated, pages_split };
+
+    let actual = Metrics {
+        pages_read: context.transaction_metrics.get_pages_read(),
+        pages_allocated: context.transaction_metrics.get_pages_allocated(),
+        pages_reallocated: context.transaction_metrics.get_pages_reallocated(),
+        pages_split: context.transaction_metrics.get_pages_split(),
+    };
+
+    assert!(
+        expected == actual,
+        "transaction metrics don't match:\n expected: {expected:?}\n   actual: {actual:?}"
     );
 }
