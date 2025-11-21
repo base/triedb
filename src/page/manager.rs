@@ -4,6 +4,8 @@ use crate::page::PageId;
 pub(super) mod buffer_pool;
 #[cfg(feature = "buffer_pool_backend")]
 pub(super) mod cache_evict;
+// #[cfg(feature = "buffer_pool_backend")]
+pub(super) mod clock_replacer;
 #[cfg(feature = "mmap_backend")]
 pub(super) mod mmap;
 pub(super) mod options;

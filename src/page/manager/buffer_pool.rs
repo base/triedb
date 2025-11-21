@@ -43,6 +43,23 @@ unsafe impl Sync for Frame {}
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub(crate) struct FrameId(u32);
 
+impl FrameId {
+    #[inline]
+    pub const fn as_u32(&self) -> u32 {
+        self.0
+    }
+
+    #[inline]
+    pub const fn as_usize(&self) -> usize {
+        self.0 as usize
+    }
+
+    #[inline]
+    pub const fn from_usize(value: usize) -> Self {
+        FrameId(value as u32)
+    }
+}
+
 pub(crate) type FxMap<K, V> = DashMap<K, V, FxBuildHasher>;
 pub(crate) type FxSet<K> = DashSet<K, FxBuildHasher>;
 
