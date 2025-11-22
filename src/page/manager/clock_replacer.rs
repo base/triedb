@@ -17,7 +17,7 @@ struct ClockReplacer {
 }
 
 impl ClockReplacer {
-    fn new(num_frames: usize) -> Self {
+    pub fn new(num_frames: usize) -> Self {
         let mut frames = Vec::with_capacity(num_frames);
         for _ in 0..num_frames {
             frames
@@ -42,7 +42,7 @@ impl ClockReplacer {
 
     pub fn unpin(&self, frame_id: FrameId) {
         if frame_id.as_usize() >= self.frames.len() {
-            return
+            return;
         }
 
         let frame = &self.frames[frame_id.as_usize()];
@@ -52,7 +52,6 @@ impl ClockReplacer {
     // Find a frame to evict
     pub fn victim(&self) -> Option<FrameId> {
         let mut hand = self.hand.lock();
-        let start_index = *hand;
         let num_frames = self.frames.len();
 
         for _ in 0..(num_frames * 3) {
@@ -81,7 +80,7 @@ impl ClockReplacer {
     }
 
     #[cfg(test)]
-    pub fn count_pinned(&self) -> usize {
+    fn count_pinned(&self) -> usize {
         self.frames.iter().filter(|f| f.pin_count.load(Ordering::SeqCst) > 0).count()
     }
 }
@@ -93,7 +92,42 @@ mod tests {
     #[test]
     fn test_pin() {
         let r = ClockReplacer::new(5);
-        r.pin(FrameId::from_usize(value));
+        r.pin(FrameId::from_usize(0));
         assert_eq!(r.count_pinned(), 1);
+        r.pin(FrameId::from_usize(0));
+        assert_eq!(r.count_pinned(), 1);
+        r.pin(FrameId::from_usize(4));
+        assert_eq!(r.count_pinned(), 2);
+    }
+
+    #[test]
+    fn test_upin() {
+        let r = ClockReplacer::new(5);
+        r.pin(FrameId::from_usize(0));
+        r.pin(FrameId::from_usize(1));
+        r.pin(FrameId::from_usize(1));
+        r.pin(FrameId::from_usize(2));
+        assert_eq!(r.count_pinned(), 3);
+
+        r.unpin(FrameId::from_usize(2));
+        assert_eq!(r.count_pinned(), 2);
+
+        r.unpin(FrameId::from_usize(1));
+        assert_eq!(r.count_pinned(), 2);
+        r.unpin(FrameId::from_usize(1));
+        assert_eq!(r.count_pinned(), 1);
+    }
+
+    #[test]
+    fn test_evict() {
+        let r = ClockReplacer::new(5);
+        (0..5).for_each(|i| {
+            assert_eq!(r.victim(), Some(FrameId::from_usize(i)));
+            r.pin(FrameId::from_usize(i));
+        });
+        assert_eq!(r.victim(), None);
+
+        r.unpin(FrameId::from_usize(4));
+        assert_eq!(r.victim(), Some(FrameId::from_usize(4)));
     }
 }
