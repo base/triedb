@@ -22,9 +22,7 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::{
     page::{
-        manager::cache_evict::CacheEvict,
-        state::{PageState, RawPageState},
-        Page, PageError, PageId, PageManagerOptions, PageMut,
+        Page, PageError, PageId, PageManagerOptions, PageMut, manager::{cache_evict::CacheEvict, clock_replacer::ClockReplacer}, state::{PageState, RawPageState}
     },
     snapshot::SnapshotId,
 };
@@ -72,9 +70,11 @@ pub struct PageManager {
                               * fix num_frames size */
     page_table: FxMap<PageId, FrameId>, /* mapping between page id and buffer pool frames,
                                          * indexed by page id with fix num_frames size */
-    original_free_frame_idx: AtomicU32,
-    lru_replacer: Arc<CacheEvict>, /* the replacer to find unpinned/candidate pages for eviction */
-    loading_page: FxSet<PageId>,   /* set of pages that are being loaded from disk */
+
+    // original_free_frame_idx: AtomicU32,
+    // lru_replacer: Arc<CacheEvict>, /* the replacer to find unpinned/candidate pages for eviction */
+    // loading_page: FxSet<PageId>,   /* set of pages that are being loaded from disk */
+    replacer: Arc<ClockReplacer>,
 
     io_uring: Arc<RwLock<IoUring>>,
     tx_job: Sender<WriteMessage>,
@@ -96,9 +96,9 @@ impl std::fmt::Debug for PageManager {
             .field("file_len", &self.file_len)
             .field("frames", &self.frames)
             .field("page_table", &self.page_table)
-            .field("original_free_frame_idx", &self.original_free_frame_idx)
-            .field("lru_replacer", &self.lru_replacer)
-            .field("loading_page", &self.loading_page)
+            // .field("original_free_frame_idx", &self.original_free_frame_idx)
+            // .field("lru_replacer", &self.lru_replacer)
+            // .field("loading_page", &self.loading_page)
             .field("io_uring", &"<IoUring>")
             .finish()
     }
@@ -150,9 +150,10 @@ impl PageManager {
             let ptr = Box::into_raw(boxed_array);
             frames.push(Frame { ptr });
         }
-        let lru_replacer = Arc::new(CacheEvict::new(num_frames as usize));
-        let loading_page =
-            DashSet::with_capacity_and_hasher(num_frames as usize, FxBuildHasher::default());
+        // let lru_replacer = Arc::new(CacheEvict::new(num_frames as usize));
+        // let loading_page =
+        //     DashSet::with_capacity_and_hasher(num_frames as usize, FxBuildHasher::default());
+        let replacer = ClockReplacer::new(num_frames as usize);
 
         // Initialize io_uring with queue depth base on num_frames
         let queue_depth = num_frames.min(2048) as u32;
@@ -167,9 +168,10 @@ impl PageManager {
             file_len,
             frames: Arc::new(frames),
             page_table,
-            original_free_frame_idx: AtomicU32::new(0),
-            lru_replacer,
-            loading_page,
+            // original_free_frame_idx: AtomicU32::new(0),
+            // lru_replacer,
+            // loading_page,
+            replacer: Arc::new(replacer),
 
             io_uring: Arc::new(RwLock::new(io_uring)),
             tx_job,
@@ -299,7 +301,7 @@ impl PageManager {
             // Check if page is already in the cache
             if let Some(frame_id) = self.page_table.get(&page_id) {
                 let frame = &self.frames[frame_id.0 as usize];
-                self.lru_replacer.touch(page_id).map_err(|_| PageError::EvictionPolicy)?;
+                self.replacer.pin(*frame_id);
                 return unsafe { Page::from_ptr(page_id, frame.ptr, self) };
             }
 

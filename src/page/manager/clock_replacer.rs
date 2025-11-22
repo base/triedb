@@ -11,7 +11,7 @@ struct FrameState {
     pin_count: AtomicU8,
 }
 
-struct ClockReplacer {
+pub struct ClockReplacer {
     frames: Vec<FrameState>,
     hand: Mutex<usize>,
 }
