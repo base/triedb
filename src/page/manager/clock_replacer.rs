@@ -27,6 +27,7 @@ impl ClockReplacer {
         ClockReplacer { frames, hand: Mutex::new(0) }
     }
 
+    #[inline]
     pub fn pin(&self, frame_id: FrameId) {
         // Safety check
         if frame_id.as_usize() >= self.frames.len() {
@@ -77,6 +78,41 @@ impl ClockReplacer {
 
         // If get here, literally every single frame is Pinned. The buffer pool is exhausted.
         None
+    }
+
+    // Find a frame to evict and pin it
+    pub fn victim_and_pin(&self) -> Option<FrameId> {
+        let mut hand = self.hand.lock();
+        let num_frames = self.frames.len();
+
+        for _ in 0..(num_frames * 3) {
+            let current_idx = *hand;
+            let frame = &self.frames[current_idx];
+
+            // Move hand forward for next iteration
+            *hand = (*hand + 1) % num_frames;
+
+            let current_pins = frame.pin_count.load(Ordering::SeqCst);
+            if current_pins > 0 {
+                // This page is being used. Cannot evict. Skip it.
+                continue;
+            }
+            // Check reference bit: swap atomically returns old value and sets to false
+            if frame.ref_bit.swap(false, Ordering::SeqCst) {
+                // Had a second chance (was true, now set to false)
+                continue;
+            }
+
+            // Pin the frame
+            let frame = &self.frames[current_idx];
+            frame.pin_count.fetch_add(1, Ordering::SeqCst);
+            frame.ref_bit.store(true, Ordering::SeqCst);
+            return Some(FrameId::from_usize(current_idx));
+        }
+
+        // If get here, literally every single frame is Pinned. The buffer pool is exhausted.
+        None
+
     }
 
     #[cfg(test)]

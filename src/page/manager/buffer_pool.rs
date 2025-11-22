@@ -22,7 +22,9 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::{
     page::{
-        Page, PageError, PageId, PageManagerOptions, PageMut, manager::{cache_evict::CacheEvict, clock_replacer::ClockReplacer}, state::{PageState, RawPageState}
+        manager::{cache_evict::CacheEvict, clock_replacer::ClockReplacer},
+        state::{PageState, RawPageState},
+        Page, PageError, PageId, PageManagerOptions, PageMut,
     },
     snapshot::SnapshotId,
 };
@@ -308,7 +310,7 @@ impl PageManager {
             // Otherwise, need to load the page from disk
             if self.loading_page.insert(page_id) {
                 // This thread is the first to load this page
-                let frame_id = self.get_free_frame().ok_or(PageError::OutOfMemory)?;
+                let frame_id = self.replacer.victim_and_pin().ok_or(PageError::OutOfMemory)?;
                 let buf: *mut [u8; Page::SIZE] = self.frames[frame_id.0 as usize].ptr;
                 unsafe {
                     self.file
@@ -317,7 +319,6 @@ impl PageManager {
                         .map_err(PageError::IO)?;
                 }
                 self.page_table.insert(page_id, frame_id);
-                self.lru_replacer.pin_read(page_id).map_err(|_| PageError::EvictionPolicy)?;
                 self.loading_page.remove(&page_id);
                 return unsafe { Page::from_ptr(page_id, buf, self) };
             }
@@ -338,16 +339,14 @@ impl PageManager {
         loop {
             // Check if page is already in the cache
             if let Some(frame_id) = self.page_table.get(&page_id) {
-                self.lru_replacer
-                    .pin_write_update_page(*frame_id, page_id)
-                    .map_err(|_| PageError::EvictionPolicy)?;
                 let frame = &self.frames[frame_id.0 as usize];
+                self.replacer.pin(*frame_id);
                 return unsafe { PageMut::from_ptr(page_id, snapshot_id, frame.ptr, self) };
             }
             // Otherwise, need to load the page from disk
             if self.loading_page.insert(page_id) {
                 // This thread is the first to load this page
-                let frame_id = self.get_free_frame().ok_or(PageError::OutOfMemory)?;
+                let frame_id = self.replacer.victim_and_pin().ok_or(PageError::OutOfMemory)?;
                 let buf: *mut [u8; Page::SIZE] = self.frames[frame_id.0 as usize].ptr;
                 unsafe {
                     self.file
@@ -356,16 +355,11 @@ impl PageManager {
                         .map_err(PageError::IO)?;
                 }
                 self.page_table.insert(page_id, frame_id);
-                self.lru_replacer
-                    .pin_write_update_page(frame_id, page_id)
-                    .map_err(|_| PageError::EvictionPolicy)?;
                 self.loading_page.remove(&page_id);
                 return unsafe { PageMut::from_ptr(page_id, snapshot_id, buf, self) };
-            } else {
-                // Another thread is already loading this page, spin/yield and retry
-                std::thread::yield_now();
-                continue;
             }
+            // Another thread is already loading this page, spin/yield and retry
+            std::thread::yield_now();
         }
     }
 
@@ -373,16 +367,10 @@ impl PageManager {
     ///
     /// Returns an error if the buffer pool is full.
     pub fn allocate(&self, snapshot_id: SnapshotId) -> Result<PageMut<'_>, PageError> {
-        let frame_id = self.get_free_frame().ok_or(PageError::OutOfMemory)?;
+        let frame_id = self.replacer.victim_and_pin().ok_or(PageError::OutOfMemory)?;
         let (page_id, new_count) = self.next_page_id().ok_or(PageError::PageLimitReached)?;
-
         self.grow_if_needed(new_count as u64 * Page::SIZE as u64)?;
-
         self.page_table.insert(page_id, frame_id);
-        self.lru_replacer
-            .pin_write_new_page(frame_id, page_id)
-            .map_err(|_| PageError::EvictionPolicy)?;
-
         let data = self.frames[frame_id.0 as usize].ptr;
         unsafe { PageMut::acquire_unchecked(page_id, snapshot_id, data, self) }
     }
