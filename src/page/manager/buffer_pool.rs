@@ -77,6 +77,8 @@ pub struct PageManager {
     // lru_replacer: Arc<CacheEvict>, /* the replacer to find unpinned/candidate pages for eviction */
     // loading_page: FxSet<PageId>,   /* set of pages that are being loaded from disk */
     replacer: Arc<ClockReplacer>,
+    updated_pages: FxMap<PageId, FrameId>,
+    new_pages: Mutex<Vec<(FrameId, PageId)>>,
 
     io_uring: Arc<RwLock<IoUring>>,
     tx_job: Sender<WriteMessage>,
@@ -173,7 +175,10 @@ impl PageManager {
             // original_free_frame_idx: AtomicU32::new(0),
             // lru_replacer,
             // loading_page,
+
             replacer: Arc::new(replacer),
+            updated_pages: DashMap::with_hasher(FxBuildHasher::default()),
+            new_pages: Mutex::new(Vec::new()),
 
             io_uring: Arc::new(RwLock::new(io_uring)),
             tx_job,
@@ -341,6 +346,8 @@ impl PageManager {
             if let Some(frame_id) = self.page_table.get(&page_id) {
                 let frame = &self.frames[frame_id.0 as usize];
                 self.replacer.pin(*frame_id);
+                self.add_updated_page(page_id, frame_id);
+                
                 return unsafe { PageMut::from_ptr(page_id, snapshot_id, frame.ptr, self) };
             }
             // Otherwise, need to load the page from disk
@@ -363,12 +370,24 @@ impl PageManager {
         }
     }
 
+    #[inline]
+    fn add_updated_page(&self, page_id: PageId, frame_id: FrameId) {
+        if let Some((_, first_page_id)) = self.new_pages.lock().first() {
+            if page_id.as_u32() < first_page_id.as_u32() {
+                self.updated_pages.insert(page_id, frame_id);
+            }
+        } else {
+            self.updated_pages.insert(page_id, frame_id);
+        }
+    }
+
     /// Adds a new page to the buffer pool.
     ///
     /// Returns an error if the buffer pool is full.
     pub fn allocate(&self, snapshot_id: SnapshotId) -> Result<PageMut<'_>, PageError> {
         let frame_id = self.replacer.victim_and_pin().ok_or(PageError::OutOfMemory)?;
         let (page_id, new_count) = self.next_page_id().ok_or(PageError::PageLimitReached)?;
+        self.new_pages.lock().push((frame_id, page_id));
         self.grow_if_needed(new_count as u64 * Page::SIZE as u64)?;
         self.page_table.insert(page_id, frame_id);
         let data = self.frames[frame_id.0 as usize].ptr;
