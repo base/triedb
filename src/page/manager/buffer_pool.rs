@@ -72,10 +72,6 @@ pub struct PageManager {
                               * fix num_frames size */
     page_table: FxMap<PageId, FrameId>, /* mapping between page id and buffer pool frames,
                                          * indexed by page id with fix num_frames size */
-
-    // original_free_frame_idx: AtomicU32,
-    // lru_replacer: Arc<CacheEvict>, /* the replacer to find unpinned/candidate pages for eviction */
-    // loading_page: FxSet<PageId>,   /* set of pages that are being loaded from disk */
     replacer: Arc<ClockReplacer>,
     updated_pages: FxMap<PageId, FrameId>,
     new_pages: Mutex<Vec<(FrameId, PageId)>>,
@@ -175,7 +171,6 @@ impl PageManager {
             // original_free_frame_idx: AtomicU32::new(0),
             // lru_replacer,
             // loading_page,
-
             replacer: Arc::new(replacer),
             updated_pages: DashMap::with_hasher(FxBuildHasher::default()),
             new_pages: Mutex::new(Vec::new()),
@@ -304,32 +299,20 @@ impl PageManager {
         if page_id > self.page_count.load(Ordering::Relaxed) {
             return Err(PageError::PageNotFound(page_id));
         }
-        loop {
-            // Check if page is already in the cache
-            if let Some(frame_id) = self.page_table.get(&page_id) {
-                let frame = &self.frames[frame_id.0 as usize];
-                self.replacer.pin(*frame_id);
-                return unsafe { Page::from_ptr(page_id, frame.ptr, self) };
-            }
 
-            // Otherwise, need to load the page from disk
-            if self.loading_page.insert(page_id) {
-                // This thread is the first to load this page
-                let frame_id = self.replacer.victim_and_pin().ok_or(PageError::OutOfMemory)?;
-                let buf: *mut [u8; Page::SIZE] = self.frames[frame_id.0 as usize].ptr;
-                unsafe {
-                    self.file
-                        .read()
-                        .read_exact_at(&mut *buf, page_id.as_offset() as u64)
-                        .map_err(PageError::IO)?;
-                }
-                self.page_table.insert(page_id, frame_id);
-                self.loading_page.remove(&page_id);
-                return unsafe { Page::from_ptr(page_id, buf, self) };
+        // Atomically get or load the page - load_page_from_disk is called only once per page_id
+        let frame_id = match self.page_table.entry(page_id) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let frame_id = self.load_page_from_disk(page_id)?;
+                entry.insert(frame_id).clone()
             }
-            // Another thread is already loading this page, spin/yield and retry
-            std::thread::yield_now();
-        }
+        };
+
+        // frame_id could be pinned 2 times when loaded from disk, but still be good since pin is a bool value
+        self.replacer.pin(frame_id);
+        let frame = &self.frames[frame_id.0 as usize];
+        unsafe { Page::from_ptr(page_id, frame.ptr, self) }
     }
 
     /// Retrieves a mutable page from the buffer pool.
@@ -341,33 +324,38 @@ impl PageManager {
         if page_id > self.page_count.load(Ordering::Relaxed) {
             return Err(PageError::PageNotFound(page_id));
         }
-        loop {
-            // Check if page is already in the cache
-            if let Some(frame_id) = self.page_table.get(&page_id) {
-                let frame = &self.frames[frame_id.0 as usize];
-                self.replacer.pin(*frame_id);
-                self.add_updated_page(page_id, *frame_id);
-                
-                return unsafe { PageMut::from_ptr(page_id, snapshot_id, frame.ptr, self) };
+
+        // Atomically get or load the page - load_page_from_disk is called only once per page_id
+        let frame_id = match self.page_table.entry(page_id) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let frame_id = self.load_page_from_disk(page_id)?;
+                entry.insert(frame_id).clone()
             }
-            // Otherwise, need to load the page from disk
-            if self.loading_page.insert(page_id) {
-                // This thread is the first to load this page
-                let frame_id = self.replacer.victim_and_pin().ok_or(PageError::OutOfMemory)?;
-                let buf: *mut [u8; Page::SIZE] = self.frames[frame_id.0 as usize].ptr;
-                unsafe {
-                    self.file
-                        .read()
-                        .read_exact_at(&mut *buf, page_id.as_offset() as u64)
-                        .map_err(PageError::IO)?;
-                }
-                self.page_table.insert(page_id, frame_id);
-                self.loading_page.remove(&page_id);
-                return unsafe { PageMut::from_ptr(page_id, snapshot_id, buf, self) };
-            }
-            // Another thread is already loading this page, spin/yield and retry
-            std::thread::yield_now();
+        };
+
+        self.add_updated_page(page_id, frame_id);
+        // frame_id could be pinned 2 times when loaded from disk, but still be good since pin is a bool value
+        self.replacer.pin(frame_id);
+        let frame = &self.frames[frame_id.0 as usize];
+        unsafe { PageMut::from_ptr(page_id, snapshot_id, frame.ptr, self) }
+    }
+
+    /// Loads a page from disk atomically. This method is called only once per page_id
+    /// by the entry().or_insert_with() pattern in get() and get_mut().
+    fn load_page_from_disk(&self, page_id: PageId) -> Result<FrameId, PageError> {
+        let frame_id = self
+            .replacer
+            .victim_and_pin()
+            .ok_or(PageError::OutOfMemory)?;
+        let buf: *mut [u8; Page::SIZE] = self.frames[frame_id.0 as usize].ptr;
+        unsafe {
+            self.file
+                .read()
+                .read_exact_at(&mut *buf, page_id.as_offset() as u64)
+                .map_err(PageError::IO)?;
         }
+        Ok(frame_id)
     }
 
     #[inline(always)]
@@ -568,12 +556,14 @@ impl PageManager {
 
     #[inline]
     pub fn drop_page(&self, page_id: PageId) {
-        self.lru_replacer.unpin(page_id).unwrap();
+        if let Some(frame_id) = self.page_table.get(&page_id) {
+            self.replacer.unpin(*frame_id);
+        }
     }
 
     #[inline]
     pub fn drop_page_mut(&self, page_id: PageId) {
-        if self.lru_replacer.update_frames.get(&page_id).is_some() {
+        if self.updated_pages.get(&page_id).is_some() {
             let mut drop_pages = self.drop_pages.lock();
             drop_pages.push(page_id);
             if drop_pages.len() >= 10 {
@@ -603,30 +593,6 @@ impl PageManager {
             ) {
                 Ok(_) => return Some((page_id, new_count)),
                 Err(val) => old_count = val, // Another thread modiled page_count, retry.
-            }
-        }
-    }
-
-    fn get_free_frame(&self) -> Option<FrameId> {
-        let mut original_free_frame_idx = self.original_free_frame_idx.load(Ordering::Relaxed);
-        loop {
-            if original_free_frame_idx < self.num_frames {
-                match self.original_free_frame_idx.compare_exchange_weak(
-                    original_free_frame_idx,
-                    original_free_frame_idx + 1,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => return Some(FrameId(original_free_frame_idx)),
-                    Err(val) => original_free_frame_idx = val, /* Another thread modified original_free_frame_idx, retry. */
-                }
-            } else {
-                let evicted_page = self.lru_replacer.evict();
-                if let Some(page_id) = evicted_page {
-                    return self.page_table.remove(&page_id).map(|(_, frame_id)| frame_id);
-                } else {
-                    return None;
-                }
             }
         }
     }
