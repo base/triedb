@@ -346,7 +346,7 @@ impl PageManager {
             if let Some(frame_id) = self.page_table.get(&page_id) {
                 let frame = &self.frames[frame_id.0 as usize];
                 self.replacer.pin(*frame_id);
-                self.add_updated_page(page_id, frame_id);
+                self.add_updated_page(page_id, *frame_id);
                 
                 return unsafe { PageMut::from_ptr(page_id, snapshot_id, frame.ptr, self) };
             }
@@ -370,7 +370,7 @@ impl PageManager {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn add_updated_page(&self, page_id: PageId, frame_id: FrameId) {
         if let Some((_, first_page_id)) = self.new_pages.lock().first() {
             if page_id.as_u32() < first_page_id.as_u32() {
@@ -424,8 +424,8 @@ impl PageManager {
         let file = self.file.read();
         let fd = file.as_raw_fd();
 
-        let mut new_pages = self.lru_replacer.new_frames.lock();
-        if new_pages.is_empty() && self.lru_replacer.update_frames.is_empty() {
+        let mut new_pages = self.new_pages.lock();
+        if new_pages.is_empty() && self.updated_pages.is_empty() {
             return Ok(());
         }
 
@@ -478,7 +478,7 @@ impl PageManager {
         };
 
         // Write update_pages individually (they may not be contiguous)
-        for entry in self.lru_replacer.update_frames.iter() {
+        for entry in self.updated_pages.iter() {
             let frame_id = *entry.value();
             let page_id = *entry.key();
             let frame = &self.frames[frame_id.0 as usize];
@@ -517,14 +517,12 @@ impl PageManager {
         // println!("\tupdate_pages: {:?}", self.lru_replacer.update_frames.len());
         // println!("\tnew_pages: {:?}", new_pages.len());
 
-        new_pages.iter().for_each(|(_, page_id)| self.lru_replacer.unpin(*page_id).unwrap());
+        new_pages.iter().for_each(|(frame_id, _)| self.replacer.unpin(*frame_id));
         new_pages.clear();
-        // TODO: is there any race condition here?
-        self.lru_replacer
-            .update_frames
-            .iter()
-            .for_each(|entry| self.lru_replacer.unpin(*entry.key()).unwrap());
-        self.lru_replacer.update_frames.clear();
+
+        self.updated_pages.iter().for_each(|entry| self.replacer.unpin(*entry.key));
+        self.updated_pages.clear();
+
         self.drop_pages.lock().clear();
 
         // Wait for all jobs to complete
@@ -547,8 +545,6 @@ impl PageManager {
         drop(ring_guard);
         drop(file);
 
-        // println!("sync, new_pages: {:?}", new_pages);
-        // println!("sync, update_pages: {:?}", update_pages);
         self.file.write().flush()?;
 
         Ok(())
