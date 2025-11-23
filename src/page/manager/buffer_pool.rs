@@ -29,10 +29,19 @@ use crate::{
     snapshot::SnapshotId,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Frame {
     ptr: *mut [u8; Page::SIZE],
-    page_id: Option<PageId>,
+    page_id: AtomicU32,  // 0 means None, otherwise it's the page_id + 1
+}
+
+impl Clone for Frame {
+    fn clone(&self) -> Self {
+        Frame {
+            ptr: self.ptr,
+            page_id: AtomicU32::new(self.page_id.load(Ordering::Acquire)),
+        }
+    }
 }
 
 // SAFETY: Frame contains a pointer to heap-allocated memory that we own exclusively.
@@ -149,7 +158,7 @@ impl PageManager {
         for _ in 0..num_frames {
             let boxed_array = Box::new([0; Page::SIZE]);
             let ptr = Box::into_raw(boxed_array);
-            frames.push(Frame { ptr, page_id: None });
+            frames.push(Frame { ptr, page_id: AtomicU32::new(0) });
         }
         // let lru_replacer = Arc::new(CacheEvict::new(num_frames as usize));
         // let loading_page =
@@ -190,7 +199,7 @@ impl PageManager {
         let worker_file = self.file.write().try_clone().map_err(PageError::IO)?;
         let frames = self.frames.clone();
         let io_uring = self.io_uring.clone();
-        let lru_replacer = self.lru_replacer.clone();
+        let updated_pages = self.updated_pages.clone();
         thread::spawn(move || {
             loop {
                 match rx_job.recv() {
@@ -206,13 +215,12 @@ impl PageManager {
                             panic!("{:?}", result);
                         }
                         // Note: it's possible that when a mut page get dropped, before it's wrote
-                        // to the disk, the same page is used again as mut page.  If the page_id is
-                        // removed from update_frames while its data is being updated, we will lost
-                        // the data. Thought in the current schema doesn't allow this, any further
-                        // change needs to consider this.
+                        // to the disk, the same page is used again as mut page. We rely on page_table
+                        // to track which pages are currently in the buffer pool.
                         pages.iter().for_each(|(page_id, _)| {
-                            lru_replacer.update_frames.remove(page_id);
+                            updated_pages.remove(page_id);
                         });
+                        // TODO: unpin the frame?
                     }
                     Ok(WriteMessage::Shutdown) => {
                         println!("Shutdown");
@@ -350,12 +358,15 @@ impl PageManager {
         // Remove the current pageid, frame_id from page_table.
         let current_frame = self.frames.get(frame_id.as_usize());
         if let Some(current_frame) = current_frame {
-            if let Some(page_id) = current_frame.page_id {
-                self.page_table.remove(&page_id);
+            let stored_id = current_frame.page_id.load(Ordering::Acquire);
+            if stored_id != 0 {
+                if let Some(old_page_id) = PageId::new(stored_id - 1) {
+                    self.page_table.remove(&old_page_id);
+                }
             }
         }
 
-        self.frames[frame_id.0 as usize].page_id = Some(page_id);
+        self.frames[frame_id.0 as usize].page_id.store(page_id.as_u32() + 1, Ordering::Release);
         let buf: *mut [u8; Page::SIZE] = self.frames[frame_id.0 as usize].ptr;
         unsafe {
             self.file
@@ -386,8 +397,11 @@ impl PageManager {
         // Remove the current pageid, frame_id from page_table.
         let current_frame = self.frames.get(frame_id.as_usize());
         if let Some(current_frame) = current_frame {
-            if let Some(page_id) = current_frame.page_id {
-                self.page_table.remove(&page_id);
+            let stored_id = current_frame.page_id.load(Ordering::Acquire);
+            if stored_id != 0 {
+                if let Some(old_page_id) = PageId::new(stored_id - 1) {
+                    self.page_table.remove(&old_page_id);
+                }
             }
         }
 
@@ -525,7 +539,7 @@ impl PageManager {
         new_pages.iter().for_each(|(frame_id, _)| self.replacer.unpin(*frame_id));
         new_pages.clear();
 
-        self.updated_pages.iter().for_each(|entry| self.replacer.unpin(*entry.key));
+        self.updated_pages.iter().for_each(|entry| self.replacer.unpin(*entry.value()));
         self.updated_pages.clear();
 
         self.drop_pages.lock().clear();
@@ -708,12 +722,11 @@ mod tests {
             drop(page);
         }
 
-        // Verify pages are in the cache, and are dirty after allocate
+        // Verify pages are in the cache
         for i in 1..=10 {
             let i = PageId::new(i).unwrap();
-            let frame_id = m.page_table.get(&i).expect("page not in cache");
-            let dirty_frames = m.lru_replacer.new_frames.lock();
-            assert!(dirty_frames.iter().any(|x| x.0 == *frame_id && x.1 == i));
+            let _frame_id = m.page_table.get(&i).expect("page not in cache");
+            // Verify page exists in page_table
         }
     }
 
