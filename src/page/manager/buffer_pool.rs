@@ -22,7 +22,7 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::{
     page::{
-        manager::{cache_evict::CacheEvict, clock_replacer::ClockReplacer},
+        manager::clock_replacer::ClockReplacer,
         state::{PageState, RawPageState},
         Page, PageError, PageId, PageManagerOptions, PageMut,
     },
@@ -32,6 +32,7 @@ use crate::{
 #[derive(Debug, Clone)]
 struct Frame {
     ptr: *mut [u8; Page::SIZE],
+    page_id: Option<PageId>,
 }
 
 // SAFETY: Frame contains a pointer to heap-allocated memory that we own exclusively.
@@ -148,7 +149,7 @@ impl PageManager {
         for _ in 0..num_frames {
             let boxed_array = Box::new([0; Page::SIZE]);
             let ptr = Box::into_raw(boxed_array);
-            frames.push(Frame { ptr });
+            frames.push(Frame { ptr, page_id: None });
         }
         // let lru_replacer = Arc::new(CacheEvict::new(num_frames as usize));
         // let loading_page =
@@ -344,10 +345,17 @@ impl PageManager {
     /// Loads a page from disk atomically. This method is called only once per page_id
     /// by the entry().or_insert_with() pattern in get() and get_mut().
     fn load_page_from_disk(&self, page_id: PageId) -> Result<FrameId, PageError> {
-        let frame_id = self
-            .replacer
-            .victim_and_pin()
-            .ok_or(PageError::OutOfMemory)?;
+        let frame_id = self.replacer.victim_and_pin().ok_or(PageError::OutOfMemory)?;
+        // Todo: Could have race condition here
+        // Remove the current pageid, frame_id from page_table.
+        let current_frame = self.frames.get(frame_id.as_usize());
+        if let Some(current_frame) = current_frame {
+            if let Some(page_id) = current_frame.page_id {
+                self.page_table.remove(&page_id);
+            }
+        }
+
+        self.frames[frame_id.0 as usize].page_id = Some(page_id);
         let buf: *mut [u8; Page::SIZE] = self.frames[frame_id.0 as usize].ptr;
         unsafe {
             self.file
@@ -374,6 +382,15 @@ impl PageManager {
     /// Returns an error if the buffer pool is full.
     pub fn allocate(&self, snapshot_id: SnapshotId) -> Result<PageMut<'_>, PageError> {
         let frame_id = self.replacer.victim_and_pin().ok_or(PageError::OutOfMemory)?;
+        // Todo: Could have race condition here
+        // Remove the current pageid, frame_id from page_table.
+        let current_frame = self.frames.get(frame_id.as_usize());
+        if let Some(current_frame) = current_frame {
+            if let Some(page_id) = current_frame.page_id {
+                self.page_table.remove(&page_id);
+            }
+        }
+
         let (page_id, new_count) = self.next_page_id().ok_or(PageError::PageLimitReached)?;
         self.new_pages.lock().push((frame_id, page_id));
         self.grow_if_needed(new_count as u64 * Page::SIZE as u64)?;
