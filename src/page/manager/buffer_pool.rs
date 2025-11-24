@@ -32,15 +32,12 @@ use crate::{
 #[derive(Debug)]
 struct Frame {
     ptr: *mut [u8; Page::SIZE],
-    page_id: AtomicU32,  // 0 means None, otherwise it's the page_id + 1
+    page_id: AtomicU32, // 0 means None, otherwise it's the page_id
 }
 
 impl Clone for Frame {
     fn clone(&self) -> Self {
-        Frame {
-            ptr: self.ptr,
-            page_id: AtomicU32::new(self.page_id.load(Ordering::Acquire)),
-        }
+        Frame { ptr: self.ptr, page_id: AtomicU32::new(self.page_id.load(Ordering::Acquire)) }
     }
 }
 
@@ -361,13 +358,13 @@ impl PageManager {
         if let Some(current_frame) = current_frame {
             let stored_id = current_frame.page_id.load(Ordering::Acquire);
             if stored_id != 0 {
-                if let Some(old_page_id) = PageId::new(stored_id - 1) {
+                if let Some(old_page_id) = PageId::new(stored_id) {
                     self.page_table.remove(&old_page_id);
                 }
             }
         }
 
-        self.frames[frame_id.0 as usize].page_id.store(page_id.as_u32() + 1, Ordering::Relaxed);
+        self.frames[frame_id.0 as usize].page_id.store(page_id.as_u32(), Ordering::Relaxed);
         let buf: *mut [u8; Page::SIZE] = self.frames[frame_id.0 as usize].ptr;
         unsafe {
             self.file
@@ -400,7 +397,7 @@ impl PageManager {
         if let Some(current_frame) = current_frame {
             let stored_id = current_frame.page_id.load(Ordering::Acquire);
             if stored_id != 0 {
-                if let Some(old_page_id) = PageId::new(stored_id - 1) {
+                if let Some(old_page_id) = PageId::new(stored_id) {
                     self.page_table.remove(&old_page_id);
                 }
             }
@@ -410,7 +407,7 @@ impl PageManager {
         self.new_pages.lock().push((frame_id, page_id));
         self.grow_if_needed(new_count as u64 * Page::SIZE as u64)?;
         self.page_table.insert(page_id, frame_id);
-        self.frames[frame_id.0 as usize].page_id.store(page_id.as_u32() + 1, Ordering::Relaxed);
+        self.frames[frame_id.0 as usize].page_id.store(page_id.as_u32(), Ordering::Relaxed);
         let data = self.frames[frame_id.0 as usize].ptr;
         unsafe { PageMut::acquire_unchecked(page_id, snapshot_id, data, self) }
     }
@@ -717,18 +714,20 @@ mod tests {
             let err = m.get(i).unwrap_err();
             assert!(matches!(err, PageError::PageNotFound(page_id) if page_id == i));
 
-            let page = m.allocate(snapshot).unwrap();
+            let mut page = m.allocate(snapshot).unwrap();
             assert_eq!(page.id(), i);
             assert_eq!(page.contents(), &mut [0; Page::DATA_SIZE]);
             assert_eq!(page.snapshot_id(), snapshot);
+            page.contents_mut().iter_mut().for_each(|byte| *byte = 0x11);
             drop(page);
         }
 
         // Verify pages are in the cache
         for i in 1..=10 {
-            let i = PageId::new(i).unwrap();
-            let _frame_id = m.page_table.get(&i).expect("page not in cache");
-            // Verify page exists in page_table
+            let page_id = PageId::new(i).unwrap();
+            let frame_id = m.page_table.get(&page_id).expect("page not in cache");
+            let frame = m.frames.get(frame_id.as_usize()).unwrap();
+            assert_eq!(frame.page_id.load(Ordering::Relaxed), page_id.as_u32());
         }
     }
 
