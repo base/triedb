@@ -7,8 +7,8 @@ use crate::page::manager::buffer_pool::FrameId;
 struct FrameState {
     // The Second Chance bit
     ref_bit: AtomicBool,
-    // If > 0, this frame cannot be evicted
-    pin_count: AtomicU8,
+    // If true, this frame cannot be evicted
+    pin: AtomicBool,
 }
 
 pub struct ClockReplacer {
@@ -20,8 +20,10 @@ impl ClockReplacer {
     pub fn new(num_frames: usize) -> Self {
         let mut frames = Vec::with_capacity(num_frames);
         for _ in 0..num_frames {
-            frames
-                .push(FrameState { ref_bit: AtomicBool::new(false), pin_count: AtomicU8::new(0) });
+            frames.push(FrameState {
+                ref_bit: AtomicBool::new(false),
+                pin: AtomicBool::new(false),
+            });
         }
 
         ClockReplacer { frames, hand: Mutex::new(0) }
@@ -36,7 +38,7 @@ impl ClockReplacer {
 
         let frame = &self.frames[frame_id.as_usize()];
         // First increment pin count
-        frame.pin_count.fetch_add(1, Ordering::SeqCst);
+        frame.pin.store(true, Ordering::SeqCst);
         // Then set usage bit to true (give it a second chance)
         frame.ref_bit.store(true, Ordering::SeqCst);
     }
@@ -47,7 +49,7 @@ impl ClockReplacer {
         }
 
         let frame = &self.frames[frame_id.as_usize()];
-        frame.pin_count.fetch_sub(1, Ordering::SeqCst);
+        frame.pin.store(false, Ordering::SeqCst);
     }
 
     // Find a frame to evict
@@ -62,8 +64,8 @@ impl ClockReplacer {
             // Move hand forward for next iteration
             *hand = (*hand + 1) % num_frames;
 
-            let current_pins = frame.pin_count.load(Ordering::SeqCst);
-            if current_pins > 0 {
+            let current_pins = frame.pin.load(Ordering::SeqCst);
+            if current_pins {
                 // This page is being used. Cannot evict. Skip it.
                 continue;
             }
@@ -92,8 +94,8 @@ impl ClockReplacer {
             // Move hand forward for next iteration
             *hand = (*hand + 1) % num_frames;
 
-            let current_pins = frame.pin_count.load(Ordering::SeqCst);
-            if current_pins > 0 {
+            let current_pins = frame.pin.load(Ordering::SeqCst);
+            if current_pins {
                 // This page is being used. Cannot evict. Skip it.
                 continue;
             }
@@ -105,19 +107,18 @@ impl ClockReplacer {
 
             // Pin the frame
             let frame = &self.frames[current_idx];
-            frame.pin_count.fetch_add(1, Ordering::SeqCst);
+            frame.pin.store(true, Ordering::SeqCst);
             frame.ref_bit.store(true, Ordering::SeqCst);
             return Some(FrameId::from_usize(current_idx));
         }
 
         // If get here, literally every single frame is Pinned. The buffer pool is exhausted.
         None
-
     }
 
     #[cfg(test)]
     fn count_pinned(&self) -> usize {
-        self.frames.iter().filter(|f| f.pin_count.load(Ordering::SeqCst) > 0).count()
+        self.frames.iter().filter(|f| f.pin.load(Ordering::SeqCst)).count()
     }
 }
 
@@ -149,7 +150,7 @@ mod tests {
         assert_eq!(r.count_pinned(), 2);
 
         r.unpin(FrameId::from_usize(1));
-        assert_eq!(r.count_pinned(), 2);
+        assert_eq!(r.count_pinned(), 1);
         r.unpin(FrameId::from_usize(1));
         assert_eq!(r.count_pinned(), 1);
     }
