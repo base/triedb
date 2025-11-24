@@ -200,6 +200,7 @@ impl PageManager {
         let frames = self.frames.clone();
         let io_uring = self.io_uring.clone();
         let updated_pages = self.updated_pages.clone();
+        let replacer = self.replacer.clone();
         thread::spawn(move || {
             loop {
                 match rx_job.recv() {
@@ -217,10 +218,10 @@ impl PageManager {
                         // Note: it's possible that when a mut page get dropped, before it's wrote
                         // to the disk, the same page is used again as mut page. We rely on page_table
                         // to track which pages are currently in the buffer pool.
-                        pages.iter().for_each(|(page_id, _)| {
+                        pages.iter().for_each(|(page_id, frame_id)| {
                             updated_pages.remove(page_id);
+                            replacer.unpin(*frame_id);
                         });
-                        // TODO: unpin the frame?
                     }
                     Ok(WriteMessage::Shutdown) => {
                         println!("Shutdown");
@@ -366,7 +367,7 @@ impl PageManager {
             }
         }
 
-        self.frames[frame_id.0 as usize].page_id.store(page_id.as_u32() + 1, Ordering::Release);
+        self.frames[frame_id.0 as usize].page_id.store(page_id.as_u32() + 1, Ordering::Relaxed);
         let buf: *mut [u8; Page::SIZE] = self.frames[frame_id.0 as usize].ptr;
         unsafe {
             self.file
@@ -409,6 +410,7 @@ impl PageManager {
         self.new_pages.lock().push((frame_id, page_id));
         self.grow_if_needed(new_count as u64 * Page::SIZE as u64)?;
         self.page_table.insert(page_id, frame_id);
+        self.frames[frame_id.0 as usize].page_id.store(page_id.as_u32() + 1, Ordering::Relaxed);
         let data = self.frames[frame_id.0 as usize].ptr;
         unsafe { PageMut::acquire_unchecked(page_id, snapshot_id, data, self) }
     }
