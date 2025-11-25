@@ -20,10 +20,8 @@ impl ClockReplacer {
     pub fn new(num_frames: usize) -> Self {
         let mut frames = Vec::with_capacity(num_frames);
         for _ in 0..num_frames {
-            frames.push(FrameState {
-                ref_bit: AtomicBool::new(false),
-                pin: AtomicBool::new(false),
-            });
+            frames
+                .push(FrameState { ref_bit: AtomicBool::new(false), pin: AtomicBool::new(false) });
         }
 
         ClockReplacer { frames, hand: Mutex::new(0) }
@@ -83,7 +81,10 @@ impl ClockReplacer {
     }
 
     // Find a frame to evict and pin it
-    pub fn victim_and_pin(&self) -> Option<FrameId> {
+    pub fn victim_and_pin<F>(&self, cleanup: F) -> Option<FrameId>
+    where
+        F: FnOnce(FrameId),
+    {
         let mut hand = self.hand.lock();
         let num_frames = self.frames.len();
 
@@ -109,7 +110,9 @@ impl ClockReplacer {
             let frame = &self.frames[current_idx];
             frame.pin.store(true, Ordering::SeqCst);
             frame.ref_bit.store(true, Ordering::SeqCst);
-            return Some(FrameId::from_usize(current_idx));
+            let frame_id = FrameId::from_usize(current_idx);
+            cleanup(frame_id);
+            return Some(frame_id);
         }
 
         // If get here, literally every single frame is Pinned. The buffer pool is exhausted.

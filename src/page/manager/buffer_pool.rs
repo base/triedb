@@ -348,12 +348,8 @@ impl PageManager {
         unsafe { PageMut::from_ptr(page_id, snapshot_id, frame.ptr, self) }
     }
 
-    /// Loads a page from disk atomically. This method is called only once per page_id
-    /// by the entry().or_insert_with() pattern in get() and get_mut().
-    fn load_page_from_disk(&self, page_id: PageId) -> Result<FrameId, PageError> {
-        let frame_id = self.replacer.victim_and_pin().ok_or(PageError::OutOfMemory)?;
-        // Todo: Could have race condition here
-        // Remove the current pageid, frame_id from page_table.
+    // Remove the current pageid, frame_id from page_table.
+    fn _cleanup_victim_page(&self, frame_id: FrameId) {
         let current_frame = self.frames.get(frame_id.as_usize());
         if let Some(current_frame) = current_frame {
             let stored_id = current_frame.page_id.load(Ordering::Acquire);
@@ -363,6 +359,17 @@ impl PageManager {
                 }
             }
         }
+    }
+
+    /// Loads a page from disk atomically. This method is called only once per page_id
+    /// by the entry().or_insert_with() pattern in get() and get_mut().
+    fn load_page_from_disk(&self, page_id: PageId) -> Result<FrameId, PageError> {
+        let frame_id = self
+            .replacer
+            .victim_and_pin(|fid| {
+                self._cleanup_victim_page(fid);
+            })
+            .ok_or(PageError::OutOfMemory)?;
 
         self.frames[frame_id.0 as usize].page_id.store(page_id.as_u32(), Ordering::Relaxed);
         let buf: *mut [u8; Page::SIZE] = self.frames[frame_id.0 as usize].ptr;
@@ -390,18 +397,12 @@ impl PageManager {
     ///
     /// Returns an error if the buffer pool is full.
     pub fn allocate(&self, snapshot_id: SnapshotId) -> Result<PageMut<'_>, PageError> {
-        let frame_id = self.replacer.victim_and_pin().ok_or(PageError::OutOfMemory)?;
-        // Todo: Could have race condition here
-        // Remove the current pageid, frame_id from page_table.
-        let current_frame = self.frames.get(frame_id.as_usize());
-        if let Some(current_frame) = current_frame {
-            let stored_id = current_frame.page_id.load(Ordering::Acquire);
-            if stored_id != 0 {
-                if let Some(old_page_id) = PageId::new(stored_id) {
-                    self.page_table.remove(&old_page_id);
-                }
-            }
-        }
+        let frame_id = self
+            .replacer
+            .victim_and_pin(|fid| {
+                self._cleanup_victim_page(fid);
+            })
+            .ok_or(PageError::OutOfMemory)?;
 
         let (page_id, new_count) = self.next_page_id().ok_or(PageError::PageLimitReached)?;
         self.new_pages.lock().push((frame_id, page_id));
