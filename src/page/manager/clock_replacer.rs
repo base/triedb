@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
 
@@ -11,13 +11,13 @@ struct FrameState {
     pin: AtomicBool,
 }
 
-pub struct ClockReplacer {
+pub(crate) struct ClockReplacer {
     frames: Vec<FrameState>,
     hand: Mutex<usize>,
 }
 
 impl ClockReplacer {
-    pub fn new(num_frames: usize) -> Self {
+    pub(super) fn new(num_frames: usize) -> Self {
         let mut frames = Vec::with_capacity(num_frames);
         for _ in 0..num_frames {
             frames
@@ -27,8 +27,7 @@ impl ClockReplacer {
         ClockReplacer { frames, hand: Mutex::new(0) }
     }
 
-    #[inline]
-    pub fn pin(&self, frame_id: FrameId) {
+    pub(super) fn pin(&self, frame_id: FrameId) {
         // Safety check
         if frame_id.as_usize() >= self.frames.len() {
             return;
@@ -41,7 +40,7 @@ impl ClockReplacer {
         frame.ref_bit.store(true, Ordering::SeqCst);
     }
 
-    pub fn unpin(&self, frame_id: FrameId) {
+    pub(super) fn unpin(&self, frame_id: FrameId) {
         if frame_id.as_usize() >= self.frames.len() {
             return;
         }
@@ -51,7 +50,7 @@ impl ClockReplacer {
     }
 
     // Find a frame to evict
-    pub fn victim(&self) -> Option<FrameId> {
+    pub(super) fn victim(&self) -> Option<FrameId> {
         let mut hand = self.hand.lock();
         let num_frames = self.frames.len();
 
@@ -81,7 +80,7 @@ impl ClockReplacer {
     }
 
     // Find a frame to evict and pin it
-    pub fn victim_and_pin<F>(&self, cleanup: F) -> Option<FrameId>
+    pub(super) fn victim_and_pin<F>(&self, cleanup: F) -> Option<FrameId>
     where
         F: FnOnce(FrameId),
     {

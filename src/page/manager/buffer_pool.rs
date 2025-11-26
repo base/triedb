@@ -219,6 +219,7 @@ impl PageManager {
                             updated_pages.remove(page_id);
                             replacer.unpin(*frame_id);
                         });
+                        println!("\tworker, write {:?}", pages.len());
                     }
                     Ok(WriteMessage::Shutdown) => {
                         println!("Shutdown");
@@ -531,10 +532,7 @@ impl PageManager {
         ring_guard.submit()?;
 
         // Do cleanup work
-        // println!("sync");
-        // println!("\tdrop_pages: {:?}", self.lru_replacer.drop_pages.len());
-        // println!("\tupdate_pages: {:?}", self.lru_replacer.update_frames.len());
-        // println!("\tnew_pages: {:?}", new_pages.len());
+        println!("Sync, new_pages: {:?}, updated_pages: {:?}", new_pages.len(), self.updated_pages.len());
 
         new_pages.iter().for_each(|(frame_id, _)| self.replacer.unpin(*frame_id));
         new_pages.clear();
@@ -563,6 +561,7 @@ impl PageManager {
         // Drop the write lock on io_uring before calling file operations
         drop(ring_guard);
         drop(file);
+
 
         self.file.write().flush()?;
 
