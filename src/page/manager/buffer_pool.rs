@@ -80,7 +80,7 @@ pub struct PageManager {
     page_table: FxMap<PageId, FrameId>, /* mapping between page id and buffer pool frames,
                                          * indexed by page id with fix num_frames size */
     replacer: Arc<ClockReplacer>,
-    updated_pages: FxMap<PageId, FrameId>,
+    updated_pages: Arc<FxMap<PageId, FrameId>>,
     new_pages: Mutex<Vec<(FrameId, PageId)>>,
 
     io_uring: Arc<RwLock<IoUring>>,
@@ -179,7 +179,7 @@ impl PageManager {
             // lru_replacer,
             // loading_page,
             replacer: Arc::new(replacer),
-            updated_pages: DashMap::with_hasher(FxBuildHasher::default()),
+            updated_pages: Arc::new(DashMap::with_hasher(FxBuildHasher::default())),
             new_pages: Mutex::new(Vec::new()),
 
             io_uring: Arc::new(RwLock::new(io_uring)),
