@@ -219,7 +219,6 @@ impl PageManager {
                             updated_pages.remove(page_id);
                             replacer.unpin(*frame_id);
                         });
-                        println!("\tworker, write {:?}", pages.len());
                     }
                     Ok(WriteMessage::Shutdown) => {
                         println!("Shutdown");
@@ -241,7 +240,6 @@ impl PageManager {
         pages: &[(PageId, FrameId)],
         file: File,
     ) -> io::Result<()> {
-        // println!("Write updated pages: {:?}", pages.len());
         let fd = file.as_raw_fd();
         let mut op_count = 0;
         let mut ring_guard = ring.write();
@@ -531,9 +529,6 @@ impl PageManager {
         // Submit all pending operations
         ring_guard.submit()?;
 
-        // Do cleanup work
-        println!("Sync, new_pages: {:?}, updated_pages: {:?}", new_pages.len(), self.updated_pages.len());
-
         new_pages.iter().for_each(|(frame_id, _)| self.replacer.unpin(*frame_id));
         new_pages.clear();
 
@@ -561,7 +556,6 @@ impl PageManager {
         // Drop the write lock on io_uring before calling file operations
         drop(ring_guard);
         drop(file);
-
 
         self.file.write().flush()?;
 
@@ -817,7 +811,10 @@ mod tests {
         let mut p = m.allocate(snapshot).expect("page allocation failed");
         p.contents_mut().iter_mut().for_each(|byte| *byte = 0xab);
         drop(p);
+        assert_eq!(m.replacer.count_pinned(), 1);
         m.sync().expect("sync failed");
+        assert_eq!(m.replacer.count_pinned(), 0);
+
         seek(&f, 0);
         assert_eq!(len(&f), 1024 * Page::SIZE);
         assert_eq!(read(&f, 8), snapshot.to_le_bytes());
@@ -828,7 +825,9 @@ mod tests {
             let mut p = m.allocate(snapshot + i as u64).expect("page allocation failed");
             p.contents_mut().iter_mut().for_each(|byte| *byte = 0xab ^ (i as u8));
         }
+        assert_eq!(m.replacer.count_pinned(), 255);
         m.sync().expect("sync failed");
+        assert_eq!(m.replacer.count_pinned(), 0);
 
         assert_eq!(len(&f), 1024 * Page::SIZE);
         for i in 1..=255 {

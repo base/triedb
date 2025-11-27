@@ -119,7 +119,7 @@ impl ClockReplacer {
     }
 
     #[cfg(test)]
-    fn count_pinned(&self) -> usize {
+    pub(super) fn count_pinned(&self) -> usize {
         self.frames.iter().filter(|f| f.pin.load(Ordering::SeqCst)).count()
     }
 }
