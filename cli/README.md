@@ -38,7 +38,7 @@ Current stats, all presented with minimum, maximum, and mean:
   * Bytes per page
   * Depth of trie in nodes
   * Depth of trie in pages
-  * Path prefix lenth
+  * Path prefix length
   * Number of children per branch
   * Node size in bytes
 
