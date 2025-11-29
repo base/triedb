@@ -82,6 +82,7 @@ pub struct PageManager {
     replacer: Arc<ClockReplacer>,
     updated_pages: Arc<FxMap<PageId, FrameId>>,
     new_pages: Mutex<Vec<(FrameId, PageId)>>,
+    loading_pages: FxSet<PageId>,
 
     io_uring: Arc<RwLock<IoUring>>,
     tx_job: Sender<WriteMessage>,
@@ -181,6 +182,7 @@ impl PageManager {
             replacer: Arc::new(replacer),
             updated_pages: Arc::new(DashMap::with_hasher(FxBuildHasher::default())),
             new_pages: Mutex::new(Vec::new()),
+            loading_pages: DashSet::with_hasher(FxBuildHasher::default()),
 
             io_uring: Arc::new(RwLock::new(io_uring)),
             tx_job,
@@ -306,17 +308,9 @@ impl PageManager {
             return Err(PageError::PageNotFound(page_id));
         }
 
-        // Atomically get or load the page - load_page_from_disk is called only once per page_id
-        let frame_id = match self.page_table.entry(page_id) {
-            dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                let frame_id = self.load_page_from_disk(page_id)?;
-                entry.insert(frame_id).clone()
-            }
-        };
+        // Atomically get or load the page
+        let frame_id = self.select_frame_id(page_id)?;
 
-        // frame_id could be pinned 2 times when loaded from disk, but still be good since pin is a bool value
-        self.replacer.pin(frame_id);
         let frame = &self.frames[frame_id.0 as usize];
         unsafe { Page::from_ptr(page_id, frame.ptr, self) }
     }
@@ -331,24 +325,36 @@ impl PageManager {
             return Err(PageError::PageNotFound(page_id));
         }
 
-        // Atomically get or load the page - load_page_from_disk is called only once per page_id
-        let frame_id = match self.page_table.entry(page_id) {
-            dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                let frame_id = self.load_page_from_disk(page_id)?;
-                entry.insert(frame_id).clone()
-            }
-        };
+        // Atomically get or load the page
+        let frame_id = self.select_frame_id(page_id)?;
 
         self.add_updated_page(page_id, frame_id);
-        // frame_id could be pinned 2 times when loaded from disk, but still be good since pin is a bool value
-        self.replacer.pin(frame_id);
         let frame = &self.frames[frame_id.0 as usize];
         unsafe { PageMut::from_ptr(page_id, snapshot_id, frame.ptr, self) }
     }
 
+    fn select_frame_id(&self, page_id: PageId) -> Result<FrameId, PageError> {
+        loop {
+            // Check if page is in the cache
+            if let Some(frame_id) = self.page_table.get(&page_id) {
+                self.replacer.pin(*frame_id);
+                return Ok(*frame_id);
+            }
+            // Otherwise, need to load page from disk
+            if self.loading_pages.insert(page_id) {
+                // This thread is the first to load the page
+                let frame_id = self.load_page_from_disk(page_id)?;
+                self.page_table.insert(page_id, frame_id);
+                self.loading_pages.remove(&page_id);
+                return Ok(frame_id);
+            }
+            // Another thread is already loading this page, spin/yield and retry
+            std::thread::yield_now();
+        }
+    }
+
     // Remove the current pageid, frame_id from page_table.
-    fn _cleanup_victim_page(&self, frame_id: FrameId) {
+    fn cleanup_victim_page(&self, frame_id: FrameId) {
         let current_frame = self.frames.get(frame_id.as_usize());
         if let Some(current_frame) = current_frame {
             let stored_id = current_frame.page_id.load(Ordering::Acquire);
@@ -361,12 +367,13 @@ impl PageManager {
     }
 
     /// Loads a page from disk atomically. This method is called only once per page_id
-    /// by the entry().or_insert_with() pattern in get() and get_mut().
+    /// by the select_frame_id pattern in get() and get_mut().
+    /// The result FrameId get pinned after this function.
     fn load_page_from_disk(&self, page_id: PageId) -> Result<FrameId, PageError> {
         let frame_id = self
             .replacer
             .victim_and_pin(|fid| {
-                self._cleanup_victim_page(fid);
+                self.cleanup_victim_page(fid);
             })
             .ok_or(PageError::OutOfMemory)?;
 
@@ -399,7 +406,7 @@ impl PageManager {
         let frame_id = self
             .replacer
             .victim_and_pin(|fid| {
-                self._cleanup_victim_page(fid);
+                self.cleanup_victim_page(fid);
             })
             .ok_or(PageError::OutOfMemory)?;
 
