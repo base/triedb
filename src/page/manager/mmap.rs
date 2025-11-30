@@ -120,6 +120,9 @@ impl PageManager {
     #[inline]
     pub fn drop_page(&self, _page_id: PageId) {}
 
+    #[inline]
+    pub fn drop_page_mut(&self, _page_id: PageId) {}
+
     /// Grows the size of the underlying file to make room for additional pages.
     ///
     /// This will increase the file size by a constant factor of 1024 pages, or a relative factor
