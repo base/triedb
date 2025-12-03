@@ -231,6 +231,16 @@ impl Database {
         self.storage_engine.read_context().root_node_hash
     }
 
+    /// Returns a read context for exploration.
+    pub fn read_context(&self) -> TransactionContext {
+        self.storage_engine.read_context()
+    }
+
+    /// Returns an ExplorerService for the interactive web UI.
+    pub fn explorer(&self) -> crate::storage::explorer::ExplorerService<'_> {
+        self.storage_engine.explorer()
+    }
+
     pub fn size(&self) -> u32 {
         self.storage_engine.size()
     }
