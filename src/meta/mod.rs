@@ -697,6 +697,7 @@ mod tests {
     use crate::page::page_id;
 
     #[test]
+    #[cfg_attr(miri, ignore = "persistence is not implemented with miri")]
     fn persistence() {
         let f = tempfile::tempfile().expect("failed to open temporary file");
         let mut manager =
@@ -897,6 +898,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore = "persistence is not implemented with miri")]
         fn crash_recovery() {
             let f = tempfile::tempfile().expect("failed to open temporary file");
             let mut manager =

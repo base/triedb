@@ -441,6 +441,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "persistence is not implemented with miri")]
     fn test_data_persistence() {
         let tmp_dir = TempDir::new("test_db").unwrap();
         let file_path = tmp_dir.path().join("test.db");
