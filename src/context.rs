@@ -1,6 +1,8 @@
-use crate::{meta::MetadataSlot, metrics::TransactionMetrics, page::PageId, snapshot::SnapshotId};
+use crate::{
+    meta::MetadataSlot, metrics::TransactionMetrics, page::PageId, path::RawPath,
+    snapshot::SnapshotId,
+};
 use alloy_primitives::{map::FbBuildHasher, FixedBytes, B256};
-use alloy_trie::Nibbles;
 use std::collections::HashMap;
 
 /// A map of 64 nibbles (64 bytes). 64 bytes is used instead of 32 bytes to avoid new memory
@@ -24,8 +26,8 @@ where
     /// # Panics
     ///
     /// Panics if the key is not 64 bytes long.
-    pub fn insert(&mut self, key: &Nibbles, value: V) {
-        self.0.insert(FixedBytes::from_slice(key.as_slice()), value);
+    pub fn insert(&mut self, key: &RawPath, value: V) {
+        self.0.insert(FixedBytes::from_slice(key.nibbles()), value);
     }
 
     /// Returns the value associated with the key.
@@ -33,8 +35,8 @@ where
     /// # Panics
     ///
     /// Panics if the key is not 64 bytes long.
-    pub fn get(&self, key: &Nibbles) -> Option<V> {
-        self.0.get(&FixedBytes::from_slice(key.as_slice())).cloned()
+    pub fn get(&self, key: &RawPath) -> Option<V> {
+        self.0.get(&FixedBytes::from_slice(key.nibbles())).cloned()
     }
 
     /// Removes the key-value pair associated with the key.
@@ -42,8 +44,8 @@ where
     /// # Panics
     ///
     /// Panics if the key is not 64 bytes long.
-    pub fn remove(&mut self, key: &Nibbles) {
-        self.0.remove(&FixedBytes::from_slice(key.as_slice()));
+    pub fn remove(&mut self, key: &RawPath) {
+        self.0.remove(&FixedBytes::from_slice(key.nibbles()));
     }
 
     /// Removes all elements from the map.
@@ -101,10 +103,10 @@ mod tests {
         let mut map = B512Map::with_capacity(10);
         let address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let address_path = AddressPath::for_address(address);
-        let key = address_path.to_nibbles();
-        map.insert(key, (1, 2));
-        assert_eq!(map.get(key), Some((1, 2)));
-        map.remove(key);
-        assert_eq!(map.get(key), None);
+        let key = RawPath::from(address_path);
+        map.insert(&key, (1, 2));
+        assert_eq!(map.get(&key), Some((1, 2)));
+        map.remove(&key);
+        assert_eq!(map.get(&key), None);
     }
 }

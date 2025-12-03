@@ -12,13 +12,13 @@ use crate::{
         Page, PageError, PageId, PageManager, PageMut, SlottedPage, SlottedPageMut,
         CELL_POINTER_SIZE,
     },
-    path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH, STORAGE_PATH_LENGTH},
+    path::{AddressPath, RawPath, StoragePath, ADDRESS_PATH_LENGTH, STORAGE_PATH_LENGTH},
     pointer::Pointer,
     snapshot::SnapshotId,
     storage::value::Value,
 };
 use alloy_primitives::StorageValue;
-use alloy_trie::{nodes::RlpNode, nybbles, Nibbles, EMPTY_ROOT_HASH};
+use alloy_trie::{nodes::RlpNode, EMPTY_ROOT_HASH};
 use parking_lot::Mutex;
 use rayon::ThreadPool;
 use std::{
@@ -149,7 +149,7 @@ impl StorageEngine {
             Some(root_node_page_id) => {
                 let page = self.get_page(context, root_node_page_id)?;
                 let slotted_page = SlottedPage::try_from(page)?;
-                match self.get_value_from_page(context, address_path, 0, slotted_page, 0)? {
+                match self.get_value_from_page(context, &address_path.into(), 0, slotted_page, 0)? {
                     Some(TrieValue::Account(account)) => Ok(Some(account)),
                     _ => Ok(None),
                 }
@@ -170,8 +170,8 @@ impl StorageEngine {
         };
 
         // check the cache
-        let nibbles = storage_path.get_address().to_nibbles();
-        let cache_location = context.contract_account_loc_cache.get(nibbles);
+        let nibbles = storage_path.get_address().into();
+        let cache_location = context.contract_account_loc_cache.get(&nibbles);
         let (slotted_page, page_index, path_offset) = match cache_location {
             Some((page_id, page_index)) => {
                 context.transaction_metrics.inc_cache_storage_read_hit();
@@ -206,7 +206,7 @@ impl StorageEngine {
             }
         };
 
-        let original_path: Nibbles = storage_path.full_path();
+        let original_path: RawPath = storage_path.into();
 
         match self.get_value_from_page(
             context,
@@ -225,7 +225,7 @@ impl StorageEngine {
     fn get_value_from_page(
         &self,
         context: &mut TransactionContext,
-        original_path_slice: &[u8],
+        original_path: &RawPath,
         path_offset: usize,
         slotted_page: SlottedPage<'_>,
         page_index: u8,
@@ -233,23 +233,22 @@ impl StorageEngine {
         let node: Node = slotted_page.get_value(page_index)?;
 
         let common_prefix_length =
-            nybbles::common_prefix_length(&original_path_slice[path_offset..], node.prefix());
+            original_path.slice(path_offset..).common_prefix_length(&node.prefix().into());
 
         if common_prefix_length < node.prefix().len() {
             return Ok(None);
         }
 
-        let remaining_path = &original_path_slice[path_offset + common_prefix_length..];
+        let remaining_path = original_path.slice(path_offset + common_prefix_length..);
         if remaining_path.is_empty() {
             // cache the account location if it is a contract account
             if let TrieValue::Account(account) = node.value()? {
                 if account.storage_root != EMPTY_ROOT_HASH &&
-                    original_path_slice.len() == ADDRESS_PATH_LENGTH
+                    original_path.len() == ADDRESS_PATH_LENGTH
                 {
-                    let original_path = Nibbles::from_nibbles_unchecked(original_path_slice);
                     context
                         .contract_account_loc_cache
-                        .insert(&original_path, (slotted_page.id(), page_index));
+                        .insert(original_path, (slotted_page.id(), page_index));
                 }
             }
 
@@ -261,7 +260,7 @@ impl StorageEngine {
                 (storage_root.as_ref(), path_offset + common_prefix_length)
             }
             Branch { ref children } => (
-                children[remaining_path[0] as usize].as_ref(),
+                children[remaining_path.get_unchecked(0) as usize].as_ref(),
                 path_offset + common_prefix_length + 1,
             ),
             _ => unreachable!(),
@@ -273,7 +272,7 @@ impl StorageEngine {
                 if child_location.cell_index().is_some() {
                     self.get_value_from_page(
                         context,
-                        original_path_slice,
+                        original_path,
                         new_path_offset,
                         slotted_page,
                         child_location.cell_index().unwrap(),
@@ -284,7 +283,7 @@ impl StorageEngine {
                     let child_slotted_page = SlottedPage::try_from(child_page)?;
                     self.get_value_from_page(
                         context,
-                        original_path_slice,
+                        original_path,
                         new_path_offset,
                         child_slotted_page,
                         0,
@@ -298,7 +297,7 @@ impl StorageEngine {
     pub fn set_values(
         &self,
         context: &mut TransactionContext,
-        mut changes: &mut [(Nibbles, Option<TrieValue>)],
+        mut changes: &mut [(RawPath, Option<TrieValue>)],
     ) -> Result<(), Error> {
         changes.sort_by(|a, b| a.0.cmp(&b.0));
         if context.root_node_page_id.is_none() {
@@ -319,8 +318,9 @@ impl StorageEngine {
         // invalidate the cache
         changes.iter().for_each(|(path, _)| {
             if path.len() == STORAGE_PATH_LENGTH {
-                let address_path = AddressPath::new(path.slice(0..ADDRESS_PATH_LENGTH));
-                context.contract_account_loc_cache.remove(address_path.to_nibbles());
+                let address_path =
+                    AddressPath::new(path.slice(..ADDRESS_PATH_LENGTH).try_into().unwrap());
+                context.contract_account_loc_cache.remove(&address_path.into());
             }
         });
 
@@ -343,7 +343,7 @@ impl StorageEngine {
     fn set_values_in_page(
         &self,
         context: &mut TransactionContext,
-        mut changes: &[(Nibbles, Option<TrieValue>)],
+        mut changes: &[(RawPath, Option<TrieValue>)],
         path_offset: u8,
         page_id: PageId,
     ) -> Result<PointerChange, Error> {
@@ -409,7 +409,7 @@ impl StorageEngine {
     fn set_values_in_cloned_page(
         &self,
         context: &mut TransactionContext,
-        changes: &[(Nibbles, Option<TrieValue>)],
+        changes: &[(RawPath, Option<TrieValue>)],
         path_offset: u8,
         slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
@@ -432,7 +432,7 @@ impl StorageEngine {
         // Case 1: The path does not match the node prefix, create a new branch node as the parent
         // of the current node except when deleting as we don't want to expand nodes into branches
         // when removing values.
-        if common_prefix_length < node.prefix().len() {
+        if common_prefix.len() < node.prefix().len() {
             if value.is_none() {
                 let (changes_left, changes_right) = changes.split_at(shortest_common_prefix_idx);
                 let changes_right = &changes_right[1..];
@@ -465,13 +465,12 @@ impl StorageEngine {
                 slotted_page,
                 page_index,
                 &mut node,
-                common_prefix,
-                common_prefix_length,
+                &common_prefix,
             );
         }
 
         // Case 2: The path matches the node prefix exactly, update or delete the value
-        if common_prefix_length == path.len() {
+        if common_prefix.len() == path.len() {
             assert_eq!(shortest_common_prefix_idx, 0, "the leftmost change must have the matching prefix, as all other matching changes must be storage descendants of this account");
 
             return self.handle_exact_prefix_match(
@@ -495,7 +494,7 @@ impl StorageEngine {
                 slotted_page,
                 page_index,
                 &mut node,
-                common_prefix_length,
+                &common_prefix,
             );
         }
 
@@ -508,7 +507,7 @@ impl StorageEngine {
             slotted_page,
             page_index,
             &mut node,
-            common_prefix_length,
+            &common_prefix,
         )
     }
 
@@ -516,11 +515,11 @@ impl StorageEngine {
     fn initialize_empty_trie(
         &self,
         _context: &mut TransactionContext,
-        path: &Nibbles,
+        path: &RawPath,
         value: &TrieValue,
         slotted_page: &mut SlottedPageMut<'_>,
     ) -> Result<Pointer, Error> {
-        let new_node = Node::new_leaf(path.clone(), value)?;
+        let new_node = Node::new_leaf(path, value)?;
         let rlp_node = new_node.to_rlp_node();
 
         let index = slotted_page.insert_value(&new_node)?;
@@ -533,13 +532,12 @@ impl StorageEngine {
     fn handle_missing_parent_branch(
         &self,
         context: &mut TransactionContext,
-        changes: &[(Nibbles, Option<TrieValue>)],
+        changes: &[(RawPath, Option<TrieValue>)],
         path_offset: u8,
         slotted_page: &mut SlottedPageMut<'_>,
         cell_index: u8,
         node: &mut Node,
-        common_prefix: Nibbles,
-        common_prefix_length: usize,
+        common_prefix: &RawPath,
     ) -> Result<PointerChange, Error> {
         // Create a new branch node with the common prefix
         let mut new_parent_branch = Node::new_branch(common_prefix)?;
@@ -547,14 +545,14 @@ impl StorageEngine {
         // Ensure page has enough space for a new branch, a new cell pointer for the new branch,
         // while taking into account the space saving from shrinking the existing node's prefix.
         if slotted_page.num_free_bytes() <
-            new_parent_branch.size() + CELL_POINTER_SIZE - common_prefix_length / 2
+            new_parent_branch.size() + CELL_POINTER_SIZE - common_prefix.len() / 2
         {
             self.split_page(context, slotted_page)?;
             return Err(Error::PageSplit(0));
         }
-        let node_branch_index = node.prefix()[common_prefix_length];
+        let node_branch_index = node.prefix().get_unchecked(common_prefix.len());
         // Update the existing node with the new prefix
-        node.set_prefix(node.prefix().slice(common_prefix_length + 1..))?;
+        node.set_prefix(node.prefix().slice(common_prefix.len() + 1..))?;
         let rlp_node = node.to_rlp_node();
         slotted_page.set_value(cell_index, node)?;
 
@@ -581,12 +579,12 @@ impl StorageEngine {
     fn handle_exact_prefix_match(
         &self,
         context: &mut TransactionContext,
-        changes: &[(Nibbles, Option<TrieValue>)],
+        changes: &[(RawPath, Option<TrieValue>)],
         path_offset: u8,
         slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
         node: &mut Node,
-        path: Nibbles,
+        path: RawPath,
         value: Option<&TrieValue>,
     ) -> Result<PointerChange, Error> {
         if value.is_none() {
@@ -626,7 +624,7 @@ impl StorageEngine {
         }
 
         // Update the node with the new value
-        let mut new_node = Node::new_leaf(path, value.unwrap())?;
+        let mut new_node = Node::new_leaf(&path, value.unwrap())?;
         if node.has_children() {
             if let Some(child_pointer) = node.direct_child()? {
                 new_node.set_child(0, child_pointer.clone())?;
@@ -684,12 +682,12 @@ impl StorageEngine {
     fn handle_account_node_traversal(
         &self,
         context: &mut TransactionContext,
-        changes: &[(Nibbles, Option<TrieValue>)],
+        changes: &[(RawPath, Option<TrieValue>)],
         path_offset: u8,
         slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
         node: &mut Node,
-        common_prefix_length: usize,
+        common_prefix: &RawPath,
     ) -> Result<PointerChange, Error> {
         let child_pointer = node.direct_child()?;
 
@@ -700,7 +698,7 @@ impl StorageEngine {
                     self.set_values_in_cloned_page(
                         context,
                         changes,
-                        path_offset + common_prefix_length as u8,
+                        path_offset + common_prefix.len() as u8,
                         slotted_page,
                         child_cell_index,
                     )?
@@ -710,7 +708,7 @@ impl StorageEngine {
                     self.set_values_in_page(
                         context,
                         changes,
-                        path_offset + common_prefix_length as u8,
+                        path_offset + common_prefix.len() as u8,
                         child_page_id,
                     )?
                 };
@@ -749,7 +747,7 @@ impl StorageEngine {
                 slotted_page,
                 page_index,
                 node,
-                common_prefix_length,
+                common_prefix,
             )
         }
     }
@@ -758,12 +756,12 @@ impl StorageEngine {
     fn create_first_storage_node(
         &self,
         context: &mut TransactionContext,
-        changes: &[(Nibbles, Option<TrieValue>)],
+        changes: &[(RawPath, Option<TrieValue>)],
         path_offset: u8,
         slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
         node: &mut Node,
-        common_prefix_length: usize,
+        common_prefix: &RawPath,
     ) -> Result<PointerChange, Error> {
         if changes.is_empty() {
             return Ok(PointerChange::None);
@@ -784,8 +782,8 @@ impl StorageEngine {
         }
 
         let node_size_incr = node.size_incr_with_new_child();
-        let remaining_path = path.slice(path_offset as usize + common_prefix_length..);
-        let new_node = Node::new_leaf(remaining_path, value.as_ref().unwrap())?;
+        let remaining_path = path.slice(path_offset as usize + common_prefix.len()..);
+        let new_node = Node::new_leaf(&remaining_path, value.as_ref().unwrap())?;
 
         // if the page doesn't have enough space to
         // 1. insert the new leaf node
@@ -845,12 +843,12 @@ impl StorageEngine {
     fn handle_branch_node_traversal(
         &self,
         context: &mut TransactionContext,
-        changes: &[(Nibbles, Option<TrieValue>)],
+        changes: &[(RawPath, Option<TrieValue>)],
         path_offset: u8,
         slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
         node: &mut Node,
-        common_prefix_length: usize,
+        common_prefix: &RawPath,
     ) -> Result<PointerChange, Error> {
         // Partition changes by child index
         let mut remaining_changes = changes;
@@ -860,7 +858,7 @@ impl StorageEngine {
             let matching_changes;
             (matching_changes, remaining_changes) =
                 remaining_changes.split_at(remaining_changes.partition_point(|(path, _)| {
-                    path[path_offset as usize + common_prefix_length] == child_index
+                    path.get_unchecked(path_offset as usize + common_prefix.len()) == child_index
                 }));
 
             if matching_changes.is_empty() {
@@ -873,7 +871,7 @@ impl StorageEngine {
                 slotted_page,
                 page_index,
                 node,
-                common_prefix_length,
+                common_prefix,
                 child_index,
             );
             match result {
@@ -896,12 +894,12 @@ impl StorageEngine {
     fn handle_child_node_traversal(
         &self,
         context: &mut TransactionContext,
-        matching_changes: &[(Nibbles, Option<TrieValue>)],
+        matching_changes: &[(RawPath, Option<TrieValue>)],
         path_offset: u8,
         slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
         node: &mut Node,
-        common_prefix_length: usize,
+        common_prefix: &RawPath,
         child_index: u8,
     ) -> Result<(), Error> {
         // Get the child pointer for this index
@@ -917,7 +915,7 @@ impl StorageEngine {
                         self.set_values_in_cloned_page(
                             context,
                             matching_changes,
-                            path_offset + common_prefix_length as u8 + 1,
+                            path_offset + common_prefix.len() as u8 + 1,
                             slotted_page,
                             child_cell_index,
                         )?
@@ -927,7 +925,7 @@ impl StorageEngine {
                         self.set_values_in_page(
                             context,
                             matching_changes,
-                            path_offset + common_prefix_length as u8 + 1,
+                            path_offset + common_prefix.len() as u8 + 1,
                             child_page_id,
                         )?
                     };
@@ -969,14 +967,13 @@ impl StorageEngine {
 
                 let ((path, value), matching_changes) =
                     matching_changes_without_leading_deletes.split_first().unwrap();
-                let remaining_path: Nibbles =
-                    path.slice(path_offset as usize + common_prefix_length + 1..);
+                let remaining_path = path.slice(path_offset as usize + common_prefix.len() + 1..);
 
                 let value = value.as_ref().unwrap();
 
                 // ensure that the page has enough space to insert a new leaf node.
                 let node_size_incr = node.size_incr_with_new_child();
-                let new_node = Node::new_leaf(remaining_path, value)?;
+                let new_node = Node::new_leaf(&remaining_path, value)?;
 
                 // if the page doesn't have enough space to
                 // 1. insert the new leaf node
@@ -1001,7 +998,7 @@ impl StorageEngine {
                     let child_pointer_change = self.set_values_in_cloned_page(
                         context,
                         matching_changes,
-                        path_offset + common_prefix_length as u8 + 1,
+                        path_offset + common_prefix.len() as u8 + 1,
                         slotted_page,
                         location.cell_index().unwrap(),
                     )?;
@@ -1090,7 +1087,7 @@ impl StorageEngine {
             };
 
         // Create the new merged prefix
-        let mut new_nibbles = node.prefix().clone();
+        let mut new_nibbles = *node.prefix();
         new_nibbles.push(only_child_index);
         new_nibbles = new_nibbles.join(only_child_node.prefix());
         only_child_node.set_prefix(new_nibbles)?;
@@ -1342,14 +1339,14 @@ fn node_location(page_id: PageId, page_index: u8) -> Location {
 /// Returns the index of the change and the length of the common prefix
 /// Requires that the changes list is sorted, otherwise the result is undefined.
 fn find_shortest_common_prefix<T>(
-    changes: &[(Nibbles, T)],
+    changes: &[(RawPath, T)],
     path_offset: u8,
     node: &Node,
 ) -> (usize, usize) {
     let leftmost = changes.first().unwrap();
-    let leftmost_path = &leftmost.0[path_offset as usize..];
+    let leftmost_path = leftmost.0.slice(path_offset as usize..);
     let rightmost = changes.last().unwrap();
-    let rightmost_path = &rightmost.0[path_offset as usize..];
+    let rightmost_path = rightmost.0.slice(path_offset as usize..);
 
     debug_assert!(leftmost.0 <= rightmost.0, "changes must be sorted");
     debug_assert!(
@@ -1357,8 +1354,9 @@ fn find_shortest_common_prefix<T>(
         "changes must be sorted after slicing with path offset"
     );
 
-    let leftmost_prefix_length = nybbles::common_prefix_length(node.prefix(), leftmost_path);
-    let rightmost_prefix_length = nybbles::common_prefix_length(node.prefix(), rightmost_path);
+    let node_prefix = RawPath::from(node.prefix());
+    let leftmost_prefix_length = node_prefix.common_prefix_length(&leftmost_path);
+    let rightmost_prefix_length = node_prefix.common_prefix_length(&rightmost_path);
 
     if leftmost_prefix_length <= rightmost_prefix_length {
         (0, leftmost_prefix_length)
@@ -1548,7 +1546,7 @@ mod tests {
     use alloy_primitives::{address, b256, hex, keccak256, Address, StorageKey, B256, U256};
     use alloy_trie::{
         root::{storage_root_unhashed, storage_root_unsorted},
-        EMPTY_ROOT_HASH, KECCAK_EMPTY,
+        Nibbles, EMPTY_ROOT_HASH, KECCAK_EMPTY,
     };
     use proptest::prelude::*;
     use rand::{rngs::StdRng, seq::SliceRandom, Rng, RngCore, SeedableRng};
@@ -1788,18 +1786,18 @@ mod tests {
         let account3_updated =
             Account::new(1, U256::from(0x3635c9adc5de938d5cu128), EMPTY_ROOT_HASH, KECCAK_EMPTY);
 
-        let mut changes = account1_storage
-            .map(|(key, value)| {
-                (
-                    StoragePath::for_address_and_slot(address1, key).full_path(),
-                    Some(TrieValue::Storage(value)),
-                )
-            })
-            .to_vec();
+        let mut changes = Vec::<(RawPath, Option<TrieValue>)>::new();
+
+        changes.extend(account1_storage.map(|(key, value)| {
+            (
+                StoragePath::for_address_and_slot(address1, key).into(),
+                Some(TrieValue::Storage(value)),
+            )
+        }));
 
         changes.extend(account2_storage.into_iter().map(|(key, value)| {
             (
-                StoragePath::for_address_and_slot(address2, key).full_path(),
+                StoragePath::for_address_and_slot(address2, key).into(),
                 Some(TrieValue::Storage(value)),
             )
         }));
@@ -1850,7 +1848,7 @@ mod tests {
             storage.shuffle(&mut rng);
             for (slot, value) in storage {
                 changes.push((
-                    StoragePath::for_address_and_slot(address, slot).full_path(),
+                    StoragePath::for_address_and_slot(address, slot).into(),
                     Some(TrieValue::Storage(value)),
                 ));
             }
@@ -2087,14 +2085,14 @@ mod tests {
             storage_engine
                 .set_values(
                     &mut context,
-                    vec![(address_path.clone().into(), Some(account.clone().into()))].as_mut(),
+                    vec![((&address_path).into(), Some(account.clone().into()))].as_mut(),
                 )
                 .unwrap();
 
             let read_account =
                 storage_engine.get_account(&mut context, &address_path).unwrap().unwrap();
             assert_eq!(read_account, account);
-            let cached_location = context.contract_account_loc_cache.get(address_path.to_nibbles());
+            let cached_location = context.contract_account_loc_cache.get(&(&address_path).into());
             assert!(cached_location.is_none());
         }
         {
@@ -2138,7 +2136,7 @@ mod tests {
                             let storage_value = StorageValue::from_be_slice(value.as_slice());
                             (storage_path.into(), Some(storage_value.into()))
                         })
-                        .collect::<Vec<(Nibbles, Option<TrieValue>)>>()
+                        .collect::<Vec<(RawPath, Option<TrieValue>)>>()
                         .as_mut(),
                 )
                 .unwrap();
@@ -2153,7 +2151,7 @@ mod tests {
 
             // the account should be cached
             let account_cache_location =
-                context.contract_account_loc_cache.get(address_path.to_nibbles()).unwrap();
+                context.contract_account_loc_cache.get(&(&address_path).into()).unwrap();
             assert_eq!(account_cache_location.0, 1);
             assert_eq!(account_cache_location.1, 2); // 0 is the branch page, 1 is the first EOA
                                                      // account, 2 is the this contract account
@@ -2204,7 +2202,7 @@ mod tests {
                             let storage_value = StorageValue::from_be_slice(value.as_slice());
                             (storage_path.into(), Some(storage_value.into()))
                         })
-                        .collect::<Vec<(Nibbles, Option<TrieValue>)>>()
+                        .collect::<Vec<(RawPath, Option<TrieValue>)>>()
                         .as_mut(),
                 )
                 .unwrap();
@@ -2234,14 +2232,14 @@ mod tests {
                             let storage_value = StorageValue::from_be_slice(value.as_slice());
                             (storage_path.into(), Some(storage_value.into()))
                         })
-                        .collect::<Vec<(Nibbles, Option<TrieValue>)>>()
+                        .collect::<Vec<(RawPath, Option<TrieValue>)>>()
                         .as_mut(),
                 )
                 .unwrap();
 
             // the cache should be invalidated
             let account_cache_location =
-                context.contract_account_loc_cache.get(address_path.to_nibbles());
+                context.contract_account_loc_cache.get(&(&address_path).into());
             assert!(account_cache_location.is_none());
         }
     }
@@ -2301,7 +2299,7 @@ mod tests {
                         let storage_value = StorageValue::from_be_slice(value.as_slice());
                         (storage_path.into(), Some(storage_value.into()))
                     })
-                    .collect::<Vec<(Nibbles, Option<TrieValue>)>>()
+                    .collect::<Vec<(RawPath, Option<TrieValue>)>>()
                     .as_mut(),
             )
             .unwrap();
@@ -2586,7 +2584,7 @@ mod tests {
                 additional_accounts
                     .iter()
                     .map(|(path, account)| (path.clone().into(), Some(account.clone().into())))
-                    .collect::<Vec<(Nibbles, Option<TrieValue>)>>()
+                    .collect::<Vec<(RawPath, Option<TrieValue>)>>()
                     .as_mut(),
             )
             .unwrap();
@@ -2644,7 +2642,7 @@ mod tests {
                     .clone()
                     .into_iter()
                     .map(|(path, account)| (path.into(), Some(account.into())))
-                    .collect::<Vec<(Nibbles, Option<TrieValue>)>>()
+                    .collect::<Vec<(RawPath, Option<TrieValue>)>>()
                     .as_mut(),
             )
             .unwrap();
@@ -3272,7 +3270,7 @@ mod tests {
         child_1_full_path[3] = 11; // leaf prefix
         child_1_full_path[4] = 12; // leaf prefix
         let child_1: Node = Node::new_leaf(
-            Nibbles::from_nibbles(&child_1_full_path[2..]),
+            &RawPath::from_nibbles(&child_1_full_path[2..]),
             &TrieValue::Account(test_account.clone()),
         )
         .expect("can create node");
@@ -3284,7 +3282,7 @@ mod tests {
         child_2_full_path[3] = 2; // leaf prefix
         child_2_full_path[4] = 3; // leaf prefix
         let child_2: Node = Node::new_leaf(
-            Nibbles::from_nibbles(&child_2_full_path[2..]),
+            &RawPath::from_nibbles(&child_2_full_path[2..]),
             &TrieValue::Account(test_account.clone()),
         )
         .expect("can create node");
@@ -3297,7 +3295,7 @@ mod tests {
         slotted_page3.insert_value(&child_2).unwrap();
         let child_2_location = Location::from(slotted_page3.id());
 
-        let mut new_branch_node: Node = Node::new_branch(Nibbles::new()).expect("can create node");
+        let mut new_branch_node: Node = Node::new_branch(&RawPath::new()).expect("can create node");
         new_branch_node
             .set_child(0, Pointer::new(child_1_location, RlpNode::default()))
             .expect("can set child");
@@ -3320,13 +3318,11 @@ mod tests {
         // assert we can get the child account we just added:
         let child_1_nibbles = Nibbles::from_nibbles(child_1_full_path);
         let child_2_nibbles = Nibbles::from_nibbles(child_2_full_path);
-        let read_account1 = storage_engine
-            .get_account(&mut context, &AddressPath::new(child_1_nibbles.clone()))
-            .unwrap();
+        let read_account1 =
+            storage_engine.get_account(&mut context, &AddressPath::new(child_1_nibbles)).unwrap();
         assert_eq!(read_account1, Some(test_account.clone()));
-        let read_account2 = storage_engine
-            .get_account(&mut context, &AddressPath::new(child_2_nibbles.clone()))
-            .unwrap();
+        let read_account2 =
+            storage_engine.get_account(&mut context, &AddressPath::new(child_2_nibbles)).unwrap();
         assert_eq!(read_account2, Some(test_account.clone()));
 
         // WHEN: child 1 is deleted
@@ -3381,7 +3377,7 @@ mod tests {
         child_1_full_path[3] = 11; // leaf prefix
         child_1_full_path[4] = 12; // leaf prefix
         let child_1: Node = Node::new_leaf(
-            Nibbles::from_nibbles(&child_1_full_path[1..]),
+            &RawPath::from_nibbles(&child_1_full_path[1..]),
             &TrieValue::Account(test_account.clone()),
         )
         .expect("can create node");
@@ -3392,7 +3388,7 @@ mod tests {
         child_2_full_path[3] = 2; // leaf prefix
         child_2_full_path[4] = 3; // leaf prefix
         let child_2: Node = Node::new_leaf(
-            Nibbles::from_nibbles(&child_2_full_path[1..]),
+            &RawPath::from_nibbles(&child_2_full_path[1..]),
             &TrieValue::Account(test_account.clone()),
         )
         .expect("can create node");
@@ -3406,7 +3402,7 @@ mod tests {
         let child_2_location = Location::from(slotted_page3.id());
 
         // next we create and update our root node
-        let mut root_node = Node::new_branch(Nibbles::new()).expect("can create node");
+        let mut root_node = Node::new_branch(&RawPath::new()).expect("can create node");
         root_node
             .set_child(0, Pointer::new(child_1_location, RlpNode::default()))
             .expect("can set child");
@@ -3430,20 +3426,18 @@ mod tests {
         // assert we can get the children accounts we just added:
         let child_1_nibbles = Nibbles::from_nibbles(child_1_full_path);
         let child_2_nibbles = Nibbles::from_nibbles(child_2_full_path);
-        let read_account1 = storage_engine
-            .get_account(&mut context, &AddressPath::new(child_1_nibbles.clone()))
-            .unwrap();
+        let read_account1 =
+            storage_engine.get_account(&mut context, &AddressPath::new(child_1_nibbles)).unwrap();
         assert_eq!(read_account1, Some(test_account.clone()));
-        let read_account2 = storage_engine
-            .get_account(&mut context, &AddressPath::new(child_2_nibbles.clone()))
-            .unwrap();
+        let read_account2 =
+            storage_engine.get_account(&mut context, &AddressPath::new(child_2_nibbles)).unwrap();
         assert_eq!(read_account2, Some(test_account.clone()));
 
         // WHEN: child 1 is deleted
         storage_engine
             .set_values(
                 &mut context,
-                vec![(AddressPath::new(child_1_nibbles.clone()).into(), None)].as_mut(),
+                vec![(AddressPath::new(child_1_nibbles).into(), None)].as_mut(),
             )
             .unwrap();
 
@@ -3553,7 +3547,7 @@ mod tests {
             .set_values(
                 &mut context,
                 vec![(
-                    AddressPath::new(address_nibbles_original_account.clone()).into(),
+                    AddressPath::new(address_nibbles_original_account).into(),
                     Some(account.clone().into()),
                 )]
                 .as_mut(),
@@ -3571,7 +3565,7 @@ mod tests {
                 &mut context,
                 vec![
                     (
-                        AddressPath::new(address_nibbles_original_account.clone()).into(),
+                        AddressPath::new(address_nibbles_original_account).into(),
                         Some(updated_account.clone().into()),
                     ),
                     (AddressPath::new(address_nibbles).into(), None),
@@ -3707,7 +3701,7 @@ mod tests {
         #[test]
         fn fuzz_find_shortest_common_prefix(
             mut changes in prop::collection::vec(
-                (any::<Nibbles>(), any::<bool>()),
+                (any::<RawPath>(), any::<bool>()),
                 1..10
             ),
             node in any::<Node>(),
@@ -3716,7 +3710,8 @@ mod tests {
             let (idx, shortest_common_prefix_length) = find_shortest_common_prefix(&changes, 0, &node);
             assert!(idx == 0 || idx == changes.len() - 1, "the shortest common prefix must be found at either end of the changes list");
 
-            let shortest_from_full_iteration = changes.iter().map(|(path, _)| nybbles::common_prefix_length(path, node.prefix())).min().unwrap();
+            let prefix: RawPath = node.prefix().into();
+            let shortest_from_full_iteration = changes.iter().map(|(path, _)| path.common_prefix_length(&prefix)).min().unwrap();
 
             assert_eq!(shortest_common_prefix_length, shortest_from_full_iteration);
         }
@@ -3738,7 +3733,7 @@ mod tests {
         // Create the target account node and insert it at index 0 (root of the page)
         let target_path = AddressPath::for_address(target_address);
         let target_node = Node::new_leaf(
-            target_path.to_nibbles().slice(1..),
+            &RawPath::from(&target_path).slice(1..),
             &TrieValue::Account(target_account.clone()),
         )
         .unwrap();
@@ -3754,17 +3749,17 @@ mod tests {
         let mut parent_slotted_page = SlottedPageMut::try_from(parent_page).unwrap();
 
         // Create a branch node with a short prefix that will point to our target
-        let mut parent_branch = Node::new_branch(Nibbles::new()).unwrap();
+        let mut parent_branch = Node::new_branch(&RawPath::new()).unwrap();
 
         // Set the target as a child of the parent branch
         // Use the first nibble of the target address to determine the branch index
-        let target_nibbles = target_path.to_nibbles();
-        let branch_index = target_nibbles[0];
+        let target_nibbles = RawPath::from(&target_path);
+        let branch_index = target_nibbles.get_unchecked(0);
 
         // Create a pointer to the target node with the remaining path
         let remaining_path = target_nibbles.slice(1..);
         let target_node_for_pointer =
-            Node::new_leaf(remaining_path, &TrieValue::Account(target_account.clone())).unwrap();
+            Node::new_leaf(&remaining_path, &TrieValue::Account(target_account.clone())).unwrap();
         let target_pointer_with_path =
             Pointer::new(Location::from(target_page_id), target_node_for_pointer.to_rlp_node());
 

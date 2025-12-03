@@ -7,11 +7,10 @@ use crate::{
     database::Database,
     node::TrieValue,
     overlay::OverlayState,
-    path::{AddressPath, StoragePath},
+    path::{AddressPath, RawPath, StoragePath},
     storage::{overlay_root::OverlayedRoot, proofs::AccountProof},
 };
 use alloy_primitives::{map::HashMap, StorageValue, B256};
-use alloy_trie::Nibbles;
 pub use error::TransactionError;
 pub use manager::TransactionManager;
 use sealed::sealed;
@@ -46,7 +45,7 @@ pub struct Transaction<DB, K: TransactionKind> {
     committed: bool,
     context: TransactionContext,
     database: DB,
-    pending_changes: HashMap<Nibbles, Option<TrieValue>>,
+    pending_changes: HashMap<RawPath, Option<TrieValue>>,
     _marker: std::marker::PhantomData<K>,
 }
 
@@ -132,7 +131,7 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
         self.database
             .storage_engine
             .debugger()
-            .print_path(&self.context, address_path.to_nibbles(), output_file, verbosity_level)
+            .print_path(&self.context, &address_path.into(), output_file, verbosity_level)
             .unwrap();
         Ok(())
     }
@@ -146,7 +145,7 @@ impl<DB: Deref<Target = Database>, K: TransactionKind> Transaction<DB, K> {
         self.database
             .storage_engine
             .debugger()
-            .print_path(&self.context, &storage_path.full_path(), output_file, verbosity_level)
+            .print_path(&self.context, &storage_path.into(), output_file, verbosity_level)
             .unwrap();
         Ok(())
     }
@@ -167,14 +166,12 @@ impl<DB: Deref<Target = Database>> Transaction<DB, RW> {
         storage_path: StoragePath,
         value: Option<StorageValue>,
     ) -> Result<(), TransactionError> {
-        self.pending_changes.insert(storage_path.full_path(), value.map(TrieValue::Storage));
+        self.pending_changes.insert(storage_path.into(), value.map(TrieValue::Storage));
         Ok(())
     }
 
     pub fn commit(mut self) -> Result<(), TransactionError> {
-        let mut changes =
-            self.pending_changes.drain().collect::<Vec<(Nibbles, Option<TrieValue>)>>();
-
+        let mut changes = self.pending_changes.drain().collect::<Vec<_>>();
         if !changes.is_empty() {
             self.database.storage_engine.set_values(&mut self.context, changes.as_mut()).unwrap();
         }

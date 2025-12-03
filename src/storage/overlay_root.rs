@@ -6,6 +6,7 @@ use crate::{
     node::{encode_account_leaf, Node, NodeKind},
     overlay::{OverlayState, OverlayValue},
     page::SlottedPage,
+    path::RawPath,
     pointer::Pointer,
     storage::engine::{Error, StorageEngine},
 };
@@ -19,8 +20,8 @@ use arrayvec::ArrayVec;
 
 #[derive(Debug)]
 enum TriePosition<'a> {
-    Node(Nibbles, Rc<SlottedPage<'a>>, Node),
-    Pointer(Nibbles, Rc<SlottedPage<'a>>, Pointer, bool),
+    Node(RawPath, Rc<SlottedPage<'a>>, Node),
+    Pointer(RawPath, Rc<SlottedPage<'a>>, Pointer, bool),
     None,
 }
 
@@ -35,7 +36,7 @@ impl<'a> TraversalStack<'a> {
 
     fn push_node(
         &mut self,
-        path: Nibbles,
+        path: RawPath,
         node: Node,
         page: Rc<SlottedPage<'a>>,
         overlay: OverlayState,
@@ -45,7 +46,7 @@ impl<'a> TraversalStack<'a> {
 
     fn push_pointer(
         &mut self,
-        path: Nibbles,
+        path: RawPath,
         pointer: Pointer,
         page: Rc<SlottedPage<'a>>,
         can_add_by_hash: bool,
@@ -148,7 +149,7 @@ impl StorageEngine {
 
         let root_node: Node = root_page.get_value(0)?;
         let mut stack = TraversalStack::new();
-        stack.push_node(root_node.prefix().clone(), root_node, Rc::new(root_page), overlay);
+        stack.push_node(root_node.prefix().into(), root_node, Rc::new(root_page), overlay);
 
         self.compute_root_with_overlay(context, &mut stack, &mut root_builder)?;
 
@@ -175,7 +176,7 @@ impl StorageEngine {
                     if overlay.is_empty() && can_add_by_hash {
                         if let Some(hash) = pointer.rlp().as_hash() {
                             // No overlay, just add the pointer by hash
-                            root_builder.add_branch(path, hash, true);
+                            root_builder.add_branch(path.try_into().unwrap(), hash, true);
                             continue;
                         }
                     }
@@ -210,7 +211,7 @@ impl StorageEngine {
                             if let Some((overlay_path, Some(OverlayValue::Hash(_)))) =
                                 matching_overlay.first()
                             {
-                                if overlay_path == &path {
+                                if overlay_path == path {
                                     // the overlay invalidates the current node, so just add this
                                     // and skip the rest of the db traversal
                                     self.add_overlay_to_root_builder(
@@ -238,7 +239,7 @@ impl StorageEngine {
                                 context,
                                 &matching_overlay,
                                 root_builder,
-                                path,
+                                &path,
                                 page,
                                 nonce_rlp,
                                 balance_rlp,
@@ -248,7 +249,7 @@ impl StorageEngine {
                         }
                         NodeKind::StorageLeaf { value_rlp } => {
                             if let Some((overlay_path, _)) = matching_overlay.first() {
-                                if overlay_path == &path {
+                                if overlay_path == path {
                                     // the overlay invalidates the current node, so just add this
                                     // and skip the rest of the db traversal
                                     self.add_overlay_to_root_builder(
@@ -259,7 +260,7 @@ impl StorageEngine {
                                 }
                             }
                             // Leaf node, add it to the hash builder
-                            root_builder.add_leaf(path, &value_rlp);
+                            root_builder.add_leaf(path.try_into().unwrap(), &value_rlp);
                         }
                     }
                 }
@@ -271,7 +272,7 @@ impl StorageEngine {
     fn process_branch_node_with_overlay<'a>(
         &'a self,
         mut overlay: OverlayState,
-        path: &Nibbles,
+        path: &RawPath,
         mut children: [Option<Pointer>; 16],
         current_page: Rc<SlottedPage<'a>>,
         stack: &mut TraversalStack<'a>,
@@ -285,7 +286,7 @@ impl StorageEngine {
                 continue;
             }
 
-            let mut child_path = path.clone();
+            let mut child_path = *path;
             child_path.push(idx);
             let (_, child_overlay, overlay_after_child) = overlay.sub_slice_by_prefix(&child_path);
 
@@ -331,14 +332,14 @@ impl StorageEngine {
         context: &TransactionContext,
         overlay: &OverlayState,
         root_builder: &mut RootBuilder,
-        path: Nibbles,
+        path: &RawPath,
         current_page: Rc<SlottedPage<'a>>,
         mut nonce_rlp: ArrayVec<u8, 9>,
         mut balance_rlp: ArrayVec<u8, 33>,
         mut code_hash: B256,
         storage_root: Option<Pointer>,
     ) -> Result<(), Error> {
-        let overlayed_account = overlay.lookup(&path);
+        let overlayed_account = overlay.lookup(path);
         match overlayed_account {
             Some(None) => {
                 // The account is removed in the overlay
@@ -363,7 +364,7 @@ impl StorageEngine {
 
             self.add_account_leaf_to_root_builder(
                 root_builder,
-                path,
+                *path,
                 &nonce_rlp,
                 &balance_rlp,
                 &code_hash,
@@ -385,7 +386,7 @@ impl StorageEngine {
                 if let Some(child_cell) = pointer.location().cell_index() {
                     let root_storage_node: Node = current_page.get_value(child_cell)?;
                     storage_stack.push_node(
-                        root_storage_node.prefix().clone(),
+                        root_storage_node.prefix().into(),
                         root_storage_node,
                         current_page,
                         storage_overlay,
@@ -401,7 +402,7 @@ impl StorageEngine {
                     let slotted_page = SlottedPage::try_from(storage_page)?;
                     let root_storage_node: Node = slotted_page.get_value(0)?;
                     storage_stack.push_node(
-                        root_storage_node.prefix().clone(),
+                        root_storage_node.prefix().into(),
                         root_storage_node,
                         Rc::new(slotted_page),
                         storage_overlay,
@@ -423,13 +424,13 @@ impl StorageEngine {
         let new_root = storage_hash_builder.root();
 
         root_builder.add_storage_branch_updates(
-            B256::from_slice(&path.pack()),
+            B256::from_slice(&path.pack::<32>()),
             updated_storage_branch_nodes,
         );
 
         self.add_account_leaf_to_root_builder(
             root_builder,
-            path,
+            *path,
             &nonce_rlp,
             &balance_rlp,
             &code_hash,
@@ -442,7 +443,7 @@ impl StorageEngine {
     fn add_account_leaf_to_root_builder(
         &self,
         root_builder: &mut RootBuilder,
-        path: Nibbles,
+        path: RawPath,
         nonce_rlp: &ArrayVec<u8, 9>,
         balance_rlp: &ArrayVec<u8, 33>,
         code_hash: &B256,
@@ -453,7 +454,7 @@ impl StorageEngine {
         let mut value_rlp = buf.as_mut();
         let account_rlp_length =
             encode_account_leaf(nonce_rlp, balance_rlp, code_hash, storage_root, &mut value_rlp);
-        root_builder.add_leaf(path, &buf[..account_rlp_length]);
+        root_builder.add_leaf(path.try_into().unwrap(), &buf[..account_rlp_length]);
     }
 
     fn process_overlayed_child<'a>(
@@ -461,7 +462,7 @@ impl StorageEngine {
         context: &TransactionContext,
         overlay: OverlayState,
         root_builder: &mut RootBuilder,
-        mut child_path: Nibbles,
+        mut child_path: RawPath,
         child: &Pointer,
         current_page: Rc<SlottedPage<'a>>,
         stack: &mut TraversalStack<'a>,
@@ -472,7 +473,7 @@ impl StorageEngine {
         // Account values cannot be directly overlayed, as they may need to be merged with the
         // existing storage trie.
         if let Some((overlay_path, overlay_value)) = overlay.first() {
-            if &child_path == overlay_path &&
+            if child_path == overlay_path &&
                 !matches!(overlay_value, Some(OverlayValue::Account(_)))
             {
                 // the child path is directly overlayed, so only use the overlay state
@@ -483,14 +484,14 @@ impl StorageEngine {
 
         if let Some(child_cell) = child.location().cell_index() {
             let child_node: Node = current_page.get_value(child_cell)?;
-            child_path.extend_from_slice(child_node.prefix());
+            child_path.extend(&child_node.prefix().into());
             stack.push_node(child_path, child_node, current_page, overlay);
         } else {
             let child_page_id = child.location().page_id().unwrap();
             let child_page = self.get_page(context, child_page_id)?;
             let child_slotted_page = SlottedPage::try_from(child_page).unwrap();
             let child_node: Node = child_slotted_page.get_value(0)?;
-            child_path.extend_from_slice(child_node.prefix());
+            child_path.extend(&child_node.prefix().into());
             stack.push_node(child_path, child_node, Rc::new(child_slotted_page), overlay);
         }
         Ok(())
@@ -527,10 +528,10 @@ impl StorageEngine {
     }
 
     fn add_overlay_to_root_builder(&self, root_builder: &mut RootBuilder, overlay: &OverlayState) {
-        let mut last_processed_path: Option<&[u8]> = None;
+        let mut last_processed_path = None;
         for (path, value) in overlay.iter() {
             if let Some(last_processed_path) = last_processed_path {
-                if path.starts_with(last_processed_path) {
+                if path.starts_with(&last_processed_path) {
                     // skip over all descendants of a processed path
                     continue;
                 }
@@ -538,10 +539,11 @@ impl StorageEngine {
 
             match value {
                 Some(OverlayValue::Account(account)) => {
-                    let storage_overlay = overlay.sub_slice_for_prefix(path).with_prefix_offset(64);
+                    let storage_overlay =
+                        overlay.sub_slice_for_prefix(&path).with_prefix_offset(64);
                     self.process_overlayed_account(
                         root_builder,
-                        Nibbles::from_nibbles(path),
+                        path.try_into().unwrap(),
                         account,
                         storage_overlay,
                     )
@@ -550,10 +552,10 @@ impl StorageEngine {
                 }
                 Some(OverlayValue::Storage(storage_value)) => {
                     let encoded = self.encode_storage(storage_value);
-                    root_builder.add_leaf(Nibbles::from_nibbles(path), &encoded);
+                    root_builder.add_leaf(path.try_into().unwrap(), &encoded);
                 }
                 Some(OverlayValue::Hash(hash)) => {
-                    root_builder.add_branch(Nibbles::from_nibbles(path), *hash, false);
+                    root_builder.add_branch(path.try_into().unwrap(), *hash, false);
                     last_processed_path = Some(path);
                 }
                 None => {
@@ -604,7 +606,7 @@ mod tests {
         database::Database,
         node::TrieValue,
         overlay::{OverlayStateMut, OverlayValue},
-        path::AddressPath,
+        path::{AddressPath, StoragePath},
     };
 
     use super::*;
@@ -624,20 +626,20 @@ mod tests {
         let mut overlay_mut_with_branches = OverlayStateMut::new();
 
         overlay.data().iter().for_each(|(path, value)| {
-            overlay_mut_with_branches.insert(path.clone(), value.clone());
+            overlay_mut_with_branches.insert(*path, value.clone());
         });
 
-        for (path, branch) in account_branch_updates.iter() {
+        for (path, branch) in account_branch_updates.into_iter() {
             if let Some(root_hash) = branch.root_hash {
-                overlay_mut_with_branches.insert(path.clone(), Some(OverlayValue::Hash(root_hash)));
+                overlay_mut_with_branches.insert(path.into(), Some(OverlayValue::Hash(root_hash)));
             }
             let mut hash_idx = 0;
-            let mut path = path.clone();
+            let mut path = path;
             for i in 0..16 {
                 if branch.hash_mask.is_bit_set(i) {
                     path.push(i);
                     overlay_mut_with_branches
-                        .insert(path.clone(), Some(OverlayValue::Hash(branch.hashes[hash_idx])));
+                        .insert(path.into(), Some(OverlayValue::Hash(branch.hashes[hash_idx])));
                     hash_idx += 1;
                     path.pop();
                 }
@@ -648,17 +650,17 @@ mod tests {
             for (path, branch) in branches.iter() {
                 if let Some(root_hash) = branch.root_hash {
                     overlay_mut_with_branches.insert(
-                        Nibbles::unpack(account).join(path),
+                        RawPath::unpack(account.as_ref()).join(&path.into()),
                         Some(OverlayValue::Hash(root_hash)),
                     );
                 }
                 let mut hash_idx = 0;
-                let mut path = path.clone();
+                let mut path = *path;
                 for i in 0..16 {
                     if branch.hash_mask.is_bit_set(i) {
                         path.push(i);
                         overlay_mut_with_branches.insert(
-                            Nibbles::unpack(account).join(&path),
+                            RawPath::unpack(account.as_ref()).join(&path.into()),
                             Some(OverlayValue::Hash(branch.hashes[hash_idx])),
                         );
                         hash_idx += 1;
@@ -678,10 +680,10 @@ mod tests {
             (output.root, output.updated_branch_nodes, output.storage_branch_updates);
         assert_eq!(overlay_root_with_branches, overlay_root);
 
-        let mut changes: Vec<(Nibbles, Option<TrieValue>)> = overlay
+        let mut changes: Vec<(RawPath, Option<TrieValue>)> = overlay
             .data()
             .iter()
-            .map(|(path, value)| (path.clone(), value.clone().map(|v| v.try_into().unwrap())))
+            .map(|(path, value)| (*path, value.clone().map(|v| v.try_into().unwrap())))
             .collect();
         db.storage_engine.set_values(context, &mut changes).unwrap();
         let committed_root = context.root_node_hash;
@@ -926,16 +928,16 @@ mod tests {
 
         // Create an account with some storage
         let account_address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
-        let account_path = AddressPath::for_address(account_address);
+        let account_path = RawPath::from(AddressPath::for_address(account_address));
         let account = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
 
         // Create storage paths for the account
         let storage_key1 = U256::from(42);
         let storage_key2 = U256::from(99);
         let storage_path1 =
-            crate::path::StoragePath::for_address_and_slot(account_address, storage_key1.into());
+            RawPath::from(StoragePath::for_address_and_slot(account_address, storage_key1.into()));
         let storage_path2 =
-            crate::path::StoragePath::for_address_and_slot(account_address, storage_key2.into());
+            RawPath::from(StoragePath::for_address_and_slot(account_address, storage_key2.into()));
 
         let storage_value1 = U256::from(123);
         let storage_value2 = U256::from(456);
@@ -945,9 +947,9 @@ mod tests {
             .set_values(
                 &mut context,
                 &mut [
-                    (account_path.clone().into(), Some(TrieValue::Account(account.clone()))),
-                    (storage_path1.full_path(), Some(TrieValue::Storage(storage_value1))),
-                    (storage_path2.full_path(), Some(TrieValue::Storage(storage_value2))),
+                    (account_path, Some(TrieValue::Account(account.clone()))),
+                    (storage_path1, Some(TrieValue::Storage(storage_value1))),
+                    (storage_path2, Some(TrieValue::Storage(storage_value2))),
                 ],
             )
             .unwrap();
@@ -955,8 +957,7 @@ mod tests {
         // Test Case 1: Overlay that modifies existing storage
         let mut overlay_mut = OverlayStateMut::new();
         let new_storage_value1 = U256::from(999);
-        overlay_mut
-            .insert(storage_path1.full_path(), Some(OverlayValue::Storage(new_storage_value1)));
+        overlay_mut.insert(storage_path1, Some(OverlayValue::Storage(new_storage_value1)));
         let overlay = overlay_mut.freeze();
 
         compare_overlay_with_committed_root(&db, &mut context, &overlay);
@@ -965,16 +966,16 @@ mod tests {
         let mut overlay_mut2 = OverlayStateMut::new();
         let storage_key3 = U256::from(200);
         let storage_path3 =
-            crate::path::StoragePath::for_address_and_slot(account_address, storage_key3.into());
+            RawPath::from(StoragePath::for_address_and_slot(account_address, storage_key3.into()));
         let storage_value3 = U256::from(789);
-        overlay_mut2.insert(storage_path3.full_path(), Some(OverlayValue::Storage(storage_value3)));
+        overlay_mut2.insert(storage_path3, Some(OverlayValue::Storage(storage_value3)));
         let overlay2 = overlay_mut2.freeze();
 
         compare_overlay_with_committed_root(&db, &mut context, &overlay2);
 
         // Test Case 3: Overlay that deletes storage (tombstone)
         let mut overlay_mut3 = OverlayStateMut::new();
-        overlay_mut3.insert(storage_path2.full_path(), None); // Delete storage slot
+        overlay_mut3.insert(storage_path2, None); // Delete storage slot
         let overlay3 = overlay_mut3.freeze();
 
         compare_overlay_with_committed_root(&db, &mut context, &overlay3);
@@ -982,19 +983,15 @@ mod tests {
         // Test Case 4: Combined account and storage changes
         let mut overlay_mut4 = OverlayStateMut::new();
         let updated_account = Account::new(2, U256::from(200), EMPTY_ROOT_HASH, KECCAK_EMPTY);
-        overlay_mut4.insert(
-            account_path.clone().into(),
-            Some(OverlayValue::Account(updated_account.clone())),
-        );
-        overlay_mut4
-            .insert(storage_path1.full_path(), Some(OverlayValue::Storage(new_storage_value1)));
+        overlay_mut4.insert(account_path, Some(OverlayValue::Account(updated_account.clone())));
+        overlay_mut4.insert(storage_path1, Some(OverlayValue::Storage(new_storage_value1)));
         let overlay4 = overlay_mut4.freeze();
 
         compare_overlay_with_committed_root(&db, &mut context, &overlay4);
 
         // Test Case 5: Overlay that deletes storage slot via a zero value
         let mut overlay_mut5 = OverlayStateMut::new();
-        overlay_mut5.insert(storage_path1.full_path(), Some(OverlayValue::Storage(U256::ZERO)));
+        overlay_mut5.insert(storage_path1, Some(OverlayValue::Storage(U256::ZERO)));
         let overlay5 = overlay_mut5.freeze();
 
         compare_overlay_with_committed_root(&db, &mut context, &overlay5);
@@ -1014,16 +1011,15 @@ mod tests {
         let account = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
 
         let storage_key1 = U256::from(10);
-        let storage_path1 =
-            crate::path::StoragePath::for_address_and_slot(account_address, storage_key1.into());
+        let storage_path1 = StoragePath::for_address_and_slot(account_address, storage_key1.into());
 
         // Set up initial state with 1 storage slot
         db.storage_engine
             .set_values(
                 &mut context,
                 &mut [
-                    (account_path.clone().into(), Some(TrieValue::Account(account.clone()))),
-                    (storage_path1.full_path(), Some(TrieValue::Storage(U256::from(111)))),
+                    (account_path.into(), Some(TrieValue::Account(account.clone()))),
+                    (storage_path1.into(), Some(TrieValue::Storage(U256::from(111)))),
                 ],
             )
             .unwrap();
@@ -1031,10 +1027,9 @@ mod tests {
         // Test: Add a NEW storage slot via overlay
         let mut overlay_mut = OverlayStateMut::new();
         let storage_key2 = U256::from(20); // New storage key
-        let storage_path2 =
-            crate::path::StoragePath::for_address_and_slot(account_address, storage_key2.into());
+        let storage_path2 = StoragePath::for_address_and_slot(account_address, storage_key2.into());
 
-        overlay_mut.insert(storage_path2.full_path(), Some(OverlayValue::Storage(U256::from(222))));
+        overlay_mut.insert(storage_path2.into(), Some(OverlayValue::Storage(U256::from(222))));
         let overlay = overlay_mut.freeze();
 
         compare_overlay_with_committed_root(&db, &mut context, &overlay);
@@ -1050,20 +1045,20 @@ mod tests {
 
         // Create an account with some storage
         let account_address = address!("0x0000000000000000000000000000000000000001");
-        let account_path = AddressPath::for_address(account_address);
+        let account_path = RawPath::from(AddressPath::for_address(account_address));
         let account = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
 
         let storage_key = U256::from(10);
         let storage_path =
-            crate::path::StoragePath::for_address_and_slot(account_address, storage_key.into());
+            RawPath::from(StoragePath::for_address_and_slot(account_address, storage_key.into()));
 
         // Set up initial state with account and storage
         db.storage_engine
             .set_values(
                 &mut context,
                 &mut [
-                    (account_path.clone().into(), Some(TrieValue::Account(account.clone()))),
-                    (storage_path.full_path(), Some(TrieValue::Storage(U256::from(111)))),
+                    (account_path, Some(TrieValue::Account(account.clone()))),
+                    (storage_path, Some(TrieValue::Storage(U256::from(111)))),
                 ],
             )
             .unwrap();
@@ -1071,7 +1066,7 @@ mod tests {
         // Test: Overlay that modifies the account value (but not the storage root)
         let mut overlay_mut = OverlayStateMut::new();
         overlay_mut.insert(
-            account_path.clone().into(),
+            account_path,
             Some(OverlayValue::Account(Account::new(
                 2,
                 U256::from(200),
@@ -1096,8 +1091,8 @@ mod tests {
         let account1_address = address!("0x0000000000000000000000000000000000000001");
         let account2_address = address!("0x0000000000000000000000000000000000000002");
 
-        let account1_path = AddressPath::for_address(account1_address);
-        let account2_path = AddressPath::for_address(account2_address);
+        let account1_path = RawPath::from(AddressPath::for_address(account1_address));
+        let account2_path = RawPath::from(AddressPath::for_address(account2_address));
 
         let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
         let account2 = Account::new(2, U256::from(200), EMPTY_ROOT_HASH, KECCAK_EMPTY);
@@ -1106,27 +1101,27 @@ mod tests {
         let storage1_key = U256::from(10);
         let storage2_key = U256::from(20);
         let storage1_path =
-            crate::path::StoragePath::for_address_and_slot(account1_address, storage1_key.into());
+            RawPath::from(StoragePath::for_address_and_slot(account1_address, storage1_key.into()));
         let storage2_path =
-            crate::path::StoragePath::for_address_and_slot(account2_address, storage2_key.into());
+            RawPath::from(StoragePath::for_address_and_slot(account2_address, storage2_key.into()));
 
         // Set up initial state
         db.storage_engine
             .set_values(
                 &mut context,
                 &mut [
-                    (account1_path.clone().into(), Some(TrieValue::Account(account1.clone()))),
-                    (account2_path.clone().into(), Some(TrieValue::Account(account2.clone()))),
-                    (storage1_path.full_path(), Some(TrieValue::Storage(U256::from(111)))),
-                    (storage2_path.full_path(), Some(TrieValue::Storage(U256::from(222)))),
+                    (account1_path, Some(TrieValue::Account(account1.clone()))),
+                    (account2_path, Some(TrieValue::Account(account2.clone()))),
+                    (storage1_path, Some(TrieValue::Storage(U256::from(111)))),
+                    (storage2_path, Some(TrieValue::Storage(U256::from(222)))),
                 ],
             )
             .unwrap();
 
         // Test: Modify just one storage value per account via overlay
         let mut overlay_mut = OverlayStateMut::new();
-        overlay_mut.insert(storage1_path.full_path(), Some(OverlayValue::Storage(U256::from(999))));
-        overlay_mut.insert(storage2_path.full_path(), Some(OverlayValue::Storage(U256::from(888))));
+        overlay_mut.insert(storage1_path, Some(OverlayValue::Storage(U256::from(999))));
+        overlay_mut.insert(storage2_path, Some(OverlayValue::Storage(U256::from(888))));
         let overlay = overlay_mut.freeze();
 
         compare_overlay_with_committed_root(&db, &mut context, &overlay);
@@ -1142,24 +1137,24 @@ mod tests {
 
         // Create one account with 2 initial storage slots
         let account_address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
-        let account_path = AddressPath::for_address(account_address);
+        let account_path = RawPath::from(AddressPath::for_address(account_address));
         let account = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
 
         let storage_key1 = U256::from(10);
         let storage_key2 = U256::from(20);
         let storage_path1 =
-            crate::path::StoragePath::for_address_and_slot(account_address, storage_key1.into());
+            RawPath::from(StoragePath::for_address_and_slot(account_address, storage_key1.into()));
         let storage_path2 =
-            crate::path::StoragePath::for_address_and_slot(account_address, storage_key2.into());
+            RawPath::from(StoragePath::for_address_and_slot(account_address, storage_key2.into()));
 
         // Set up initial state
         db.storage_engine
             .set_values(
                 &mut context,
                 &mut [
-                    (account_path.clone().into(), Some(TrieValue::Account(account.clone()))),
-                    (storage_path1.full_path(), Some(TrieValue::Storage(U256::from(111)))),
-                    (storage_path2.full_path(), Some(TrieValue::Storage(U256::from(222)))),
+                    (account_path, Some(TrieValue::Account(account.clone()))),
+                    (storage_path1, Some(TrieValue::Storage(U256::from(111)))),
+                    (storage_path2, Some(TrieValue::Storage(U256::from(222)))),
                 ],
             )
             .unwrap();
@@ -1168,15 +1163,14 @@ mod tests {
         let mut overlay_mut = OverlayStateMut::new();
 
         // Modify existing storage slot 1
-        overlay_mut
-            .insert(storage_path1.full_path(), Some(OverlayValue::Storage(U256::from(1111))));
+        overlay_mut.insert(storage_path1, Some(OverlayValue::Storage(U256::from(1111))));
 
         // Add new storage slot 3
         let storage_key3 = U256::from(40);
         let storage_path3 =
-            crate::path::StoragePath::for_address_and_slot(account_address, storage_key3.into());
+            RawPath::from(StoragePath::for_address_and_slot(account_address, storage_key3.into()));
 
-        overlay_mut.insert(storage_path3.full_path(), Some(OverlayValue::Storage(U256::from(444))));
+        overlay_mut.insert(storage_path3, Some(OverlayValue::Storage(U256::from(444))));
 
         let overlay = overlay_mut.freeze();
 
@@ -1193,31 +1187,31 @@ mod tests {
 
         // Create one account with 2 storage slots
         let account_address = address!("0x0000000000000000000000000000000000000001");
-        let account_path = AddressPath::for_address(account_address);
+        let account_path = RawPath::from(AddressPath::for_address(account_address));
         let account = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
 
         let storage_key1 = U256::from(10);
         let storage_key2 = U256::from(20);
         let storage_path1 =
-            crate::path::StoragePath::for_address_and_slot(account_address, storage_key1.into());
+            RawPath::from(StoragePath::for_address_and_slot(account_address, storage_key1.into()));
         let storage_path2 =
-            crate::path::StoragePath::for_address_and_slot(account_address, storage_key2.into());
+            RawPath::from(StoragePath::for_address_and_slot(account_address, storage_key2.into()));
 
         // Set up initial state with 2 storage slots
         db.storage_engine
             .set_values(
                 &mut context,
                 &mut [
-                    (account_path.clone().into(), Some(TrieValue::Account(account.clone()))),
-                    (storage_path1.full_path(), Some(TrieValue::Storage(U256::from(111)))),
-                    (storage_path2.full_path(), Some(TrieValue::Storage(U256::from(222)))),
+                    (account_path, Some(TrieValue::Account(account.clone()))),
+                    (storage_path1, Some(TrieValue::Storage(U256::from(111)))),
+                    (storage_path2, Some(TrieValue::Storage(U256::from(222)))),
                 ],
             )
             .unwrap();
 
         // Test: Overlay that modifies ONLY ONE storage slot, leaving the other unchanged
         let mut overlay_mut = OverlayStateMut::new();
-        overlay_mut.insert(storage_path1.full_path(), Some(OverlayValue::Storage(U256::from(999))));
+        overlay_mut.insert(storage_path1, Some(OverlayValue::Storage(U256::from(999))));
         let overlay = overlay_mut.freeze();
 
         compare_overlay_with_committed_root(&db, &mut context, &overlay);
@@ -1235,8 +1229,8 @@ mod tests {
         let account1_address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account2_address = address!("0x1234567890abcdef1234567890abcdef12345678");
 
-        let account1_path = AddressPath::for_address(account1_address);
-        let account2_path = AddressPath::for_address(account2_address);
+        let account1_path = RawPath::from(AddressPath::for_address(account1_address));
+        let account2_path = RawPath::from(AddressPath::for_address(account2_address));
 
         let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
         let account2 = Account::new(2, U256::from(200), EMPTY_ROOT_HASH, KECCAK_EMPTY);
@@ -1244,26 +1238,32 @@ mod tests {
         // Storage for account1
         let storage1_key1 = U256::from(10);
         let storage1_key2 = U256::from(20);
-        let storage1_path1 =
-            crate::path::StoragePath::for_address_and_slot(account1_address, storage1_key1.into());
-        let storage1_path2 =
-            crate::path::StoragePath::for_address_and_slot(account1_address, storage1_key2.into());
+        let storage1_path1 = RawPath::from(StoragePath::for_address_and_slot(
+            account1_address,
+            storage1_key1.into(),
+        ));
+        let storage1_path2 = RawPath::from(StoragePath::for_address_and_slot(
+            account1_address,
+            storage1_key2.into(),
+        ));
 
         // Storage for account2
         let storage2_key1 = U256::from(30);
-        let storage2_path1 =
-            crate::path::StoragePath::for_address_and_slot(account2_address, storage2_key1.into());
+        let storage2_path1 = RawPath::from(StoragePath::for_address_and_slot(
+            account2_address,
+            storage2_key1.into(),
+        ));
 
         // Set up initial state
         db.storage_engine
             .set_values(
                 &mut context,
                 &mut [
-                    (account1_path.clone().into(), Some(TrieValue::Account(account1.clone()))),
-                    (account2_path.clone().into(), Some(TrieValue::Account(account2.clone()))),
-                    (storage1_path1.full_path(), Some(TrieValue::Storage(U256::from(111)))),
-                    (storage1_path2.full_path(), Some(TrieValue::Storage(U256::from(222)))),
-                    (storage2_path1.full_path(), Some(TrieValue::Storage(U256::from(333)))),
+                    (account1_path, Some(TrieValue::Account(account1.clone()))),
+                    (account2_path, Some(TrieValue::Account(account2.clone()))),
+                    (storage1_path1, Some(TrieValue::Storage(U256::from(111)))),
+                    (storage1_path2, Some(TrieValue::Storage(U256::from(222)))),
+                    (storage2_path1, Some(TrieValue::Storage(U256::from(333)))),
                 ],
             )
             .unwrap();
@@ -1272,19 +1272,18 @@ mod tests {
         let mut overlay_mut = OverlayStateMut::new();
 
         // Modify account1's storage
-        overlay_mut
-            .insert(storage1_path1.full_path(), Some(OverlayValue::Storage(U256::from(1111))));
+        overlay_mut.insert(storage1_path1, Some(OverlayValue::Storage(U256::from(1111))));
 
         // Add new storage to account1
         let storage1_key3 = U256::from(40);
-        let storage1_path3 =
-            crate::path::StoragePath::for_address_and_slot(account1_address, storage1_key3.into());
-        overlay_mut
-            .insert(storage1_path3.full_path(), Some(OverlayValue::Storage(U256::from(444))));
+        let storage1_path3 = RawPath::from(StoragePath::for_address_and_slot(
+            account1_address,
+            storage1_key3.into(),
+        ));
+        overlay_mut.insert(storage1_path3, Some(OverlayValue::Storage(U256::from(444))));
 
         // Modify account2's storage
-        overlay_mut
-            .insert(storage2_path1.full_path(), Some(OverlayValue::Storage(U256::from(3333))));
+        overlay_mut.insert(storage2_path1, Some(OverlayValue::Storage(U256::from(3333))));
 
         let overlay = overlay_mut.freeze();
 
@@ -1303,8 +1302,8 @@ mod tests {
         let account1_address = address!("0x0000000000000000000000000000000000000001");
         let account2_address = address!("0x0000000000000000000000000000000000000002");
 
-        let account1_path = AddressPath::for_address(account1_address);
-        let account2_path = AddressPath::for_address(account2_address);
+        let account1_path = RawPath::from(AddressPath::for_address(account1_address));
+        let account2_path = RawPath::from(AddressPath::for_address(account2_address));
 
         let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
         let account2 = Account::new(2, U256::from(200), EMPTY_ROOT_HASH, KECCAK_EMPTY);
@@ -1313,26 +1312,26 @@ mod tests {
         let storage1_key = U256::from(10);
         let storage2_key = U256::from(20);
         let storage1_path =
-            crate::path::StoragePath::for_address_and_slot(account1_address, storage1_key.into());
+            RawPath::from(StoragePath::for_address_and_slot(account1_address, storage1_key.into()));
         let storage2_path =
-            crate::path::StoragePath::for_address_and_slot(account2_address, storage2_key.into());
+            RawPath::from(StoragePath::for_address_and_slot(account2_address, storage2_key.into()));
 
         // Set up initial state
         db.storage_engine
             .set_values(
                 &mut context,
                 &mut [
-                    (account1_path.clone().into(), Some(TrieValue::Account(account1.clone()))),
-                    (account2_path.clone().into(), Some(TrieValue::Account(account2.clone()))),
-                    (storage1_path.full_path(), Some(TrieValue::Storage(U256::from(111)))),
-                    (storage2_path.full_path(), Some(TrieValue::Storage(U256::from(222)))),
+                    (account1_path, Some(TrieValue::Account(account1.clone()))),
+                    (account2_path, Some(TrieValue::Account(account2.clone()))),
+                    (storage1_path, Some(TrieValue::Storage(U256::from(111)))),
+                    (storage2_path, Some(TrieValue::Storage(U256::from(222)))),
                 ],
             )
             .unwrap();
 
         // Test: Modify just one storage slot for account1
         let mut overlay_mut = OverlayStateMut::new();
-        overlay_mut.insert(storage1_path.full_path(), Some(OverlayValue::Storage(U256::from(999))));
+        overlay_mut.insert(storage1_path, Some(OverlayValue::Storage(U256::from(999))));
         let overlay = overlay_mut.freeze();
 
         compare_overlay_with_committed_root(&db, &mut context, &overlay);
@@ -1350,8 +1349,8 @@ mod tests {
         let account1_address = address!("0x0000000000000000000000000000000000000001");
         let account2_address = address!("0x0000000000000000000000000000000000000002");
 
-        let account1_path = AddressPath::for_address(account1_address);
-        let account2_path = AddressPath::for_address(account2_address);
+        let account1_path = RawPath::from(AddressPath::for_address(account1_address));
+        let account2_path = RawPath::from(AddressPath::for_address(account2_address));
 
         let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
         let account2 = Account::new(2, U256::from(200), EMPTY_ROOT_HASH, KECCAK_EMPTY);
@@ -1360,27 +1359,27 @@ mod tests {
         let storage1_key = U256::from(10);
         let storage2_key = U256::from(20);
         let storage1_path =
-            crate::path::StoragePath::for_address_and_slot(account1_address, storage1_key.into());
+            RawPath::from(StoragePath::for_address_and_slot(account1_address, storage1_key.into()));
         let storage2_path =
-            crate::path::StoragePath::for_address_and_slot(account2_address, storage2_key.into());
+            RawPath::from(StoragePath::for_address_and_slot(account2_address, storage2_key.into()));
 
         // Set up initial state
         db.storage_engine
             .set_values(
                 &mut context,
                 &mut [
-                    (account1_path.clone().into(), Some(TrieValue::Account(account1.clone()))),
-                    (account2_path.clone().into(), Some(TrieValue::Account(account2.clone()))),
-                    (storage1_path.full_path(), Some(TrieValue::Storage(U256::from(111)))),
-                    (storage2_path.full_path(), Some(TrieValue::Storage(U256::from(222)))),
+                    (account1_path, Some(TrieValue::Account(account1.clone()))),
+                    (account2_path, Some(TrieValue::Account(account2.clone()))),
+                    (storage1_path, Some(TrieValue::Storage(U256::from(111)))),
+                    (storage2_path, Some(TrieValue::Storage(U256::from(222)))),
                 ],
             )
             .unwrap();
 
         // Test: Modify storage for BOTH accounts
         let mut overlay_mut = OverlayStateMut::new();
-        overlay_mut.insert(storage1_path.full_path(), Some(OverlayValue::Storage(U256::from(999))));
-        overlay_mut.insert(storage2_path.full_path(), Some(OverlayValue::Storage(U256::from(888))));
+        overlay_mut.insert(storage1_path, Some(OverlayValue::Storage(U256::from(999))));
+        overlay_mut.insert(storage2_path, Some(OverlayValue::Storage(U256::from(888))));
         let overlay = overlay_mut.freeze();
 
         compare_overlay_with_committed_root(&db, &mut context, &overlay);
@@ -1398,25 +1397,27 @@ mod tests {
         let account1_address = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account2_address = address!("0x1234567890abcdef1234567890abcdef12345678");
 
-        let account1_path = AddressPath::for_address(account1_address);
-        let account2_path = AddressPath::for_address(account2_address);
+        let account1_path = RawPath::from(AddressPath::for_address(account1_address));
+        let account2_path = RawPath::from(AddressPath::for_address(account2_address));
 
         let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
         let account2 = Account::new(2, U256::from(200), EMPTY_ROOT_HASH, KECCAK_EMPTY);
 
         // Initial storage
         let storage1_key1 = U256::from(10);
-        let storage1_path1 =
-            crate::path::StoragePath::for_address_and_slot(account1_address, storage1_key1.into());
+        let storage1_path1 = RawPath::from(StoragePath::for_address_and_slot(
+            account1_address,
+            storage1_key1.into(),
+        ));
 
         // Set up initial state with just one storage slot
         db.storage_engine
             .set_values(
                 &mut context,
                 &mut [
-                    (account1_path.clone().into(), Some(TrieValue::Account(account1.clone()))),
-                    (account2_path.clone().into(), Some(TrieValue::Account(account2.clone()))),
-                    (storage1_path1.full_path(), Some(TrieValue::Storage(U256::from(111)))),
+                    (account1_path, Some(TrieValue::Account(account1.clone()))),
+                    (account2_path, Some(TrieValue::Account(account2.clone()))),
+                    (storage1_path1, Some(TrieValue::Storage(U256::from(111)))),
                 ],
             )
             .unwrap();
@@ -1424,11 +1425,12 @@ mod tests {
         // Test: Add NEW storage to account1
         let mut overlay_mut = OverlayStateMut::new();
         let storage1_key2 = U256::from(40); // New storage key
-        let storage1_path2 =
-            crate::path::StoragePath::for_address_and_slot(account1_address, storage1_key2.into());
+        let storage1_path2 = RawPath::from(StoragePath::for_address_and_slot(
+            account1_address,
+            storage1_key2.into(),
+        ));
 
-        overlay_mut
-            .insert(storage1_path2.full_path(), Some(OverlayValue::Storage(U256::from(444))));
+        overlay_mut.insert(storage1_path2, Some(OverlayValue::Storage(U256::from(444))));
         let overlay = overlay_mut.freeze();
 
         compare_overlay_with_committed_root(&db, &mut context, &overlay);
@@ -1451,17 +1453,16 @@ mod tests {
         db.storage_engine
             .set_values(
                 &mut context,
-                &mut [(account_path.clone().into(), Some(TrieValue::Account(account.clone())))],
+                &mut [(account_path.into(), Some(TrieValue::Account(account.clone())))],
             )
             .unwrap();
 
         // Test: Add storage to account that had no storage before
         let mut overlay_mut = OverlayStateMut::new();
         let storage_key = U256::from(42);
-        let storage_path =
-            crate::path::StoragePath::for_address_and_slot(account_address, storage_key.into());
+        let storage_path = StoragePath::for_address_and_slot(account_address, storage_key.into());
         let storage_value = U256::from(123);
-        overlay_mut.insert(storage_path.full_path(), Some(OverlayValue::Storage(storage_value)));
+        overlay_mut.insert(storage_path.into(), Some(OverlayValue::Storage(storage_value)));
         let overlay = overlay_mut.freeze();
 
         compare_overlay_with_committed_root(&db, &mut context, &overlay);
@@ -1477,7 +1478,7 @@ mod tests {
             let mut context = db.storage_engine.write_context();
             let mut rng = rand::rng();
 
-            let mut changes: Vec<(Nibbles, Option<TrieValue>)> = Vec::with_capacity(1000);
+            let mut changes: Vec<(RawPath, Option<TrieValue>)> = Vec::with_capacity(1000);
 
             for i in 0..1000 {
                 let account_address = Address::random();
@@ -1502,10 +1503,10 @@ mod tests {
                         // For half of the sampled accounts, create new modified account
                         let mut new_account = account.clone();
                         new_account.balance = U256::from(rng.random::<u64>()); // Random new balance
-                        overlay_mut.insert(path.clone(), Some(OverlayValue::Account(new_account)));
+                        overlay_mut.insert(*path, Some(OverlayValue::Account(new_account)));
                     } else {
                         // For other half, mark for deletion
-                        overlay_mut.insert(path.clone(), None);
+                        overlay_mut.insert(*path, None);
                     }
                 }
             }
@@ -1524,13 +1525,13 @@ mod tests {
         let mut context = db.storage_engine.write_context();
 
         let account_address = Address::random();
-        let account_path = AddressPath::for_address(account_address);
+        let account_path = RawPath::from(AddressPath::for_address(account_address));
         let account = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
 
         db.storage_engine
             .set_values(
                 &mut context,
-                &mut [(account_path.clone().into(), Some(TrieValue::Account(account.clone())))],
+                &mut [(account_path, Some(TrieValue::Account(account.clone())))],
             )
             .unwrap();
 
@@ -1539,33 +1540,33 @@ mod tests {
         let new_account_path = AddressPath::for_address(new_address);
         let new_account = Account::new(2, U256::from(200), EMPTY_ROOT_HASH, KECCAK_EMPTY);
         overlay_mut.insert(
-            new_account_path.clone().into(),
+            RawPath::from(&new_account_path),
             Some(OverlayValue::Account(new_account.clone())),
         );
 
         let storage_key1 = B256::right_padding_from(&[1, 1, 2, 3]);
-        let storage_path1 = crate::path::StoragePath::for_address_path_and_slot_hash(
+        let storage_path1 = RawPath::from(StoragePath::for_address_path_and_slot_hash(
             new_account_path.clone(),
             Nibbles::unpack(storage_key1),
-        );
+        ));
         let storage_value1 = U256::from(123);
-        overlay_mut.insert(storage_path1.full_path(), Some(OverlayValue::Storage(storage_value1)));
+        overlay_mut.insert(storage_path1, Some(OverlayValue::Storage(storage_value1)));
 
         let storage_key2 = B256::right_padding_from(&[1, 1, 2, 0]);
-        let storage_path2 = crate::path::StoragePath::for_address_path_and_slot_hash(
+        let storage_path2 = RawPath::from(StoragePath::for_address_path_and_slot_hash(
             new_account_path.clone(),
             Nibbles::unpack(storage_key2),
-        );
+        ));
         let storage_value2 = U256::from(234);
-        overlay_mut.insert(storage_path2.full_path(), Some(OverlayValue::Storage(storage_value2)));
+        overlay_mut.insert(storage_path2, Some(OverlayValue::Storage(storage_value2)));
 
         let storage_key3 = B256::right_padding_from(&[2, 2, 0, 0]);
-        let storage_path3 = crate::path::StoragePath::for_address_path_and_slot_hash(
+        let storage_path3 = RawPath::from(StoragePath::for_address_path_and_slot_hash(
             new_account_path.clone(),
             Nibbles::unpack(storage_key3),
-        );
+        ));
         let storage_value3 = U256::from(345);
-        overlay_mut.insert(storage_path3.full_path(), Some(OverlayValue::Storage(storage_value3)));
+        overlay_mut.insert(storage_path3, Some(OverlayValue::Storage(storage_value3)));
 
         let overlay = overlay_mut.freeze();
 
@@ -1581,31 +1582,31 @@ mod tests {
         let mut context = db.storage_engine.write_context();
 
         let account_address = Address::random();
-        let account_path = AddressPath::for_address(account_address);
+        let account_path = RawPath::from(AddressPath::for_address(account_address));
         let account = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
 
         let storage_key1 = U256::from(42);
         let storage_key2 = U256::from(43);
         let storage_path1 =
-            crate::path::StoragePath::for_address_and_slot(account_address, storage_key1.into());
+            RawPath::from(StoragePath::for_address_and_slot(account_address, storage_key1.into()));
         let storage_path2 =
-            crate::path::StoragePath::for_address_and_slot(account_address, storage_key2.into());
+            RawPath::from(StoragePath::for_address_and_slot(account_address, storage_key2.into()));
 
         db.storage_engine
             .set_values(
                 &mut context,
                 &mut [
-                    (account_path.clone().into(), Some(TrieValue::Account(account.clone()))),
-                    (storage_path1.full_path(), Some(TrieValue::Storage(U256::from(111)))),
-                    (storage_path2.full_path(), Some(TrieValue::Storage(U256::from(222)))),
+                    (account_path, Some(TrieValue::Account(account.clone()))),
+                    (storage_path1, Some(TrieValue::Storage(U256::from(111)))),
+                    (storage_path2, Some(TrieValue::Storage(U256::from(222)))),
                 ],
             )
             .unwrap();
 
         let mut overlay_mut = OverlayStateMut::new();
         let new_account = Account::new(1, U256::from(200), EMPTY_ROOT_HASH, KECCAK_EMPTY);
-        overlay_mut.insert(account_path.clone().into(), Some(OverlayValue::Account(new_account)));
-        overlay_mut.insert(storage_path1.full_path(), Some(OverlayValue::Storage(U256::from(333))));
+        overlay_mut.insert(account_path, Some(OverlayValue::Account(new_account)));
+        overlay_mut.insert(storage_path1, Some(OverlayValue::Storage(U256::from(333))));
 
         let overlay = overlay_mut.freeze();
 
@@ -1640,36 +1641,36 @@ mod tests {
         // First storage path: 0x340123aa...aa (remaining 60 nibbles are 'a')
         let mut storage1_nibbles = vec![0x3, 0x4, 0x0, 0x0, 0x0, 0x0]; // 6 nibbles
         storage1_nibbles.extend(vec![0xa; 58]); // Fill remaining 58 nibbles with 'a' to make 64 total
-        let storage1_path = crate::path::StoragePath::for_address_path_and_slot_hash(
+        let storage1_path = RawPath::from(StoragePath::for_address_path_and_slot_hash(
             account_path.clone(),
             Nibbles::from_nibbles(storage1_nibbles),
-        );
+        ));
 
         // Second storage path: 0x340123bb...bb (remaining 60 nibbles are 'b')
         let mut storage2_nibbles = vec![0x3, 0x4, 0x0, 0x0, 0x0, 0x0]; // 6 nibbles
         storage2_nibbles.extend(vec![0xb; 58]); // Fill remaining 58 nibbles with 'b' to make 64 total
-        let storage2_path = crate::path::StoragePath::for_address_path_and_slot_hash(
+        let storage2_path = RawPath::from(StoragePath::for_address_path_and_slot_hash(
             account_path.clone(),
             Nibbles::from_nibbles(storage2_nibbles),
-        );
+        ));
 
         // Third storage path: 0x3411...11 (remaining 62 nibbles are '1')
         let mut storage3_nibbles = vec![0x3, 0x4, 0x1]; // 3 nibbles
         storage3_nibbles.extend(vec![0x1; 61]); // Fill remaining 61 nibbles with '1' to make 64 total
-        let storage3_path = crate::path::StoragePath::for_address_path_and_slot_hash(
+        let storage3_path = RawPath::from(StoragePath::for_address_path_and_slot_hash(
             account_path.clone(),
             Nibbles::from_nibbles(storage3_nibbles),
-        );
+        ));
 
         // Set up initial state with the account and storage that creates the branch structure
         db.storage_engine
             .set_values(
                 &mut context,
                 &mut [
-                    (account_path.clone().into(), Some(TrieValue::Account(account.clone()))),
-                    (storage1_path.full_path(), Some(TrieValue::Storage(U256::from(111)))),
-                    (storage2_path.full_path(), Some(TrieValue::Storage(U256::from(222)))),
-                    (storage3_path.full_path(), Some(TrieValue::Storage(U256::from(333)))),
+                    (RawPath::from(&account_path), Some(TrieValue::Account(account.clone()))),
+                    (storage1_path, Some(TrieValue::Storage(U256::from(111)))),
+                    (storage2_path, Some(TrieValue::Storage(U256::from(222)))),
+                    (storage3_path, Some(TrieValue::Storage(U256::from(333)))),
                 ],
             )
             .unwrap();
@@ -1683,14 +1684,13 @@ mod tests {
             0xe, 0x0, 0xc, 0xd, 0xb, 0xb, 0x7, 0x2, 0x3, 0x5, 0x1, 0xb, 0x0, 0xc, 0xa, 0x7, 0xb,
             0x4, 0xd, 0xc, 0x4, 0x2, 0xf, 0x5, 0x0, 0xd, 0xd, 0x9, 0xb, 0x8,
         ]);
-        let overlay_storage_path = crate::path::StoragePath::for_address_path_and_slot_hash(
+        let overlay_storage_path = RawPath::from(StoragePath::for_address_path_and_slot_hash(
             account_path.clone(),
             overlay_storage_nibbles,
-        );
+        ));
 
         let mut overlay_mut = OverlayStateMut::new();
-        overlay_mut
-            .insert(overlay_storage_path.full_path(), Some(OverlayValue::Storage(U256::from(999))));
+        overlay_mut.insert(overlay_storage_path, Some(OverlayValue::Storage(U256::from(999))));
         let overlay = overlay_mut.freeze();
 
         // This triggered a panic due to lexicographic ordering violation
@@ -1719,7 +1719,7 @@ mod tests {
         db.storage_engine
             .set_values(
                 &mut context,
-                &mut [(account_path.clone().into(), Some(TrieValue::Account(account.clone())))],
+                &mut [(account_path.into(), Some(TrieValue::Account(account.clone())))],
             )
             .unwrap();
 
@@ -1732,7 +1732,7 @@ mod tests {
 
         let mut overlay_mut = OverlayStateMut::new();
         overlay_mut.insert(
-            Nibbles::from_nibbles([0x4, 0x5, 0x7, 0x0]),
+            RawPath::from_nibbles(&[0x4, 0x5, 0x7, 0x0]),
             Some(OverlayValue::Hash(B256::random())),
         );
         overlay_mut.insert(
