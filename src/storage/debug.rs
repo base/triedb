@@ -7,6 +7,7 @@ use crate::{
         TrieValue,
     },
     page::{Page, PageId, PageManager, SlottedPage},
+    path::RawPath,
     pointer::Pointer,
     snapshot::SnapshotId,
     storage::{
@@ -14,7 +15,6 @@ use crate::{
         value::Value,
     },
 };
-use alloy_trie::{nybbles, Nibbles};
 use std::{collections::HashSet, fmt::Debug, io, path::Path};
 
 #[derive(Default)]
@@ -197,7 +197,7 @@ impl<'a> StorageDebugger<'a> {
     pub fn print_path<W: io::Write>(
         &self,
         context: &TransactionContext,
-        path: &Nibbles,
+        path: &RawPath,
         mut buf: W,
         verbosity_level: u8,
     ) -> Result<(), Error> {
@@ -232,7 +232,7 @@ impl<'a> StorageDebugger<'a> {
     fn print_path_helper(
         &self,
         context: &TransactionContext,
-        path: &Nibbles,
+        path: &RawPath,
         path_offset: usize,
         slotted_page: SlottedPage<'_>,
         page_index: u8,
@@ -247,14 +247,14 @@ impl<'a> StorageDebugger<'a> {
         }
 
         let common_prefix_length =
-            nybbles::common_prefix_length(&path[path_offset..], node.prefix());
+            path.slice(path_offset..).common_prefix_length(&node.prefix().into());
 
         if common_prefix_length < node.prefix().len() {
             writeln!(buf, "NODE NOT FOUND\n")?;
             return Ok(());
         }
 
-        let remaining_path = &path[path_offset + common_prefix_length..];
+        let remaining_path = path.slice(path_offset + common_prefix_length..);
 
         if remaining_path.is_empty() {
             //write only this node's information to file
@@ -269,7 +269,7 @@ impl<'a> StorageDebugger<'a> {
                 (storage_root.as_ref(), path_offset + common_prefix_length)
             }
             Branch { ref children } => (
-                children[remaining_path[0] as usize].as_ref(),
+                children[remaining_path.get_unchecked(0) as usize].as_ref(),
                 path_offset + common_prefix_length + 1,
             ),
             _ => unreachable!(),

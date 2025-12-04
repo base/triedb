@@ -1,6 +1,5 @@
-use crate::{account::Account, node::TrieValue};
+use crate::{account::Account, node::TrieValue, path::RawPath};
 use alloy_primitives::{StorageValue, B256, U256};
-use alloy_trie::Nibbles;
 use std::{cmp::min, sync::Arc};
 
 #[derive(Debug, Clone)]
@@ -26,7 +25,7 @@ impl TryFrom<OverlayValue> for TrieValue {
 /// Changes are stored unsorted for fast insertion, then sorted when frozen.
 #[derive(Debug, Clone, Default)]
 pub struct OverlayStateMut {
-    changes: Vec<(Nibbles, Option<OverlayValue>)>,
+    changes: Vec<(RawPath, Option<OverlayValue>)>,
 }
 
 impl OverlayStateMut {
@@ -42,7 +41,7 @@ impl OverlayStateMut {
 
     /// Inserts a change into the overlay state.
     /// Multiple changes to the same path will keep the latest value.
-    pub fn insert(&mut self, path: Nibbles, value: Option<OverlayValue>) {
+    pub fn insert(&mut self, path: RawPath, value: Option<OverlayValue>) {
         // For now, just append. We could optimize by checking for duplicates,
         // but the freeze operation will handle deduplication anyway.
 
@@ -79,11 +78,11 @@ impl OverlayStateMut {
 
         // Deduplicate by path, keeping the last occurrence of each path
         let mut deduped = Vec::with_capacity(self.changes.len());
-        let mut last_path: Option<&Nibbles> = None;
+        let mut last_path: Option<&RawPath> = None;
 
         for (path, value) in &self.changes {
             if last_path != Some(path) {
-                deduped.push((path.clone(), value.clone()));
+                deduped.push((*path, value.clone()));
                 last_path = Some(path);
             } else {
                 // Update the last entry with the newer value
@@ -93,7 +92,7 @@ impl OverlayStateMut {
             }
         }
 
-        let data: Arc<[(Nibbles, Option<OverlayValue>)]> = Arc::from(deduped.into_boxed_slice());
+        let data: Arc<[(RawPath, Option<OverlayValue>)]> = Arc::from(deduped.into_boxed_slice());
         let len = data.len();
         OverlayState { data, start_idx: 0, end_idx: len, prefix_offset: 0 }
     }
@@ -112,7 +111,7 @@ impl OverlayStateMut {
 /// The Arc<[...]> provides thread-safe reference counting for the underlying data.
 #[derive(Debug, Clone)]
 pub struct OverlayState {
-    data: Arc<[(Nibbles, Option<OverlayValue>)]>,
+    data: Arc<[(RawPath, Option<OverlayValue>)]>,
     start_idx: usize,
     end_idx: usize,
     prefix_offset: usize,
@@ -125,31 +124,31 @@ impl OverlayState {
     }
 
     #[cfg(test)]
-    pub fn data(&self) -> &[(Nibbles, Option<OverlayValue>)] {
+    pub fn data(&self) -> &[(RawPath, Option<OverlayValue>)] {
         &self.data
     }
 
-    pub fn get(&self, index: usize) -> Option<(&[u8], &Option<OverlayValue>)> {
+    pub fn get(&self, index: usize) -> Option<(RawPath, Option<&OverlayValue>)> {
         let slice = self.effective_slice();
         if index < slice.len() {
-            Some((&slice[index].0[self.prefix_offset..], &slice[index].1))
+            Some((slice[index].0.slice(self.prefix_offset..), slice[index].1.as_ref()))
         } else {
             None
         }
     }
 
     #[inline]
-    pub fn first(&self) -> Option<(&[u8], &Option<OverlayValue>)> {
+    pub fn first(&self) -> Option<(RawPath, Option<&OverlayValue>)> {
         if self.is_empty() {
             None
         } else {
             let (path, value) = &self.data[self.start_idx];
-            Some((&path[self.prefix_offset..], value))
+            Some((path.slice(self.prefix_offset..), value.as_ref()))
         }
     }
 
     /// Returns the effective slice of data for this overlay, respecting bounds.
-    pub fn effective_slice(&self) -> &[(Nibbles, Option<OverlayValue>)] {
+    pub fn effective_slice(&self) -> &[(RawPath, Option<OverlayValue>)] {
         &self.data[self.start_idx..self.end_idx]
     }
 
@@ -166,7 +165,7 @@ impl OverlayState {
     /// Looks up a specific path in the overlay.
     /// Returns Some(value) if found, None if not in overlay.
     /// The path is adjusted by the prefix_offset before lookup.
-    pub fn lookup(&self, path: &[u8]) -> Option<&Option<OverlayValue>> {
+    pub fn lookup(&self, path: &RawPath) -> Option<&Option<OverlayValue>> {
         let slice = self.effective_slice();
         match slice.binary_search_by(|(p, _)| self.compare_with_offset(p, path)) {
             Ok(index) => Some(&slice[index].1),
@@ -223,8 +222,8 @@ impl OverlayState {
     /// Returns the first index of the effective slice with the given nibbles prefix
     fn find_start_index_with_prefix(
         &self,
-        effective_slice: &[(Nibbles, Option<OverlayValue>)],
-        prefix: &[u8],
+        effective_slice: &[(RawPath, Option<OverlayValue>)],
+        prefix: &RawPath,
     ) -> usize {
         effective_slice
             .binary_search_by(|(p, _)| self.compare_with_offset(p, prefix))
@@ -235,26 +234,30 @@ impl OverlayState {
     /// This is used to find the end of a prefix range in the overlay.
     fn find_end_index_with_prefix(
         &self,
-        effective_slice: &[(Nibbles, Option<OverlayValue>)],
-        prefix: &[u8],
+        effective_slice: &[(RawPath, Option<OverlayValue>)],
+        prefix: &RawPath,
     ) -> usize {
         effective_slice.partition_point(|(stored_path, _)| {
             if stored_path.len() < self.prefix_offset {
                 true
             } else {
-                let adjusted_path = &stored_path[self.prefix_offset..];
-                &adjusted_path[..min(adjusted_path.len(), prefix.len())] <= prefix
+                let adjusted_path = stored_path.slice(self.prefix_offset..);
+                &adjusted_path.slice(..min(adjusted_path.len(), prefix.len())) <= prefix
             }
         })
     }
 
     /// Helper method to compare a stored path with a target path, applying prefix_offset.
     /// Returns the comparison result of the offset-adjusted stored path vs target path.
-    fn compare_with_offset(&self, stored_path: &[u8], target_path: &[u8]) -> std::cmp::Ordering {
+    fn compare_with_offset(
+        &self,
+        stored_path: &RawPath,
+        target_path: &RawPath,
+    ) -> std::cmp::Ordering {
         if stored_path.len() < self.prefix_offset {
             std::cmp::Ordering::Less
         } else {
-            let adjusted_path = &stored_path[self.prefix_offset..];
+            let adjusted_path = stored_path.slice(self.prefix_offset..);
             adjusted_path.cmp(target_path)
         }
     }
@@ -284,7 +287,10 @@ impl OverlayState {
     /// - before: all changes before the prefix
     /// - with_prefix: all changes with the prefix
     /// - after: all changes after the prefix
-    pub fn sub_slice_by_prefix(&self, prefix: &[u8]) -> (OverlayState, OverlayState, OverlayState) {
+    pub fn sub_slice_by_prefix(
+        &self,
+        prefix: &RawPath,
+    ) -> (OverlayState, OverlayState, OverlayState) {
         let slice = self.effective_slice();
 
         let start_index = self.find_start_index_with_prefix(slice, prefix);
@@ -299,7 +305,7 @@ impl OverlayState {
     /// Creates a zero-copy sub-slice containing only changes that affect the subtree
     /// rooted at the given path prefix. This is used during recursive trie traversal
     /// to filter overlay changes relevant to each subtree.
-    pub fn sub_slice_for_prefix(&self, prefix: &[u8]) -> OverlayState {
+    pub fn sub_slice_for_prefix(&self, prefix: &RawPath) -> OverlayState {
         if self.is_empty() {
             return OverlayState::empty();
         }
@@ -314,20 +320,20 @@ impl OverlayState {
 
     /// Returns an iterator over all changes in the overlay, respecting slice bounds.
     /// The paths are adjusted by the prefix_offset.
-    pub fn iter(&self) -> impl Iterator<Item = (&[u8], &Option<OverlayValue>)> {
+    pub fn iter(&self) -> impl Iterator<Item = (RawPath, Option<&OverlayValue>)> {
         self.effective_slice().iter().filter_map(move |(path, value)| {
             if path.len() > self.prefix_offset {
-                let adjusted_path = &path.as_slice()[self.prefix_offset..];
-                Some((adjusted_path, value))
+                let adjusted_path = path.slice(self.prefix_offset..);
+                Some((adjusted_path, value.as_ref()))
             } else {
                 None
             }
         })
     }
 
-    pub fn contains_prefix_of(&self, path: &[u8]) -> bool {
+    pub fn contains_prefix_of(&self, path: &RawPath) -> bool {
         // Check for exact match or any path that starts with the given path after applying offset
-        self.iter().any(|(overlay_path, _)| path.starts_with(overlay_path))
+        self.iter().any(|(overlay_path, _)| path.starts_with(&overlay_path))
     }
 }
 
@@ -336,7 +342,7 @@ mod tests {
     use super::*;
     use crate::account::Account;
     use alloy_primitives::U256;
-    use alloy_trie::{Nibbles, EMPTY_ROOT_HASH, KECCAK_EMPTY};
+    use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
 
     fn test_account() -> Account {
         Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY)
@@ -348,12 +354,12 @@ mod tests {
         assert!(overlay.is_empty());
         assert_eq!(overlay.len(), 0);
 
-        let path1 = Nibbles::from_nibbles([1, 2, 3, 4]);
-        let path2 = Nibbles::from_nibbles([5, 6, 7, 8]);
+        let path1 = RawPath::from_nibbles(&[1, 2, 3, 4]);
+        let path2 = RawPath::from_nibbles(&[5, 6, 7, 8]);
         let account = test_account();
 
-        overlay.insert(path1.clone(), Some(OverlayValue::Account(account.clone())));
-        overlay.insert(path2.clone(), None); // Tombstone
+        overlay.insert(path1, Some(OverlayValue::Account(account.clone())));
+        overlay.insert(path2, None); // Tombstone
 
         assert!(!overlay.is_empty());
         assert_eq!(overlay.len(), 2);
@@ -362,12 +368,12 @@ mod tests {
     #[test]
     fn test_freeze_and_lookup() {
         let mut mutable = OverlayStateMut::new();
-        let path1 = Nibbles::from_nibbles([1, 2, 3, 4]);
-        let path2 = Nibbles::from_nibbles([5, 6, 7, 8]);
+        let path1 = RawPath::from_nibbles(&[1, 2, 3, 4]);
+        let path2 = RawPath::from_nibbles(&[5, 6, 7, 8]);
         let account = test_account();
 
-        mutable.insert(path1.clone(), Some(OverlayValue::Account(account.clone())));
-        mutable.insert(path2.clone(), None);
+        mutable.insert(path1, Some(OverlayValue::Account(account.clone())));
+        mutable.insert(path2, None);
 
         let frozen = mutable.freeze();
 
@@ -382,7 +388,7 @@ mod tests {
         assert!(result2.is_some());
         assert!(result2.unwrap().is_none()); // Tombstone
 
-        let path3 = Nibbles::from_nibbles([9, 10, 11, 12]);
+        let path3 = RawPath::from_nibbles(&[9, 10, 11, 12]);
         let result3 = frozen.lookup(&path3);
         assert!(result3.is_none());
     }
@@ -390,14 +396,14 @@ mod tests {
     #[test]
     fn test_deduplication_on_freeze() {
         let mut mutable = OverlayStateMut::new();
-        let path = Nibbles::from_nibbles([1, 2, 3, 4]);
+        let path = RawPath::from_nibbles(&[1, 2, 3, 4]);
         let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
         let account2 = Account::new(2, U256::from(200), EMPTY_ROOT_HASH, KECCAK_EMPTY);
 
         // Insert multiple values for the same path
-        mutable.insert(path.clone(), Some(OverlayValue::Account(account1)));
-        mutable.insert(path.clone(), Some(OverlayValue::Account(account2.clone())));
-        mutable.insert(path.clone(), None); // Tombstone should win
+        mutable.insert(path, Some(OverlayValue::Account(account1)));
+        mutable.insert(path, Some(OverlayValue::Account(account2.clone())));
+        mutable.insert(path, None); // Tombstone should win
 
         let frozen = mutable.freeze();
 
@@ -414,32 +420,32 @@ mod tests {
 
         // Add some paths with common prefixes
         mutable.insert(
-            Nibbles::from_nibbles([1, 2, 3, 4]),
+            RawPath::from_nibbles(&[1, 2, 3, 4]),
             Some(OverlayValue::Account(account.clone())),
         );
         mutable.insert(
-            Nibbles::from_nibbles([1, 2, 5, 6]),
+            RawPath::from_nibbles(&[1, 2, 5, 6]),
             Some(OverlayValue::Account(account.clone())),
         );
         mutable.insert(
-            Nibbles::from_nibbles([1, 3, 7, 8]),
+            RawPath::from_nibbles(&[1, 3, 7, 8]),
             Some(OverlayValue::Account(account.clone())),
         );
         mutable.insert(
-            Nibbles::from_nibbles([2, 3, 4, 5]),
+            RawPath::from_nibbles(&[2, 3, 4, 5]),
             Some(OverlayValue::Account(account.clone())),
         );
 
         let frozen = mutable.freeze();
 
         // Find entries with prefix [1, 2]
-        let prefix = Nibbles::from_nibbles([1, 2]);
+        let prefix = RawPath::from_nibbles(&[1, 2]);
         let subset = frozen.sub_slice_for_prefix(&prefix);
 
         assert_eq!(subset.len(), 2); // Should match first two entries
 
         // Find entries with prefix [1]
-        let prefix = Nibbles::from_nibbles([1]);
+        let prefix = RawPath::from_nibbles(&[1]);
         let subset = frozen.sub_slice_for_prefix(&prefix);
 
         assert_eq!(subset.len(), 3); // Should match first three entries
@@ -451,31 +457,31 @@ mod tests {
         let account = test_account();
 
         mutable.insert(
-            Nibbles::from_nibbles([1, 2, 3, 4]),
+            RawPath::from_nibbles(&[1, 2, 3, 4]),
             Some(OverlayValue::Account(account.clone())),
         );
         mutable.insert(
-            Nibbles::from_nibbles([1, 2, 5, 6]),
+            RawPath::from_nibbles(&[1, 2, 5, 6]),
             Some(OverlayValue::Account(account.clone())),
         );
 
         let frozen = mutable.freeze();
 
         // Test exact match
-        assert!(frozen.contains_prefix_of(&[1, 2, 3, 4]));
-        assert!(frozen.contains_prefix_of(&[1, 2, 5, 6]));
+        assert!(frozen.contains_prefix_of(&RawPath::from_nibbles(&[1, 2, 3, 4])));
+        assert!(frozen.contains_prefix_of(&RawPath::from_nibbles(&[1, 2, 5, 6])));
 
         // Test child path
-        assert!(frozen.contains_prefix_of(&[1, 2, 3, 4, 5]));
-        assert!(frozen.contains_prefix_of(&[1, 2, 5, 6, 15, 14, 13, 12]));
+        assert!(frozen.contains_prefix_of(&RawPath::from_nibbles(&[1, 2, 3, 4, 5])));
+        assert!(frozen.contains_prefix_of(&RawPath::from_nibbles(&[1, 2, 5, 6, 15, 14, 13, 12])));
 
         // Test parent path
-        assert!(!frozen.contains_prefix_of(&[1, 2]));
-        assert!(!frozen.contains_prefix_of(&[1, 2, 3]));
-        assert!(!frozen.contains_prefix_of(&[1, 2, 5]));
+        assert!(!frozen.contains_prefix_of(&RawPath::from_nibbles(&[1, 2])));
+        assert!(!frozen.contains_prefix_of(&RawPath::from_nibbles(&[1, 2, 3])));
+        assert!(!frozen.contains_prefix_of(&RawPath::from_nibbles(&[1, 2, 5])));
 
         // Test unrelated path
-        assert!(!frozen.contains_prefix_of(&[7, 8, 9, 10]));
+        assert!(!frozen.contains_prefix_of(&RawPath::from_nibbles(&[7, 8, 9, 10])));
     }
 
     #[test]
@@ -486,7 +492,7 @@ mod tests {
         assert!(frozen.is_empty());
         assert_eq!(frozen.len(), 0);
 
-        let path = Nibbles::from_nibbles([1, 2, 3, 4]);
+        let path = RawPath::from_nibbles(&[1, 2, 3, 4]);
         assert!(frozen.lookup(&path).is_none());
         assert!(!frozen.contains_prefix_of(&path));
 
@@ -517,15 +523,15 @@ mod tests {
         storage_path3.extend([13, 14]);
 
         mutable.insert(
-            Nibbles::from_nibbles(storage_path1.clone()),
+            RawPath::from_nibbles(&storage_path1.clone()),
             Some(OverlayValue::Account(account.clone())),
         );
         mutable.insert(
-            Nibbles::from_nibbles(storage_path2.clone()),
+            RawPath::from_nibbles(&storage_path2.clone()),
             Some(OverlayValue::Account(account.clone())),
         );
         mutable.insert(
-            Nibbles::from_nibbles(storage_path3.clone()),
+            RawPath::from_nibbles(&storage_path3.clone()),
             Some(OverlayValue::Account(account.clone())),
         );
 
@@ -536,10 +542,10 @@ mod tests {
         let storage_overlay = frozen.with_prefix_offset(4);
 
         // Test lookup with offset
-        let storage_key1 = Nibbles::from_nibbles([5, 6]); // Should find storage_path1
-        let storage_key2 = Nibbles::from_nibbles([7, 8]); // Should find storage_path2
-        let storage_key3 = Nibbles::from_nibbles([13, 14]); // Should find storage_path3
-        let storage_key_missing = Nibbles::from_nibbles([15, 15]); // Should not find
+        let storage_key1 = RawPath::from_nibbles(&[5, 6]); // Should find storage_path1
+        let storage_key2 = RawPath::from_nibbles(&[7, 8]); // Should find storage_path2
+        let storage_key3 = RawPath::from_nibbles(&[13, 14]); // Should find storage_path3
+        let storage_key_missing = RawPath::from_nibbles(&[15, 15]); // Should not find
 
         assert!(storage_overlay.lookup(&storage_key1).is_some());
         assert!(storage_overlay.lookup(&storage_key2).is_some());
@@ -552,13 +558,13 @@ mod tests {
 
         // The paths should be the storage-relative parts (after prefix_offset)
         let expected_paths = [
-            Nibbles::from_nibbles([5, 6]),
-            Nibbles::from_nibbles([7, 8]),
-            Nibbles::from_nibbles([13, 14]),
+            RawPath::from_nibbles(&[5, 6]),
+            RawPath::from_nibbles(&[7, 8]),
+            RawPath::from_nibbles(&[13, 14]),
         ];
 
         for (i, (path, _)) in iter_results.iter().enumerate() {
-            assert_eq!(*path, expected_paths[i].as_slice());
+            assert_eq!(path, &expected_paths[i]);
         }
     }
 
@@ -579,33 +585,33 @@ mod tests {
 
         for path in &paths {
             mutable
-                .insert(Nibbles::from_nibbles(*path), Some(OverlayValue::Account(account.clone())));
+                .insert(RawPath::from_nibbles(path), Some(OverlayValue::Account(account.clone())));
         }
 
         let frozen = mutable.freeze();
         let storage_overlay = frozen.with_prefix_offset(4); // Strip 4-nibble account prefix
 
         // Test sub_slice_before_prefix
-        let split_point = [5, 0]; // Storage key [5, 0]
+        let split_point = RawPath::from_nibbles(&[5, 0]); // Storage key [5, 0]
 
         let (before, with_prefix, after) = storage_overlay.sub_slice_by_prefix(&split_point);
 
         // Before should contain storage keys [2, 0] (< [5, 0])
         assert_eq!(before.len(), 1);
         let before_paths: Vec<_> = before.iter().map(|(path, _)| path).collect();
-        assert!(before_paths.contains(&[2, 0].as_slice()));
+        assert!(before_paths.contains(&RawPath::from_nibbles(&[2, 0])));
 
         // With prefix should contain storage keys [5, 0]
         assert_eq!(with_prefix.len(), 1);
         let with_prefix_paths: Vec<_> = with_prefix.iter().map(|(path, _)| path).collect();
-        assert!(with_prefix_paths.contains(&[5, 0].as_slice()));
+        assert!(with_prefix_paths.contains(&RawPath::from_nibbles(&[5, 0])));
 
         // After should contain storage keys [8, 0] and [9, 0] (strictly > [5, 0])
         assert_eq!(after.len(), 2);
         let after_paths: Vec<_> = after.iter().map(|(path, _)| path).collect();
-        assert!(!after_paths.contains(&[5, 0].as_slice())); // Strictly after, so [5, 0] not included
-        assert!(after_paths.contains(&[8, 0].as_slice()));
-        assert!(after_paths.contains(&[9, 0].as_slice()));
+        assert!(!after_paths.contains(&RawPath::from_nibbles(&[5, 0]))); // Strictly after, so [5, 0] not included
+        assert!(after_paths.contains(&RawPath::from_nibbles(&[8, 0])));
+        assert!(after_paths.contains(&RawPath::from_nibbles(&[9, 0])));
     }
 
     #[test]
@@ -614,22 +620,22 @@ mod tests {
         let account = test_account();
 
         // Create storage overlays for two different accounts
-        let account1_prefix = [1, 0, 0, 0]; // Account 1: 4 nibbles
-        let _account2_prefix = [2, 0, 0, 0]; // Account 2: 4 nibbles
+        let account1_prefix = RawPath::from_nibbles(&[1, 0, 0, 0]); // Account 1: 4 nibbles
+        let _account2_prefix = RawPath::from_nibbles(&[2, 0, 0, 0]); // Account 2: 4 nibbles
 
         // Storage for account 1
         mutable.insert(
-            Nibbles::from_nibbles([1, 0, 0, 0, 5, 5]),
+            RawPath::from_nibbles(&[1, 0, 0, 0, 5, 5]),
             Some(OverlayValue::Account(account.clone())),
         );
         mutable.insert(
-            Nibbles::from_nibbles([1, 0, 0, 0, 5, 6]),
+            RawPath::from_nibbles(&[1, 0, 0, 0, 5, 6]),
             Some(OverlayValue::Account(account.clone())),
         );
 
         // Storage for account 2
         mutable.insert(
-            Nibbles::from_nibbles([2, 0, 0, 0, 7, 7]),
+            RawPath::from_nibbles(&[2, 0, 0, 0, 7, 7]),
             Some(OverlayValue::Account(account.clone())),
         );
 
@@ -641,11 +647,16 @@ mod tests {
 
         // Now test with prefix_offset - should convert to storage-relative paths
         let storage_overlay = account1_storage.with_prefix_offset(4);
-        let storage_with_prefix5 = storage_overlay.sub_slice_for_prefix(&[5]);
+        let storage_with_prefix5 =
+            storage_overlay.sub_slice_for_prefix(&RawPath::from_nibbles(&[5]));
 
         assert_eq!(storage_with_prefix5.len(), 2);
-        assert!(storage_with_prefix5.iter().any(|(path, _)| path == [5, 5].as_slice()));
-        assert!(storage_with_prefix5.iter().any(|(path, _)| path == [5, 6].as_slice()));
+        assert!(storage_with_prefix5
+            .iter()
+            .any(|(path, _)| path == RawPath::from_nibbles(&[5, 5])));
+        assert!(storage_with_prefix5
+            .iter()
+            .any(|(path, _)| path == RawPath::from_nibbles(&[5, 6])));
     }
 
     #[test]
@@ -656,7 +667,7 @@ mod tests {
         // Add multiple entries
         for i in 0..10 {
             mutable.insert(
-                Nibbles::from_nibbles([i, 0, 0, 0]),
+                RawPath::from_nibbles(&[i, 0, 0, 0]),
                 Some(OverlayValue::Account(account.clone())),
             );
         }
@@ -699,7 +710,7 @@ mod tests {
         // Add entries
         for i in 0..100 {
             mutable.insert(
-                Nibbles::from_nibbles([i % 16, (i / 16) % 16, 0, 0]),
+                RawPath::from_nibbles(&[i % 16, (i / 16) % 16, 0, 0]),
                 Some(OverlayValue::Account(account.clone())),
             );
         }
@@ -757,12 +768,12 @@ mod tests {
         ];
 
         for (path_nibbles, value) in test_paths.iter() {
-            let path = Nibbles::from_nibbles(path_nibbles.clone());
+            let path = RawPath::from_nibbles(path_nibbles);
             mutable.insert(path, value.clone());
         }
 
         let frozen = mutable.freeze();
-        let prefix = [1, 2];
+        let prefix = RawPath::from_nibbles(&[1, 2]);
 
         // Test sub_slice_by_prefix
         let (before, with_prefix, after) = frozen.sub_slice_by_prefix(&prefix);
@@ -770,24 +781,24 @@ mod tests {
         // Verify before slice - should contain paths < [1, 2]
         assert_eq!(before.len(), 3);
         let before_paths: Vec<_> = before.iter().map(|(path, _)| path).collect();
-        assert!(before_paths.contains(&[0, 5, 6, 7].as_slice()));
-        assert!(before_paths.contains(&[1, 0, 0, 0].as_slice()));
-        assert!(before_paths.contains(&[1, 1, 9, 9].as_slice()));
+        assert!(before_paths.contains(&RawPath::from_nibbles(&[0, 5, 6, 7])));
+        assert!(before_paths.contains(&RawPath::from_nibbles(&[1, 0, 0, 0])));
+        assert!(before_paths.contains(&RawPath::from_nibbles(&[1, 1, 9, 9])));
 
         // Verify with_prefix slice - should contain paths that start with [1, 2]
         assert_eq!(with_prefix.len(), 4);
         let with_prefix_paths: Vec<_> = with_prefix.iter().map(|(path, _)| path).collect();
-        assert!(with_prefix_paths.contains(&[1, 2].as_slice()));
-        assert!(with_prefix_paths.contains(&[1, 2, 3, 4].as_slice()));
-        assert!(with_prefix_paths.contains(&[1, 2, 5, 6].as_slice()));
-        assert!(with_prefix_paths.contains(&[1, 2, 7, 8].as_slice()));
+        assert!(with_prefix_paths.contains(&RawPath::from_nibbles(&[1, 2])));
+        assert!(with_prefix_paths.contains(&RawPath::from_nibbles(&[1, 2, 3, 4])));
+        assert!(with_prefix_paths.contains(&RawPath::from_nibbles(&[1, 2, 5, 6])));
+        assert!(with_prefix_paths.contains(&RawPath::from_nibbles(&[1, 2, 7, 8])));
 
         // Verify after slice - should contain paths > [1, 2, ...] range
         assert_eq!(after.len(), 3);
         let after_paths: Vec<_> = after.iter().map(|(path, _)| path).collect();
-        assert!(after_paths.contains(&[1, 3, 0, 0].as_slice()));
-        assert!(after_paths.contains(&[2, 0, 0, 0].as_slice()));
-        assert!(after_paths.contains(&[5, 5, 5, 5].as_slice()));
+        assert!(after_paths.contains(&RawPath::from_nibbles(&[1, 3, 0, 0])));
+        assert!(after_paths.contains(&RawPath::from_nibbles(&[2, 0, 0, 0])));
+        assert!(after_paths.contains(&RawPath::from_nibbles(&[5, 5, 5, 5])));
 
         // Verify that all slices together contain all original entries
         assert_eq!(before.len() + with_prefix.len() + after.len(), frozen.len());
@@ -800,14 +811,14 @@ mod tests {
         assert!(empty_after.is_empty());
 
         // Test with prefix that doesn't match anything
-        let no_match_prefix = Nibbles::from_nibbles([9, 9, 9]);
+        let no_match_prefix = RawPath::from_nibbles(&[9, 9, 9]);
         let (no_before, no_with, no_after) = frozen.sub_slice_by_prefix(&no_match_prefix);
         assert_eq!(no_before.len(), frozen.len()); // All entries should be "before"
         assert!(no_with.is_empty());
         assert!(no_after.is_empty());
 
         // Test edge case: prefix with all 0xF's (should handle increment() returning None)
-        let max_prefix = Nibbles::from_nibbles([0xF, 0xF]);
+        let max_prefix = RawPath::from_nibbles(&[0xF, 0xF]);
         let (max_before, max_with, max_after) = frozen.sub_slice_by_prefix(&max_prefix);
         // All our test entries should be before 0xFF
         assert_eq!(max_before.len(), frozen.len());
@@ -821,13 +832,17 @@ mod tests {
         let account = test_account();
 
         // Test case where we have exact prefix matches and no extensions
-        let prefix = Nibbles::from_nibbles([2, 3]);
+        let prefix = RawPath::from_nibbles(&[2, 3]);
 
-        mutable.insert(Nibbles::from_nibbles([1, 9]), Some(OverlayValue::Account(account.clone())));
-        mutable.insert(Nibbles::from_nibbles([2, 2]), Some(OverlayValue::Account(account.clone())));
-        mutable.insert(prefix.clone(), Some(OverlayValue::Account(account.clone()))); // Exact match
-        mutable.insert(Nibbles::from_nibbles([2, 4]), Some(OverlayValue::Account(account.clone())));
-        mutable.insert(Nibbles::from_nibbles([3, 0]), Some(OverlayValue::Account(account.clone())));
+        mutable
+            .insert(RawPath::from_nibbles(&[1, 9]), Some(OverlayValue::Account(account.clone())));
+        mutable
+            .insert(RawPath::from_nibbles(&[2, 2]), Some(OverlayValue::Account(account.clone())));
+        mutable.insert(prefix, Some(OverlayValue::Account(account.clone()))); // Exact match
+        mutable
+            .insert(RawPath::from_nibbles(&[2, 4]), Some(OverlayValue::Account(account.clone())));
+        mutable
+            .insert(RawPath::from_nibbles(&[3, 0]), Some(OverlayValue::Account(account.clone())));
 
         let frozen = mutable.freeze();
         let (before, with_prefix, after) = frozen.sub_slice_by_prefix(&prefix);
@@ -838,7 +853,7 @@ mod tests {
 
         // Verify the exact match is in with_prefix
         let with_prefix_paths: Vec<_> = with_prefix.iter().map(|(path, _)| path).collect();
-        assert!(with_prefix_paths.contains(&prefix.as_slice()));
+        assert!(with_prefix_paths.contains(&prefix));
     }
 
     #[test]
@@ -859,7 +874,7 @@ mod tests {
 
         for path in storage_paths.iter() {
             mutable
-                .insert(Nibbles::from_nibbles(path), Some(OverlayValue::Account(account.clone())));
+                .insert(RawPath::from_nibbles(path), Some(OverlayValue::Account(account.clone())));
         }
 
         let frozen = mutable.freeze();
@@ -868,23 +883,23 @@ mod tests {
         let storage_overlay = frozen.with_prefix_offset(4);
 
         // Test partitioning by storage prefix [5]
-        let storage_prefix = [5];
+        let storage_prefix = RawPath::from_nibbles(&[5]);
         let (before, with_prefix, after) = storage_overlay.sub_slice_by_prefix(&storage_prefix);
 
         // Before should contain [2,0,0,0]
         assert_eq!(before.len(), 1);
         let before_paths: Vec<_> = before.iter().map(|(path, _)| path).collect();
-        assert!(before_paths.contains(&[2, 0, 0, 0].as_slice()));
+        assert!(before_paths.contains(&RawPath::from_nibbles(&[2, 0, 0, 0])));
 
         // With prefix should contain [5,0,0,0] and [5,1,0,0]
         assert_eq!(with_prefix.len(), 2);
         let with_prefix_paths: Vec<_> = with_prefix.iter().map(|(path, _)| path).collect();
-        assert!(with_prefix_paths.contains(&[5, 0, 0, 0].as_slice()));
-        assert!(with_prefix_paths.contains(&[5, 1, 0, 0].as_slice()));
+        assert!(with_prefix_paths.contains(&RawPath::from_nibbles(&[5, 0, 0, 0])));
+        assert!(with_prefix_paths.contains(&RawPath::from_nibbles(&[5, 1, 0, 0])));
 
         // After should contain [8,0,0,0]
         assert_eq!(after.len(), 1);
         let after_paths: Vec<_> = after.iter().map(|(path, _)| path).collect();
-        assert!(after_paths.contains(&[8, 0, 0, 0].as_slice()));
+        assert!(after_paths.contains(&RawPath::from_nibbles(&[8, 0, 0, 0])));
     }
 }

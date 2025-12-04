@@ -9,12 +9,12 @@ use crate::{
         TrieValue,
     },
     page::SlottedPage,
-    path::{AddressPath, StoragePath, ADDRESS_PATH_LENGTH, STORAGE_PATH_LENGTH},
+    path::{AddressPath, RawPath, StoragePath, ADDRESS_PATH_LENGTH, STORAGE_PATH_LENGTH},
 };
 
 use alloy_primitives::{map::B256Map, Bytes, B256, U256};
 use alloy_rlp::{decode_exact, BytesMut};
-use alloy_trie::{nybbles::common_prefix_length, Nibbles, EMPTY_ROOT_HASH};
+use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
 
 use super::engine::{Error, StorageEngine};
 
@@ -23,7 +23,7 @@ use super::engine::{Error, StorageEngine};
 pub struct AccountProof {
     pub hashed_address: Nibbles,
     pub account: Account,
-    pub proof: BTreeMap<Nibbles, Bytes>,
+    pub proof: BTreeMap<RawPath, Bytes>,
     pub storage_proofs: B256Map<StorageProof>,
 }
 
@@ -32,7 +32,7 @@ pub struct AccountProof {
 pub struct StorageProof {
     pub hashed_slot: Nibbles,
     pub value: U256,
-    pub proof: BTreeMap<Nibbles, Bytes>,
+    pub proof: BTreeMap<RawPath, Bytes>,
 }
 
 impl StorageEngine {
@@ -43,7 +43,7 @@ impl StorageEngine {
         context: &TransactionContext,
         address_path: AddressPath,
     ) -> Result<Option<AccountProof>, Error> {
-        self.get_value_with_proof(context, address_path.into())
+        self.get_value_with_proof(context, address_path)
     }
 
     /// Retrieves an [AccountProof] from the storage engine, containing the storage proof for the
@@ -53,14 +53,16 @@ impl StorageEngine {
         context: &TransactionContext,
         storage_path: StoragePath,
     ) -> Result<Option<AccountProof>, Error> {
-        self.get_value_with_proof(context, storage_path.into())
+        self.get_value_with_proof(context, storage_path)
     }
 
     fn get_value_with_proof(
         &self,
         context: &TransactionContext,
-        path: Nibbles,
+        path: impl Into<RawPath>,
     ) -> Result<Option<AccountProof>, Error> {
+        let path = path.into();
+
         assert!(
             path.len() == ADDRESS_PATH_LENGTH || path.len() == STORAGE_PATH_LENGTH,
             "path must be exactly {ADDRESS_PATH_LENGTH} or {STORAGE_PATH_LENGTH} nibbles"
@@ -71,10 +73,8 @@ impl StorageEngine {
             Some(page_id) => page_id,
         };
 
-        let account_proof = AccountProof {
-            hashed_address: path.slice(..ADDRESS_PATH_LENGTH).clone(),
-            ..Default::default()
-        };
+        let account_proof =
+            AccountProof { hashed_address: path.lower_64_nibbles(), ..Default::default() };
         let slotted_page = self.get_slotted_page(context, root_node_page_id)?;
         let proof =
             self.get_value_with_proof_from_page(context, &path, 0, slotted_page, 0, account_proof)?;
@@ -86,7 +86,7 @@ impl StorageEngine {
     fn get_value_with_proof_from_page(
         &self,
         context: &TransactionContext,
-        original_path: &Nibbles,
+        original_path: &RawPath,
         path_offset: usize,
         slotted_page: SlottedPage<'_>,
         page_index: u8,
@@ -94,15 +94,15 @@ impl StorageEngine {
     ) -> Result<Option<AccountProof>, Error> {
         let node: Node = slotted_page.get_value(page_index)?;
 
-        let common_prefix_length =
-            common_prefix_length(&original_path[path_offset..], node.prefix());
-        if common_prefix_length < node.prefix().len() {
+        let prefix = node.prefix().into();
+        let common_prefix_length = original_path.slice(path_offset..).common_prefix_length(&prefix);
+        if common_prefix_length < prefix.len() {
             return Ok(None);
         }
 
         let proof_node = node.rlp_encode();
         let full_node_path = original_path.slice(..path_offset);
-        proof.proof.insert(full_node_path.clone(), Bytes::from(proof_node.to_vec()));
+        proof.proof.insert(full_node_path, Bytes::from(proof_node.to_vec()));
 
         let remaining_path = original_path.slice(path_offset + common_prefix_length..);
         if remaining_path.is_empty() {
@@ -127,7 +127,6 @@ impl StorageEngine {
 
         assert!(path_offset <= 64);
 
-        let prefix = node.prefix();
         match node.kind() {
             AccountLeaf { ref nonce_rlp, ref balance_rlp, ref code_hash, ref storage_root } => {
                 assert_eq!(path_offset + common_prefix_length, ADDRESS_PATH_LENGTH);
@@ -140,8 +139,10 @@ impl StorageEngine {
 
                 if let Some(storage_root) = storage_root {
                     proof.account.storage_root = storage_root.rlp().as_hash().unwrap();
-                    let storage_proof =
-                        StorageProof { hashed_slot: remaining_path.clone(), ..Default::default() };
+                    let storage_proof = StorageProof {
+                        hashed_slot: remaining_path.try_into().unwrap(),
+                        ..Default::default()
+                    };
                     let storage_location = storage_root.location();
                     let storage_proof = if storage_location.cell_index().is_some() {
                         self.get_storage_proof_from_page(
@@ -185,11 +186,11 @@ impl StorageEngine {
                     let branch_path = original_path.slice(..path_offset + common_prefix_length);
                     let mut branch_rlp = BytesMut::new();
                     encode_branch(children, &mut branch_rlp);
-                    proof.proof.insert(branch_path.clone(), branch_rlp.freeze().into());
+                    proof.proof.insert(branch_path, branch_rlp.freeze().into());
                 }
 
                 // go down the trie
-                let child_pointer = children[remaining_path[0] as usize].as_ref();
+                let child_pointer = children[remaining_path.get_unchecked(0) as usize].as_ref();
                 let new_path_offset = path_offset + common_prefix_length + 1;
 
                 match child_pointer {
@@ -228,7 +229,7 @@ impl StorageEngine {
     fn get_storage_proof_from_page(
         &self,
         context: &TransactionContext,
-        original_path: &Nibbles,
+        original_path: &RawPath,
         path_offset: usize,
         slotted_page: SlottedPage<'_>,
         page_index: u8,
@@ -236,9 +237,9 @@ impl StorageEngine {
     ) -> Result<Option<StorageProof>, Error> {
         let node: Node = slotted_page.get_value(page_index)?;
 
-        let common_prefix_length =
-            common_prefix_length(&original_path[path_offset..], node.prefix());
-        if common_prefix_length < node.prefix().len() {
+        let prefix = node.prefix().into();
+        let common_prefix_length = original_path.slice(path_offset..).common_prefix_length(&prefix);
+        if common_prefix_length < prefix.len() {
             return Ok(None);
         }
 
@@ -268,7 +269,6 @@ impl StorageEngine {
 
         assert!(path_offset <= 64);
 
-        let prefix = node.prefix();
         match node.kind() {
             Branch { ref children } => {
                 // update account subtree for branch node or branch+extension node
@@ -281,10 +281,10 @@ impl StorageEngine {
                     let branch_path = original_path.slice(..path_offset + common_prefix_length);
                     let mut branch_rlp = BytesMut::new();
                     encode_branch(children, &mut branch_rlp);
-                    proof.proof.insert(branch_path.clone(), branch_rlp.freeze().into());
+                    proof.proof.insert(branch_path, branch_rlp.freeze().into());
                 }
 
-                let child_pointer = children[remaining_path[0] as usize].as_ref();
+                let child_pointer = children[remaining_path.get_unchecked(0) as usize].as_ref();
                 let new_path_offset = path_offset + common_prefix_length + 1;
 
                 match child_pointer {
@@ -337,7 +337,7 @@ mod tests {
             storage_root: proof.account.storage_root,
             code_hash: proof.account.code_hash,
         }));
-        verify_proof(root, proof.hashed_address.clone(), expected, proof.proof.values())
+        verify_proof(root, proof.hashed_address, expected, proof.proof.values())
             .expect("failed to verify account proof");
 
         for storage_proof in proof.storage_proofs.values() {
@@ -348,7 +348,7 @@ mod tests {
     fn verify_storage_proof(proof: &StorageProof, root: B256) {
         verify_proof(
             root,
-            proof.hashed_slot.clone(),
+            proof.hashed_slot,
             Some(alloy_rlp::encode(proof.value)),
             proof.proof.values(),
         )
@@ -412,8 +412,8 @@ mod tests {
         assert_eq!(proof.account, account);
 
         assert_eq!(proof.proof.len(), 1);
-        assert!(proof.proof.contains_key(&Nibbles::default()));
-        let leaf_node_proof = proof.proof.get(&Nibbles::default()).unwrap();
+        assert!(proof.proof.contains_key(&RawPath::new()));
+        let leaf_node_proof = proof.proof.get(&RawPath::new()).unwrap();
         assert_eq!(leaf_node_proof, &Bytes::from(hex!("0xf86aa1201468288056310c82aa4c01a7e12a10f8111a0560e72b700555479031b86c357db846f8440101a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470")));
 
         assert_eq!(proof.storage_proofs.len(), 0);
@@ -433,10 +433,10 @@ mod tests {
         assert_eq!(proof.account, account);
 
         assert_eq!(proof.proof.len(), 2, "Proof should contain a branch and a leaf");
-        assert!(proof.proof.contains_key(&Nibbles::default()));
-        let branch_node_proof = proof.proof.get(&Nibbles::default()).unwrap();
+        assert!(proof.proof.contains_key(&RawPath::new()));
+        let branch_node_proof = proof.proof.get(&RawPath::new()).unwrap();
         assert_eq!(branch_node_proof, &Bytes::from(hex!("0xf85180a0bf57afd571ba1e3c86b9109b8e1f3ea231a24a298029b7bc804ed53788918a5f8080808080808080808080a0687b2ec5bde2a80c990485ab23c35513c3180ddc6e7fea67986bbce7eee06a47808080")));
-        let leaf_node_proof = proof.proof.get(&Nibbles::from_nibbles([1])).unwrap();
+        let leaf_node_proof = proof.proof.get(&RawPath::from_nibbles(&[1])).unwrap();
         assert_eq!(leaf_node_proof, &Bytes::from(hex!("0xf869a03468288056310c82aa4c01a7e12a10f8111a0560e72b700555479031b86c357db846f8440101a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470")));
 
         assert_eq!(proof.storage_proofs.len(), 0);
@@ -481,9 +481,9 @@ mod tests {
         // account-level proof should be the same as before, except with new hashes due to the new
         // storage value
         assert_eq!(storage_proof.proof.len(), 2, "Proof should contain a branch and a leaf");
-        let branch_node_proof = storage_proof.proof.get(&Nibbles::default()).unwrap();
+        let branch_node_proof = storage_proof.proof.get(&RawPath::new()).unwrap();
         assert_eq!(branch_node_proof, &Bytes::from(hex!("0xf85180a057f0c70887b1c7a8e0e1b7c8945a3e9c2a28e82ac5594b10786171f4e30748f08080808080808080808080a0687b2ec5bde2a80c990485ab23c35513c3180ddc6e7fea67986bbce7eee06a47808080")));
-        let leaf_node_proof = storage_proof.proof.get(&Nibbles::from_nibbles([1])).unwrap();
+        let leaf_node_proof = storage_proof.proof.get(&RawPath::from_nibbles(&[1])).unwrap();
         assert_eq!(leaf_node_proof, &Bytes::from(hex!("0xf869a03468288056310c82aa4c01a7e12a10f8111a0560e72b700555479031b86c357db846f8440101a02a2ec95a7e5360e7e4bee7c204bbdfdb16ad550f1e3e53d2ee2fafa31dfb4013a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470")));
 
         let storage_slot_proof = storage_proof
@@ -495,7 +495,7 @@ mod tests {
             b256!("0x2a2ec95a7e5360e7e4bee7c204bbdfdb16ad550f1e3e53d2ee2fafa31dfb4013")
         );
         assert_eq!(storage_slot_proof.proof.len(), 1);
-        let storage_proof_node = storage_slot_proof.proof.get(&Nibbles::default()).unwrap();
+        let storage_proof_node = storage_slot_proof.proof.get(&RawPath::new()).unwrap();
         assert_eq!(storage_proof_node, &Bytes::from(hex!("0xe8a120b10e2d527612073b26eecdfd717e6a320cf44b4afac2b0732d9fcbe2b7fa0cf68584deadbeef")));
 
         verify_storage_proof(storage_slot_proof, account_proof.account.storage_root);
