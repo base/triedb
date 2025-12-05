@@ -15,7 +15,10 @@ use crate::{
     path::{AddressPath, RawPath, StoragePath, ADDRESS_PATH_LENGTH, STORAGE_PATH_LENGTH},
     pointer::Pointer,
     snapshot::SnapshotId,
-    storage::value::Value,
+    storage::{
+        hash_tracker::{HashTracker, NodeRef},
+        value::Value,
+    },
 };
 use alloy_primitives::StorageValue;
 use alloy_trie::{nodes::RlpNode, EMPTY_ROOT_HASH};
@@ -47,6 +50,29 @@ enum PointerChange {
     None,
     Update(Pointer),
     Delete,
+}
+
+/// Result of an unhashed write operation, including depth information for parallel hashing.
+///
+/// Depth is measured from leaves: leaves have depth 0, parents have max(child_depths) + 1.
+#[derive(Debug)]
+enum PointerChangeUnhashed {
+    /// No change was made to the node.
+    None,
+    /// Node was updated. Contains the unhashed pointer and the depth from leaf.
+    Update(Pointer, u16),
+    /// Node was deleted.
+    Delete,
+}
+
+impl PointerChangeUnhashed {
+    /// Returns the depth if this is an Update, 0 otherwise.
+    fn depth(&self) -> u16 {
+        match self {
+            Self::Update(_, depth) => *depth,
+            _ => 0,
+        }
+    }
 }
 
 impl StorageEngine {
@@ -135,6 +161,18 @@ impl StorageEngine {
     ) -> Result<SlottedPage<'_>, Error> {
         let page = self.get_page(context, page_id)?;
         Ok(SlottedPage::try_from(page)?)
+    }
+
+    /// Gets a mutable clone of a page for the parallel hasher.
+    ///
+    /// This is a public wrapper around the internal `get_mut_clone` method,
+    /// used by the parallel hasher to update parent pointers after computing hashes.
+    pub(crate) fn get_mut_clone_for_hasher(
+        &self,
+        context: &mut TransactionContext,
+        page_id: PageId,
+    ) -> Result<PageMut<'_>, Error> {
+        self.get_mut_clone(context, page_id)
     }
 
     /// Retrieves an [Account] from the storage engine, identified by the given [AddressPath].
@@ -338,6 +376,350 @@ impl StorageEngine {
             PointerChange::None => (),
         }
         Ok(())
+    }
+
+    /// Applies changes to the trie without computing hashes.
+    ///
+    /// This is the entry point for the parallel write optimization. Instead of computing
+    /// hashes during the write traversal, this function:
+    /// 1. Uses sentinel (unhashed) pointers for all modified nodes
+    /// 2. Tracks all modified nodes in the provided [`HashTracker`]
+    /// 3. Records depth information for level-based parallel hashing
+    ///
+    /// After this function returns, the caller should use a [`ParallelHasher`] to compute
+    /// all hashes in parallel using the information in the tracker.
+    ///
+    /// # Arguments
+    /// * `context` - Transaction context
+    /// * `changes` - Sorted list of path-value pairs to apply
+    /// * `tracker` - Hash tracker to record modified nodes
+    pub fn set_values_unhashed(
+        &self,
+        context: &mut TransactionContext,
+        mut changes: &mut [(RawPath, Option<TrieValue>)],
+        tracker: &mut HashTracker,
+    ) -> Result<(), Error> {
+        changes.sort_by(|a, b| a.0.cmp(&b.0));
+
+        if context.root_node_page_id.is_none() {
+            // Handle empty trie case
+            let page = self.allocate_page(context)?;
+            let mut slotted_page = SlottedPageMut::try_from(page)?;
+            let ((path, value), remaining_changes) = changes.split_first_mut().unwrap();
+            let value = value.as_ref().expect("unable to delete from empty trie");
+            let root_pointer =
+                self.initialize_empty_trie_unhashed(context, path, value, &mut slotted_page, tracker)?;
+            let page_id = root_pointer.location().page_id().unwrap();
+            context.root_node_page_id = Some(page_id);
+            // Note: root_node_hash will be set after parallel hashing
+            if remaining_changes.is_empty() {
+                // Only one change - record the root node now
+                tracker.record(NodeRef::new(page_id, 0), None, 0, 0);
+                return Ok(());
+            }
+            changes = remaining_changes;
+        }
+
+        // Invalidate the cache
+        changes.iter().for_each(|(path, _)| {
+            if path.len() == STORAGE_PATH_LENGTH {
+                let address_path =
+                    AddressPath::new(path.slice(..ADDRESS_PATH_LENGTH).try_into().unwrap());
+                context.contract_account_loc_cache.remove(&address_path.into());
+            }
+        });
+
+        let pointer_change = self.set_values_in_page_unhashed(
+            context,
+            changes,
+            0,
+            context.root_node_page_id.unwrap(),
+            tracker,
+            None, // No parent for root
+            0,    // Root child index (unused)
+        )?;
+
+        match pointer_change {
+            PointerChangeUnhashed::Update(pointer, _depth) => {
+                context.root_node_page_id = pointer.location().page_id();
+                // root_node_hash will be set after parallel hashing
+            }
+            PointerChangeUnhashed::Delete => {
+                context.root_node_page_id = None;
+                context.root_node_hash = EMPTY_ROOT_HASH;
+            }
+            PointerChangeUnhashed::None => (),
+        }
+        Ok(())
+    }
+
+    /// Applies changes to the trie using parallel hash computation.
+    ///
+    /// This is a drop-in replacement for [`set_values`] that uses level-based parallel
+    /// hashing for improved performance on large batches. The two-phase approach:
+    /// 1. Applies all changes with sentinel (unhashed) pointers
+    /// 2. Computes all hashes in parallel using Rayon
+    ///
+    /// For small batches (<100 changes), this may have slightly higher overhead than
+    /// [`set_values`] due to the two-phase approach. For large batches (>1000 changes),
+    /// this should provide significant speedup on multi-core systems.
+    pub fn set_values_parallel(
+        &self,
+        context: &mut TransactionContext,
+        changes: &mut [(RawPath, Option<TrieValue>)],
+    ) -> Result<(), Error> {
+        if changes.is_empty() {
+            return Ok(());
+        }
+
+        // Phase 1: Apply changes with unhashed pointers
+        // We pass a dummy tracker that we ignore - the tree restructuring makes tracking unreliable.
+        let mut _tracker = HashTracker::with_capacity(changes.len());
+        self.set_values_unhashed(context, changes, &mut _tracker)?;
+
+
+        // Phase 2: Collect unhashed nodes by walking the tree
+        let mut tracker = HashTracker::with_capacity(changes.len());
+        if let Some(root_page_id) = context.root_node_page_id {
+            self.collect_unhashed_nodes(context, root_page_id, 0, &mut tracker, None, 0)?;
+        }
+
+        // Phase 3: Compute hashes in parallel
+        if !tracker.is_empty() {
+            use crate::storage::parallel_hasher::ParallelHasher;
+            let hasher = ParallelHasher::new(self, &tracker);
+            hasher.hash_all(context)?;
+        }
+
+        Ok(())
+    }
+
+    /// Collects all unhashed nodes by walking the tree.
+    /// Returns the depth of the deepest unhashed node in this subtree.
+    fn collect_unhashed_nodes(
+        &self,
+        context: &TransactionContext,
+        page_id: PageId,
+        cell_index: u8,
+        tracker: &mut HashTracker,
+        parent: Option<NodeRef>,
+        parent_child_index: u8,
+    ) -> Result<u16, Error> {
+        let page = self.page_manager.get(context.snapshot_id, page_id)?;
+        let slotted = SlottedPage::try_from(page)?;
+        let node: Node = slotted.get_value(cell_index)?;
+        let current_ref = NodeRef::new(page_id, cell_index);
+
+        let mut max_child_depth: u16 = 0;
+        let mut has_unhashed_children = false;
+
+        // Check children for unhashed pointers
+        match node.kind() {
+            crate::node::NodeKind::Branch { children } => {
+                for (idx, child_opt) in children.iter().enumerate() {
+                    if let Some(child_ptr) = child_opt {
+                        if child_ptr.is_unhashed() {
+                            has_unhashed_children = true;
+                            let child_loc = child_ptr.location();
+                            let (child_page, child_cell) = if let Some(cell) = child_loc.cell_index() {
+                                (page_id, cell)
+                            } else {
+                                (child_loc.page_id().unwrap(), 0)
+                            };
+                            let child_depth = self.collect_unhashed_nodes(
+                                context, child_page, child_cell, tracker,
+                                Some(current_ref), idx as u8,
+                            )?;
+                            max_child_depth = max_child_depth.max(child_depth);
+                        }
+                    }
+                }
+            }
+            crate::node::NodeKind::AccountLeaf { storage_root, .. } => {
+                if let Some(storage_ptr) = storage_root {
+                    if storage_ptr.is_unhashed() {
+                        has_unhashed_children = true;
+                        let child_loc = storage_ptr.location();
+                        let (child_page, child_cell) = if let Some(cell) = child_loc.cell_index() {
+                            (page_id, cell)
+                        } else {
+                            (child_loc.page_id().unwrap(), 0)
+                        };
+                        let child_depth = self.collect_unhashed_nodes(
+                            context, child_page, child_cell, tracker,
+                            Some(current_ref), 0,
+                        )?;
+                        max_child_depth = max_child_depth.max(child_depth);
+                    }
+                }
+            }
+            _ => {} // Leaves have no children
+        }
+
+        // If this node has unhashed children OR is the root being processed,
+        // it needs to be hashed too (since its children's hashes changed).
+        // We also check if the node itself was written with an unhashed pointer.
+        let this_depth = if has_unhashed_children {
+            max_child_depth + 1
+        } else {
+            0
+        };
+
+        // Always record this node:
+        // - If parent.is_some(), we were called because the parent has an unhashed pointer to us
+        // - If parent.is_none(), this is the root and we're called because the tree was modified
+        // Either way, this node needs its hash computed and propagated upward.
+        tracker.record(current_ref, parent, parent_child_index, this_depth);
+
+        Ok(this_depth)
+    }
+
+    /// Initializes an empty trie with the first node, without computing hash.
+    ///
+    /// Note: We don't record this node in the tracker here because if more changes follow,
+    /// the node may be moved or restructured. Recording happens during `set_values_in_page_unhashed`
+    /// when the final structure is known.
+    fn initialize_empty_trie_unhashed(
+        &self,
+        _context: &mut TransactionContext,
+        path: &RawPath,
+        value: &TrieValue,
+        slotted_page: &mut SlottedPageMut<'_>,
+        _tracker: &mut HashTracker,
+    ) -> Result<Pointer, Error> {
+        let new_node = Node::new_leaf(path, value)?;
+        let index = slotted_page.insert_value(&new_node)?;
+        assert_eq!(index, 0, "root node must be at index 0");
+
+        let page_id = slotted_page.id();
+        let location = Location::for_page(page_id);
+
+        // Don't record here - will be recorded in set_values_in_page_unhashed when structure is final
+
+        Ok(Pointer::new_unhashed(location))
+    }
+
+    /// Unhashed version of set_values_in_page.
+    fn set_values_in_page_unhashed(
+        &self,
+        context: &mut TransactionContext,
+        mut changes: &[(RawPath, Option<TrieValue>)],
+        path_offset: u8,
+        page_id: PageId,
+        tracker: &mut HashTracker,
+        parent: Option<NodeRef>,
+        parent_child_index: u8,
+    ) -> Result<PointerChangeUnhashed, Error> {
+        let page = self.get_mut_clone(context, page_id)?;
+        let mut new_slotted_page = SlottedPageMut::try_from(page)?;
+        let mut split_count = 0;
+
+        loop {
+            let result = self.set_values_in_cloned_page_unhashed(
+                context,
+                changes,
+                path_offset,
+                &mut new_slotted_page,
+                0,
+                tracker,
+                parent,
+                parent_child_index,
+            );
+
+            match result {
+                Ok(change) => return Ok(change),
+                Err(Error::PageSplit(handled_total)) => {
+                    changes = &changes[handled_total..];
+                    context.transaction_metrics.inc_pages_split();
+                    split_count += 1;
+                    if split_count > 20 {
+                        return Err(Error::PageError(PageError::PageSplitLimitReached));
+                    }
+                }
+                Err(Error::PageError(PageError::PageIsFull)) => {
+                    return Err(Error::PageError(PageError::PageIsFull));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Unhashed version of set_values_in_cloned_page.
+    fn set_values_in_cloned_page_unhashed(
+        &self,
+        context: &mut TransactionContext,
+        changes: &[(RawPath, Option<TrieValue>)],
+        path_offset: u8,
+        slotted_page: &mut SlottedPageMut<'_>,
+        page_index: u8,
+        tracker: &mut HashTracker,
+        parent: Option<NodeRef>,
+        parent_child_index: u8,
+    ) -> Result<PointerChangeUnhashed, Error> {
+        if changes.is_empty() {
+            return Ok(PointerChangeUnhashed::None);
+        }
+
+        let mut node = slotted_page.get_value::<Node>(page_index)?;
+        let page_id = slotted_page.id();
+        let _current_node_ref = NodeRef::new(page_id, page_index);
+
+        let (shortest_common_prefix_idx, common_prefix_length) =
+            find_shortest_common_prefix(changes, path_offset, &node);
+
+        let first_change = &changes[shortest_common_prefix_idx];
+        let path = first_change.0.slice(path_offset as usize..);
+        let value = first_change.1.as_ref();
+        let common_prefix = path.slice(0..common_prefix_length);
+
+        // Case 1: Path doesn't match node prefix - create new branch
+        if common_prefix.len() < node.prefix().len() {
+            if value.is_none() {
+                let (changes_left, changes_right) = changes.split_at(shortest_common_prefix_idx);
+                let changes_right = &changes_right[1..];
+                if changes_right.is_empty() {
+                    return self.set_values_in_cloned_page_unhashed(
+                        context, changes_left, path_offset, slotted_page, page_index,
+                        tracker, parent, parent_child_index,
+                    );
+                } else if changes_left.is_empty() {
+                    return self.set_values_in_cloned_page_unhashed(
+                        context, changes_right, path_offset, slotted_page, page_index,
+                        tracker, parent, parent_child_index,
+                    );
+                } else {
+                    unreachable!("shortest_common_prefix_idx is not at either end");
+                }
+            }
+            return self.handle_missing_parent_branch_unhashed(
+                context, changes, path_offset, slotted_page, page_index, &mut node,
+                &common_prefix, tracker, parent, parent_child_index,
+            );
+        }
+
+        // Case 2: Path matches node prefix exactly
+        if common_prefix.len() == path.len() {
+            assert_eq!(shortest_common_prefix_idx, 0);
+            return self.handle_exact_prefix_match_unhashed(
+                context, changes, path_offset, slotted_page, page_index, &mut node,
+                path, value, tracker, parent, parent_child_index,
+            );
+        }
+
+        // Case 3: Account leaf with storage
+        if node.is_account_leaf() {
+            return self.handle_account_node_traversal_unhashed(
+                context, changes, path_offset, slotted_page, page_index, &mut node,
+                &common_prefix, tracker, parent, parent_child_index,
+            );
+        }
+
+        // Case 4: Branch node
+        assert!(node.is_branch());
+        self.handle_branch_node_traversal_unhashed(
+            context, changes, path_offset, slotted_page, page_index, &mut node,
+            &common_prefix, tracker, parent, parent_child_index,
+        )
     }
 
     fn set_values_in_page(
@@ -1497,6 +1879,628 @@ impl StorageEngine {
         let page = self.page_manager.get(context.snapshot_id, page_id)?;
         context.transaction_metrics.inc_pages_read();
         Ok(page)
+    }
+
+    // ==================== Unhashed Helper Methods ====================
+    // These methods mirror the hashed versions but use unhashed pointers
+    // and track nodes in the HashTracker for later parallel hashing.
+
+    /// Unhashed version of handle_missing_parent_branch.
+    fn handle_missing_parent_branch_unhashed(
+        &self,
+        context: &mut TransactionContext,
+        changes: &[(RawPath, Option<TrieValue>)],
+        path_offset: u8,
+        slotted_page: &mut SlottedPageMut<'_>,
+        cell_index: u8,
+        node: &mut Node,
+        common_prefix: &RawPath,
+        tracker: &mut HashTracker,
+        parent: Option<NodeRef>,
+        parent_child_index: u8,
+    ) -> Result<PointerChangeUnhashed, Error> {
+        let mut new_parent_branch = Node::new_branch(common_prefix)?;
+        let page_id = slotted_page.id();
+
+        if slotted_page.num_free_bytes() <
+            new_parent_branch.size() + CELL_POINTER_SIZE - common_prefix.len() / 2
+        {
+            self.split_page(context, slotted_page)?;
+            return Err(Error::PageSplit(0));
+        }
+
+        let node_branch_index = node.prefix().get_unchecked(common_prefix.len());
+        node.set_prefix(node.prefix().slice(common_prefix.len() + 1..))?;
+        slotted_page.set_value(cell_index, node)?;
+
+        let new_parent_branch_cell_index = slotted_page.next_free_cell_index()?;
+        new_parent_branch.set_child(
+            node_branch_index,
+            Pointer::new_unhashed(Location::for_cell(new_parent_branch_cell_index)),
+        )?;
+        let inserted_branch_cell_index = slotted_page.insert_value(&new_parent_branch)?;
+        debug_assert_eq!(inserted_branch_cell_index, new_parent_branch_cell_index);
+        slotted_page.swap_cell_pointers(cell_index, new_parent_branch_cell_index)?;
+
+        // The existing node is now a child of the new branch
+        let existing_node_ref = NodeRef::new(page_id, new_parent_branch_cell_index);
+        let new_branch_ref = NodeRef::new(page_id, cell_index);
+
+        // Recurse to insert changes, passing the new branch as parent
+        let result = self.set_values_in_cloned_page_unhashed(
+            context, changes, path_offset, slotted_page, cell_index,
+            tracker, parent, parent_child_index,
+        )?;
+
+        // Track the existing node (now child of new branch)
+        // The existing node has no unhashed children (any existing children are already hashed),
+        // so its depth in the unhashed tree is 0.
+        let existing_node_depth = 0u16;
+        tracker.record(existing_node_ref, Some(new_branch_ref), node_branch_index, existing_node_depth);
+
+        // Track the new branch itself.
+        // The recursion already recorded the branch with depth = max(child depths) + 1,
+        // but that doesn't include the existing node (which wasn't traversed if it had no changes).
+        // The branch's correct depth is max(existing_node_depth, max_other_children_depth) + 1.
+        // Since result.depth() = max_other_children_depth + 1, we compute:
+        // branch_depth = max(existing_node_depth + 1, result.depth())
+        let new_changes_depth = result.depth();
+        let branch_depth = (existing_node_depth + 1).max(new_changes_depth);
+        tracker.record(new_branch_ref, parent, parent_child_index, branch_depth);
+
+        // Return the update for the branch at its new position (cell_index)
+        let location = node_location(page_id, cell_index);
+        Ok(PointerChangeUnhashed::Update(Pointer::new_unhashed(location), branch_depth))
+    }
+
+    /// Unhashed version of handle_exact_prefix_match.
+    fn handle_exact_prefix_match_unhashed(
+        &self,
+        context: &mut TransactionContext,
+        changes: &[(RawPath, Option<TrieValue>)],
+        path_offset: u8,
+        slotted_page: &mut SlottedPageMut<'_>,
+        page_index: u8,
+        node: &mut Node,
+        path: RawPath,
+        value: Option<&TrieValue>,
+        tracker: &mut HashTracker,
+        parent: Option<NodeRef>,
+        parent_child_index: u8,
+    ) -> Result<PointerChangeUnhashed, Error> {
+        let page_id = slotted_page.id();
+        let current_node_ref = NodeRef::new(page_id, page_index);
+
+        if value.is_none() {
+            if node.has_children() {
+                self.delete_subtrie(context, slotted_page, page_index)?;
+            }
+            slotted_page.delete_value(page_index)?;
+            assert_eq!(changes.len(), 1);
+            return Ok(PointerChangeUnhashed::Delete);
+        }
+
+        let (_, remaining_changes) = changes.split_first().unwrap();
+
+        if &node.value()? == value.unwrap() {
+            if remaining_changes.is_empty() {
+                return Ok(PointerChangeUnhashed::None);
+            }
+            return self.set_values_in_cloned_page_unhashed(
+                context, remaining_changes, path_offset, slotted_page, page_index,
+                tracker, parent, parent_child_index,
+            );
+        }
+
+        let mut new_node = Node::new_leaf(&path, value.unwrap())?;
+        if node.has_children() {
+            if let Some(child_pointer) = node.direct_child()? {
+                new_node.set_child(0, child_pointer.clone())?;
+            }
+        }
+
+        let old_node_size = node.size();
+        let new_node_size = new_node.size();
+        if new_node_size > old_node_size {
+            let node_size_incr = new_node_size - old_node_size;
+            if slotted_page.num_free_bytes() < node_size_incr {
+                self.split_page(context, slotted_page)?;
+                return Err(Error::PageSplit(0));
+            }
+        }
+
+        slotted_page.set_value(page_index, &new_node)?;
+
+        if remaining_changes.is_empty() {
+            // This is a leaf update - depth 0 (or depth based on existing children)
+            let depth = if new_node.has_children() { 1 } else { 0 };
+            tracker.record(current_node_ref, parent, parent_child_index, depth);
+            Ok(PointerChangeUnhashed::Update(
+                Pointer::new_unhashed(node_location(page_id, page_index)),
+                depth,
+            ))
+        } else {
+            let result = self.set_values_in_cloned_page_unhashed(
+                context, remaining_changes, path_offset, slotted_page, page_index,
+                tracker, parent, parent_child_index,
+            );
+            match result {
+                Ok(PointerChangeUnhashed::Update(_, child_depth)) => {
+                    let depth = child_depth + 1;
+                    tracker.record(current_node_ref, parent, parent_child_index, depth);
+                    Ok(PointerChangeUnhashed::Update(
+                        Pointer::new_unhashed(node_location(page_id, page_index)),
+                        depth,
+                    ))
+                }
+                Ok(PointerChangeUnhashed::None) => {
+                    let depth = if new_node.has_children() { 1 } else { 0 };
+                    tracker.record(current_node_ref, parent, parent_child_index, depth);
+                    Ok(PointerChangeUnhashed::Update(
+                        Pointer::new_unhashed(node_location(page_id, page_index)),
+                        depth,
+                    ))
+                }
+                Ok(PointerChangeUnhashed::Delete) => {
+                    panic!("unexpected case - account pointer deleted after update");
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    /// Unhashed version of handle_account_node_traversal.
+    fn handle_account_node_traversal_unhashed(
+        &self,
+        context: &mut TransactionContext,
+        changes: &[(RawPath, Option<TrieValue>)],
+        path_offset: u8,
+        slotted_page: &mut SlottedPageMut<'_>,
+        page_index: u8,
+        node: &mut Node,
+        common_prefix: &RawPath,
+        tracker: &mut HashTracker,
+        parent: Option<NodeRef>,
+        parent_child_index: u8,
+    ) -> Result<PointerChangeUnhashed, Error> {
+        let page_id = slotted_page.id();
+        let current_node_ref = NodeRef::new(page_id, page_index);
+        let child_pointer = node.direct_child()?;
+
+        if let Some(child_pointer) = child_pointer {
+            let child_pointer_change =
+                if let Some(child_cell_index) = child_pointer.location().cell_index() {
+                    self.set_values_in_cloned_page_unhashed(
+                        context,
+                        changes,
+                        path_offset + common_prefix.len() as u8,
+                        slotted_page,
+                        child_cell_index,
+                        tracker,
+                        Some(current_node_ref),
+                        0,
+                    )?
+                } else {
+                    let child_page_id = child_pointer.location().page_id().unwrap();
+                    self.set_values_in_page_unhashed(
+                        context,
+                        changes,
+                        path_offset + common_prefix.len() as u8,
+                        child_page_id,
+                        tracker,
+                        Some(current_node_ref),
+                        0,
+                    )?
+                };
+
+            match child_pointer_change {
+                PointerChangeUnhashed::Update(new_child_pointer, child_depth) => {
+                    self.update_node_child(node, slotted_page, page_index, Some(new_child_pointer), 0)?;
+                    let depth = child_depth + 1;
+                    tracker.record(current_node_ref, parent, parent_child_index, depth);
+                    Ok(PointerChangeUnhashed::Update(
+                        Pointer::new_unhashed(node_location(page_id, page_index)),
+                        depth,
+                    ))
+                }
+                PointerChangeUnhashed::Delete => {
+                    self.update_node_child(node, slotted_page, page_index, None, 0)?;
+                    tracker.record(current_node_ref, parent, parent_child_index, 0);
+                    Ok(PointerChangeUnhashed::Update(
+                        Pointer::new_unhashed(node_location(page_id, page_index)),
+                        0,
+                    ))
+                }
+                PointerChangeUnhashed::None => Ok(PointerChangeUnhashed::None),
+            }
+        } else {
+            self.create_first_storage_node_unhashed(
+                context, changes, path_offset, slotted_page, page_index, node,
+                common_prefix, tracker, parent, parent_child_index,
+            )
+        }
+    }
+
+    /// Unhashed version of create_first_storage_node.
+    fn create_first_storage_node_unhashed(
+        &self,
+        context: &mut TransactionContext,
+        changes: &[(RawPath, Option<TrieValue>)],
+        path_offset: u8,
+        slotted_page: &mut SlottedPageMut<'_>,
+        page_index: u8,
+        node: &mut Node,
+        common_prefix: &RawPath,
+        tracker: &mut HashTracker,
+        parent: Option<NodeRef>,
+        parent_child_index: u8,
+    ) -> Result<PointerChangeUnhashed, Error> {
+        let page_id = slotted_page.id();
+        let current_node_ref = NodeRef::new(page_id, page_index);
+
+        if changes.is_empty() {
+            return Ok(PointerChangeUnhashed::None);
+        }
+
+        let ((path, value), remaining_changes) = changes.split_first().unwrap();
+        if value.is_none() {
+            return self.set_values_in_cloned_page_unhashed(
+                context, remaining_changes, path_offset, slotted_page, page_index,
+                tracker, parent, parent_child_index,
+            );
+        }
+
+        let node_size_incr = node.size_incr_with_new_child();
+        let remaining_path = path.slice(path_offset as usize + common_prefix.len()..);
+        let new_node = Node::new_leaf(&remaining_path, value.as_ref().unwrap())?;
+
+        if slotted_page.num_free_bytes() < node_size_incr + new_node.size() + CELL_POINTER_SIZE {
+            self.split_page(context, slotted_page)?;
+            return Err(Error::PageSplit(0));
+        }
+
+        let new_cell_index = slotted_page.insert_value(&new_node)?;
+        let location = Location::for_cell(new_cell_index);
+        node.set_child(0, Pointer::new_unhashed(location))?;
+        slotted_page.set_value(page_index, node)?;
+
+        // Track the new storage leaf
+        let new_leaf_ref = NodeRef::new(page_id, new_cell_index);
+        tracker.record(new_leaf_ref, Some(current_node_ref), 0, 0);
+
+        if remaining_changes.is_empty() {
+            // Account node now has depth 1 (it has a storage child at depth 0)
+            tracker.record(current_node_ref, parent, parent_child_index, 1);
+            return Ok(PointerChangeUnhashed::Update(
+                Pointer::new_unhashed(node_location(page_id, page_index)),
+                1,
+            ));
+        }
+
+        self.set_values_in_cloned_page_unhashed(
+            context, remaining_changes, path_offset, slotted_page, page_index,
+            tracker, parent, parent_child_index,
+        )
+    }
+
+    /// Unhashed version of handle_branch_node_traversal.
+    fn handle_branch_node_traversal_unhashed(
+        &self,
+        context: &mut TransactionContext,
+        changes: &[(RawPath, Option<TrieValue>)],
+        path_offset: u8,
+        slotted_page: &mut SlottedPageMut<'_>,
+        page_index: u8,
+        node: &mut Node,
+        common_prefix: &RawPath,
+        tracker: &mut HashTracker,
+        parent: Option<NodeRef>,
+        parent_child_index: u8,
+    ) -> Result<PointerChangeUnhashed, Error> {
+        let page_id = slotted_page.id();
+        let current_node_ref = NodeRef::new(page_id, page_index);
+
+        let mut remaining_changes = changes;
+        let mut handled_in_children: usize = 0;
+        let mut max_child_depth: u16 = 0;
+
+        for child_index in 0..16 {
+            let matching_changes;
+            (matching_changes, remaining_changes) =
+                remaining_changes.split_at(remaining_changes.partition_point(|(path, _)| {
+                    path.get_unchecked(path_offset as usize + common_prefix.len()) == child_index
+                }));
+
+            if matching_changes.is_empty() {
+                continue;
+            }
+
+            let result = self.handle_child_node_traversal_unhashed(
+                context, matching_changes, path_offset, slotted_page, page_index,
+                node, common_prefix, child_index, tracker, current_node_ref,
+            );
+
+            match result {
+                Ok(depth) => {
+                    max_child_depth = max_child_depth.max(depth);
+                }
+                Err(Error::PageSplit(processed)) => {
+                    return Err(Error::PageSplit(handled_in_children + processed));
+                }
+                Err(e) => return Err(e),
+            }
+            handled_in_children += matching_changes.len();
+        }
+        assert!(handled_in_children == changes.len());
+
+        self.handle_branch_node_cleanup_unhashed(
+            context, slotted_page, page_index, node,
+            tracker, parent, parent_child_index, max_child_depth,
+        )
+    }
+
+    /// Unhashed version of handle_child_node_traversal.
+    fn handle_child_node_traversal_unhashed(
+        &self,
+        context: &mut TransactionContext,
+        matching_changes: &[(RawPath, Option<TrieValue>)],
+        path_offset: u8,
+        slotted_page: &mut SlottedPageMut<'_>,
+        page_index: u8,
+        node: &mut Node,
+        common_prefix: &RawPath,
+        child_index: u8,
+        tracker: &mut HashTracker,
+        parent_ref: NodeRef,
+    ) -> Result<u16, Error> {
+        let page_id = slotted_page.id();
+        let child_pointer = node.child(child_index)?;
+
+        match child_pointer {
+            Some(child_pointer) => {
+                let child_location = child_pointer.location();
+                let child_pointer_change =
+                    if let Some(child_cell_index) = child_location.cell_index() {
+                        self.set_values_in_cloned_page_unhashed(
+                            context,
+                            matching_changes,
+                            path_offset + common_prefix.len() as u8 + 1,
+                            slotted_page,
+                            child_cell_index,
+                            tracker,
+                            Some(parent_ref),
+                            child_index,
+                        )?
+                    } else {
+                        let child_page_id = child_location.page_id().unwrap();
+                        self.set_values_in_page_unhashed(
+                            context,
+                            matching_changes,
+                            path_offset + common_prefix.len() as u8 + 1,
+                            child_page_id,
+                            tracker,
+                            Some(parent_ref),
+                            child_index,
+                        )?
+                    };
+
+                let depth = match child_pointer_change {
+                    PointerChangeUnhashed::Update(new_child_pointer, child_depth) => {
+                        self.update_node_child(node, slotted_page, page_index, Some(new_child_pointer), child_index)?;
+                        child_depth
+                    }
+                    PointerChangeUnhashed::Delete => {
+                        self.update_node_child(node, slotted_page, page_index, None, child_index)?;
+                        0
+                    }
+                    PointerChangeUnhashed::None => 0,
+                };
+                Ok(depth)
+            }
+            None => {
+                let index_of_first_non_delete_change =
+                    matching_changes.iter().position(|(_, value)| value.is_some());
+
+                let matching_changes_without_leading_deletes =
+                    match index_of_first_non_delete_change {
+                        Some(index) => &matching_changes[index..],
+                        None => &[],
+                    };
+
+                if matching_changes_without_leading_deletes.is_empty() {
+                    return Ok(0);
+                }
+
+                let ((path, value), matching_changes) =
+                    matching_changes_without_leading_deletes.split_first().unwrap();
+                let remaining_path = path.slice(path_offset as usize + common_prefix.len() + 1..);
+                let value = value.as_ref().unwrap();
+
+                let node_size_incr = node.size_incr_with_new_child();
+                let new_node = Node::new_leaf(&remaining_path, value)?;
+
+                if slotted_page.num_free_bytes() < node_size_incr + new_node.size() + CELL_POINTER_SIZE {
+                    self.split_page(context, slotted_page)?;
+                    return Err(Error::PageSplit(0));
+                }
+
+                let new_cell_index = slotted_page.insert_value(&new_node)?;
+                let location = Location::for_cell(new_cell_index);
+                node.set_child(child_index, Pointer::new_unhashed(location))?;
+                slotted_page.set_value(page_index, node)?;
+
+                let new_leaf_ref = NodeRef::new(page_id, new_cell_index);
+
+                if !matching_changes.is_empty() {
+                    // Don't record yet - recursion may transform this leaf into a branch
+                    let child_pointer_change = self.set_values_in_cloned_page_unhashed(
+                        context,
+                        matching_changes,
+                        path_offset + common_prefix.len() as u8 + 1,
+                        slotted_page,
+                        new_cell_index,
+                        tracker,
+                        Some(parent_ref),
+                        child_index,
+                    )?;
+
+                    match child_pointer_change {
+                        PointerChangeUnhashed::Update(new_child_pointer, child_depth) => {
+                            self.update_node_child(node, slotted_page, page_index, Some(new_child_pointer), child_index)?;
+                            // Node was transformed; the recursive call already recorded it
+                            return Ok(child_depth);
+                        }
+                        PointerChangeUnhashed::Delete => {
+                            self.update_node_child(node, slotted_page, page_index, None, child_index)?;
+                            // Node was deleted, don't record
+                            return Ok(0);
+                        }
+                        PointerChangeUnhashed::None => {
+                            // No change, but we still need to record this new leaf
+                            tracker.record(new_leaf_ref, Some(parent_ref), child_index, 0);
+                        }
+                    }
+                } else {
+                    // No more changes, record the leaf now at depth 0
+                    tracker.record(new_leaf_ref, Some(parent_ref), child_index, 0);
+                }
+                Ok(0)
+            }
+        }
+    }
+
+    /// Unhashed version of handle_branch_node_cleanup.
+    /// Uses the same merge logic as handle_branch_node_cleanup to ensure identical tree structure.
+    fn handle_branch_node_cleanup_unhashed(
+        &self,
+        context: &mut TransactionContext,
+        slotted_page: &mut SlottedPageMut<'_>,
+        page_index: u8,
+        node: &Node,
+        _tracker: &mut HashTracker,
+        _parent: Option<NodeRef>,
+        _parent_child_index: u8,
+        _max_child_depth: u16,
+    ) -> Result<PointerChangeUnhashed, Error> {
+        let page_id = slotted_page.id();
+        let children = node.enumerate_children()?;
+
+        if children.is_empty() {
+            // Delete empty branch node
+            slotted_page.delete_value(page_index)?;
+            if page_index == 0 {
+                self.orphan_page(context, page_id)?;
+            }
+            Ok(PointerChangeUnhashed::Delete)
+        } else if children.len() == 1 {
+            // Merge branch with its only child (same as regular path)
+            let (idx, ptr) = children[0];
+            self.merge_branch_with_only_child_unhashed(context, slotted_page, page_index, node, idx, ptr)
+        } else {
+            // Normal branch node with multiple children - return unhashed pointer
+            Ok(PointerChangeUnhashed::Update(
+                Pointer::new_unhashed(node_location(page_id, page_index)),
+                0, // Depth will be computed by tree walk
+            ))
+        }
+    }
+
+    /// Unhashed version of merge_branch_with_only_child.
+    fn merge_branch_with_only_child_unhashed(
+        &self,
+        context: &mut TransactionContext,
+        slotted_page: &mut SlottedPageMut<'_>,
+        page_index: u8,
+        node: &Node,
+        only_child_index: u8,
+        only_child_node_pointer: &Pointer,
+    ) -> Result<PointerChangeUnhashed, Error> {
+        // Get the child node
+        let (mut only_child_node, child_slotted_page) =
+            if let Some(cell_index) = only_child_node_pointer.location().cell_index() {
+                // Child is on the same page
+                (slotted_page.get_value::<Node>(cell_index)?, None)
+            } else {
+                // Child is on another page
+                let child_page = self.get_mut_clone(
+                    context,
+                    only_child_node_pointer.location().page_id().expect("page_id should exist"),
+                )?;
+                let child_slotted_page = SlottedPageMut::try_from(child_page)?;
+                (child_slotted_page.get_value(0)?, Some(child_slotted_page))
+            };
+
+        // Create the new merged prefix
+        let mut new_nibbles = *node.prefix();
+        new_nibbles.push(only_child_index);
+        new_nibbles = new_nibbles.join(only_child_node.prefix());
+        only_child_node.set_prefix(new_nibbles)?;
+
+        let child_is_in_same_page = child_slotted_page.is_none();
+
+        if child_is_in_same_page {
+            // Child is on the same page
+            self.merge_with_child_on_same_page_unhashed(
+                slotted_page,
+                page_index,
+                &only_child_node,
+                only_child_node_pointer,
+            )
+        } else {
+            // Child is on another page
+            self.merge_with_child_on_other_page_unhashed(
+                context,
+                slotted_page,
+                page_index,
+                &only_child_node,
+                child_slotted_page.unwrap(),
+            )
+        }
+    }
+
+    /// Unhashed version of merge_with_child_on_same_page.
+    fn merge_with_child_on_same_page_unhashed(
+        &self,
+        slotted_page: &mut SlottedPageMut<'_>,
+        page_index: u8,
+        only_child_node: &Node,
+        only_child_node_pointer: &Pointer,
+    ) -> Result<PointerChangeUnhashed, Error> {
+        // Delete the old branch node and child
+        let child_cell_index = only_child_node_pointer.location().cell_index().unwrap();
+        slotted_page.delete_value(page_index)?;
+        slotted_page.delete_value(child_cell_index)?;
+
+        // Insert merged node
+        let new_cell_index = slotted_page.insert_value(only_child_node)?;
+        let location = node_location(slotted_page.id(), new_cell_index);
+        Ok(PointerChangeUnhashed::Update(Pointer::new_unhashed(location), 0))
+    }
+
+    /// Unhashed version of merge_with_child_on_other_page.
+    fn merge_with_child_on_other_page_unhashed(
+        &self,
+        context: &mut TransactionContext,
+        slotted_page: &mut SlottedPageMut<'_>,
+        page_index: u8,
+        only_child_node: &Node,
+        mut child_slotted_page: SlottedPageMut<'_>,
+    ) -> Result<PointerChangeUnhashed, Error> {
+        // Delete branch node from parent page
+        slotted_page.delete_value(page_index)?;
+
+        // Delete old child from child page and insert merged node
+        child_slotted_page.delete_value(0)?;
+        let new_cell_index = child_slotted_page.insert_value(only_child_node)?;
+        assert_eq!(new_cell_index, 0, "merged node should be at index 0");
+
+        // Orphan parent page if it's empty
+        if page_index == 0 {
+            self.orphan_page(context, slotted_page.id())?;
+        }
+
+        let location = node_location(child_slotted_page.id(), new_cell_index);
+        Ok(PointerChangeUnhashed::Update(Pointer::new_unhashed(location), 0))
     }
 }
 
@@ -3813,5 +4817,167 @@ mod tests {
             "parent page {parent_page_id} is not in the orphan page list"
         );
         assert_eq!(count, 4, "Expected 4 orphan pages after the delete operation");
+    }
+
+    /// Test that set_values_parallel works for a single account
+    #[test]
+    fn test_set_values_parallel_single_account() {
+        let (engine, mut context) = create_test_engine(100);
+
+        let address = address!("0x1234567890123456789012345678901234567890");
+        let account = create_test_account(100, 1);
+        let path = RawPath::from(AddressPath::for_address(address));
+
+        // Apply using parallel method
+        let mut changes = vec![(path.clone(), Some(TrieValue::Account(account.clone())))];
+        engine.set_values_parallel(&mut context, &mut changes).unwrap();
+
+        // Verify the account was written
+        let read_account = engine.get_account(&mut context, &AddressPath::for_address(address)).unwrap();
+        assert_eq!(read_account, Some(account.clone()));
+
+        // Check root hash is not zero
+        assert_ne!(context.root_node_hash, EMPTY_ROOT_HASH);
+    }
+
+    /// Test that set_values and set_values_parallel produce identical results
+    #[test]
+    fn test_set_values_parallel_matches_set_values() {
+        use crate::storage::hash_tracker::HashTracker;
+        use crate::storage::parallel_hasher::ParallelHasher;
+
+        // Use fixed addresses for reproducibility
+        let changes: Vec<(RawPath, Option<TrieValue>)> = vec![
+            (RawPath::from(AddressPath::for_address(address!("0x1111111111111111111111111111111111111111"))), Some(TrieValue::Account(create_test_account(100, 1)))),
+            (RawPath::from(AddressPath::for_address(address!("0x2222222222222222222222222222222222222222"))), Some(TrieValue::Account(create_test_account(200, 2)))),
+        ];
+
+        // Create two identical engines
+        let (engine1, mut context1) = create_test_engine(1000);
+        let (engine2, mut context2) = create_test_engine(1000);
+
+        // Apply changes using the standard method
+        let mut changes1 = changes.clone();
+        engine1.set_values(&mut context1, &mut changes1).unwrap();
+        eprintln!("Standard set_values root hash: {:?}", context1.root_node_hash);
+
+        // Apply the same changes using the parallel method - but step by step
+        let mut changes2 = changes.clone();
+        let mut tracker = HashTracker::with_capacity(changes2.len());
+        engine2.set_values_unhashed(&mut context2, &mut changes2, &mut tracker).unwrap();
+
+        eprintln!("After unhashed write:");
+        eprintln!("  tracker.len() = {}", tracker.len());
+        eprintln!("  tracker.max_depth() = {}", tracker.max_depth());
+        for depth in 0..=tracker.max_depth() {
+            let nodes = tracker.nodes_at_depth(depth);
+            eprintln!("  depth {}: {} nodes", depth, nodes.len());
+            for node in nodes {
+                eprintln!("    node at page {:?} cell {} parent={:?}", node.node_ref.page_id, node.node_ref.cell_index, node.parent);
+            }
+        }
+
+        // Now hash
+        let hasher = ParallelHasher::new(&engine2, &tracker);
+        hasher.hash_all(&mut context2).unwrap();
+
+        eprintln!("Parallel root hash: {:?}", context2.root_node_hash);
+
+        // Root hashes must match
+        assert_eq!(
+            context1.root_node_hash, context2.root_node_hash,
+            "set_values and set_values_parallel must produce identical root hashes"
+        );
+    }
+
+    /// Test parallel writes with more accounts
+    #[test]
+    fn test_set_values_parallel_larger_batch() {
+        let batch_size = 36;
+        let mut rng = StdRng::seed_from_u64(54321);
+
+        let changes: Vec<(RawPath, Option<TrieValue>)> = (0..batch_size)
+            .map(|_| {
+                let mut addr_bytes = [0u8; 20];
+                rng.fill(&mut addr_bytes);
+                let address = Address::from_slice(&addr_bytes);
+                let path = RawPath::from(AddressPath::for_address(address));
+                let account = random_test_account(&mut rng);
+                (path, Some(TrieValue::Account(account)))
+            })
+            .collect();
+
+        let (engine1, mut context1) = create_test_engine(1000);
+        let (engine2, mut context2) = create_test_engine(1000);
+
+        // Apply using standard method
+        let mut changes1 = changes.clone();
+        engine1.set_values(&mut context1, &mut changes1).unwrap();
+
+        // Apply using parallel method
+        let mut changes2 = changes.clone();
+        engine2.set_values_parallel(&mut context2, &mut changes2).unwrap();
+
+        assert_eq!(
+            context1.root_node_hash, context2.root_node_hash,
+            "Root hashes must match for batch size {}", batch_size
+        );
+    }
+
+    /// Test parallel writes with deletes
+    #[test]
+    fn test_set_values_parallel_with_deletes() {
+        let mut rng = StdRng::seed_from_u64(98765);
+
+        // Generate 50 random accounts
+        let changes: Vec<(RawPath, Option<TrieValue>)> = (0..50)
+            .map(|_| {
+                let mut addr_bytes = [0u8; 20];
+                rng.fill(&mut addr_bytes);
+                let address = Address::from_slice(&addr_bytes);
+                let path = RawPath::from(AddressPath::for_address(address));
+                let account = random_test_account(&mut rng);
+                (path, Some(TrieValue::Account(account)))
+            })
+            .collect();
+
+        // First insert all accounts into both engines
+        let (engine1, mut context1) = create_test_engine(1000);
+        let (engine2, mut context2) = create_test_engine(1000);
+
+        let mut changes1 = changes.clone();
+        engine1.set_values(&mut context1, &mut changes1).unwrap();
+        let mut changes2 = changes.clone();
+        engine2.set_values_parallel(&mut context2, &mut changes2).unwrap();
+
+        assert_eq!(
+            context1.root_node_hash, context2.root_node_hash,
+            "Initial inserts must match"
+        );
+
+        // Now delete half and update half
+        let delete_changes: Vec<(RawPath, Option<TrieValue>)> = changes
+            .iter()
+            .enumerate()
+            .map(|(i, (path, _))| {
+                if i % 2 == 0 {
+                    (path.clone(), None) // Delete
+                } else {
+                    let account = random_test_account(&mut rng);
+                    (path.clone(), Some(TrieValue::Account(account))) // Update
+                }
+            })
+            .collect();
+
+        let mut delete_changes1 = delete_changes.clone();
+        engine1.set_values(&mut context1, &mut delete_changes1).unwrap();
+
+        let mut delete_changes2 = delete_changes.clone();
+        engine2.set_values_parallel(&mut context2, &mut delete_changes2).unwrap();
+
+        assert_eq!(
+            context1.root_node_hash, context2.root_node_hash,
+            "Delete/update batch must match"
+        );
     }
 }

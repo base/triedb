@@ -10,6 +10,7 @@ use proptest::prelude::*;
 use proptest_derive::Arbitrary;
 
 const HASH_FLAG: u8 = 0x1;
+const UNHASHED_FLAG: u8 = 0x2;
 /// A pointer to a node in the trie.
 /// This is a wrapper around a [Location] and an [RlpNode].
 #[derive(Debug, Clone, PartialEq, Eq, Arbitrary)]
@@ -49,6 +50,12 @@ impl Pointer {
     pub fn is_hash(&self) -> bool {
         self.rlp.is_hash()
     }
+
+    /// Returns true if this pointer has a pending (unhashed) value.
+    /// Unhashed pointers are created by [`Pointer::new_unhashed`] and use empty RLP.
+    pub fn is_unhashed(&self) -> bool {
+        self.rlp.as_slice().is_empty()
+    }
 }
 
 impl Value for Pointer {
@@ -69,7 +76,10 @@ impl Value for Pointer {
     fn from_bytes(bytes: &[u8]) -> value::Result<Self> {
         let arr: [u8; 37] = bytes.try_into().map_err(|_| value::Error::InvalidEncoding)?;
         let flags = arr[4];
-        let rlp = if flags & HASH_FLAG == HASH_FLAG {
+        let rlp = if flags & UNHASHED_FLAG == UNHASHED_FLAG {
+            // Unhashed pointer - use empty RLP
+            RlpNode::from_rlp(&[])
+        } else if flags & HASH_FLAG == HASH_FLAG {
             RlpNode::word_rlp(&B256::from_slice(&arr[5..37]))
         } else {
             // Because the RLP string must be 1-32 bytes, we can safely use the first byte to
@@ -110,8 +120,14 @@ impl From<&Pointer> for [u8; 37] {
 
         // Determine flags and content
         let rlp = pointer.rlp();
-        let (flags, content) =
-            if rlp.is_hash() { (HASH_FLAG, &rlp[1..]) } else { (0, rlp.as_ref()) };
+        let (flags, content) = if rlp.as_slice().is_empty() {
+            // Unhashed pointer - mark with UNHASHED_FLAG
+            (UNHASHED_FLAG, &[][..])
+        } else if rlp.is_hash() {
+            (HASH_FLAG, &rlp[1..])
+        } else {
+            (0, rlp.as_ref())
+        };
 
         data[4] = flags;
         let content_len = content.len().min(33);
@@ -222,5 +238,20 @@ mod tests {
             let decoded = Pointer::from_bytes(&bytes).unwrap();
             prop_assert_eq!(pointer, decoded);
         }
+    }
+
+    #[test]
+    fn test_is_unhashed() {
+        let unhashed = Pointer::new_unhashed(Location::for_cell(1));
+        assert!(unhashed.is_unhashed());
+        assert!(!unhashed.is_hash());
+
+        let hashed = Pointer::new(Location::for_cell(1), RlpNode::word_rlp(&EMPTY_ROOT_HASH));
+        assert!(!hashed.is_unhashed());
+        assert!(hashed.is_hash());
+
+        let short_rlp = Pointer::new(Location::for_cell(1), RlpNode::from_rlp(&encode(42u64)));
+        assert!(!short_rlp.is_unhashed());
+        assert!(!short_rlp.is_hash());
     }
 }
