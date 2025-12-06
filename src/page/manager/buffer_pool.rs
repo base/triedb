@@ -52,17 +52,12 @@ pub(crate) struct FrameId(u32);
 
 impl FrameId {
     #[inline]
-    pub const fn as_u32(&self) -> u32 {
-        self.0
-    }
-
-    #[inline]
-    pub const fn as_usize(&self) -> usize {
+    pub(crate) const fn as_usize(&self) -> usize {
         self.0 as usize
     }
 
     #[inline]
-    pub const fn from_usize(value: usize) -> Self {
+    pub(crate) const fn from_usize(value: usize) -> Self {
         FrameId(value as u32)
     }
 }
