@@ -209,12 +209,23 @@ impl PageManager {
                         if result.is_err() {
                             panic!("{:?}", result);
                         }
-                        // Note: it's possible that when a mut page get dropped, before it's wrote
-                        // to the disk, the same page is used again as mut page. We rely on page_table
-                        // to track which pages are currently in the buffer pool.
                         pages.iter().for_each(|(page_id, frame_id)| {
-                            updated_pages.remove(page_id);
+                            let frame = &frames[frame_id.0 as usize];
+                            if let PageState::Dirty(_) =
+                                unsafe { RawPageState::from_ptr(frame.ptr.cast()).load() }
+                            {
+                                return;
+                            }
                             replacer.unpin(*frame_id);
+                            // It's possible that between checking for dirty state and unpin, the
+                            // page is get_mut again. In that case, re-pin the frame.
+                            if let PageState::Dirty(_) =
+                                unsafe { RawPageState::from_ptr(frame.ptr.cast()).load() }
+                            {
+                                replacer.pin(*frame_id);
+                                return;
+                            }
+                            updated_pages.remove(page_id);
                         });
                     }
                     Ok(WriteMessage::Shutdown) => {
