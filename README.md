@@ -62,7 +62,7 @@ Database is broken down in to pages, each page has 4 KB size.
   * Snapshot ID (8 bytes)
     * This is the Version when page is created.
 * Page content (4088 bytes)
-  * This is ether root page or subtrie page.
+  * This is either root page or subtrie page.
 
 ```mermaid
 block-beta
@@ -151,7 +151,7 @@ block-beta
 
 ### Branch Node
 
-Due to the exponential decrease in Trie density as deeper portions of the Trie are traversed, we expect the overwhelming majority of Branch nodes to contain a small number of children (2-4) and short prefix (0-4 nibbles), but also expect the top portion of the Trie to primarily consist of nearly-16-child Branches with 0 additional prefix. In order to keep the encoded size of a Branch node relatively stable as individual children are inserted and removed, we choose to use a variable branching factor for the Branch node based on the number of children it contains. Based on the value of the Chilidren Bitmask, the Branch will contain 2, 4, 8, or 16 Child slots in order to only resize the Branch node on each doubling of Child occupancy.
+Due to the exponential decrease in Trie density as deeper portions of the Trie are traversed, we expect the overwhelming majority of Branch nodes to contain a small number of children (2-4) and short prefix (0-4 nibbles), but also expect the top portion of the Trie to primarily consist of nearly-16-child Branches with 0 additional prefix. In order to keep the encoded size of a Branch node relatively stable as individual children are inserted and removed, we choose to use a variable branching factor for the Branch node based on the number of children it contains. Based on the value of the Children Bitmask, the Branch will contain 2, 4, 8, or 16 Child slots in order to only resize the Branch node on each doubling of Child occupancy.
 
 Note that a Branch Node with a non-empty Path Prefix is treated as both an Extension Node and a Branch Node for the purpose of RLP encoding and merkleization, and must be hashed twice.
 

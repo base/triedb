@@ -3483,7 +3483,7 @@ mod tests {
             storage_engine.get_page(&context, context.root_node_page_id.unwrap()).unwrap();
         let root_subtrie_contents_before = root_subtrie_page.contents().to_vec();
 
-        // WHEN: an account with a similiar but divergent path is deleted
+        // WHEN: an account with a similar but divergent path is deleted
         let address_nibbles = Nibbles::unpack(hex!(
             "0xf80f21938e5248ec70b870ac1103d0dd01b7811550a7ffffffffffffffffffff"
         ));
