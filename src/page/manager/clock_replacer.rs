@@ -35,9 +35,9 @@ impl ClockReplacer {
 
         let frame = &self.frames[frame_id.as_usize()];
         // First increment pin count
-        frame.pin.store(true, Ordering::SeqCst);
+        frame.pin.store(true, Ordering::Release);
         // Then set usage bit to true (give it a second chance)
-        frame.ref_bit.store(true, Ordering::SeqCst);
+        frame.ref_bit.store(true, Ordering::Release);
     }
 
     pub(super) fn unpin(&self, frame_id: FrameId) {
@@ -46,37 +46,7 @@ impl ClockReplacer {
         }
 
         let frame = &self.frames[frame_id.as_usize()];
-        frame.pin.store(false, Ordering::SeqCst);
-    }
-
-    // Find a frame to evict
-    pub(super) fn victim(&self) -> Option<FrameId> {
-        let mut hand = self.hand.lock();
-        let num_frames = self.frames.len();
-
-        for _ in 0..(num_frames * 3) {
-            let current_idx = *hand;
-            let frame = &self.frames[current_idx];
-
-            // Move hand forward for next iteration
-            *hand = (*hand + 1) % num_frames;
-
-            let current_pins = frame.pin.load(Ordering::SeqCst);
-            if current_pins {
-                // This page is being used. Cannot evict. Skip it.
-                continue;
-            }
-            // Check reference bit: swap atomically returns old value and sets to false
-            if frame.ref_bit.swap(false, Ordering::SeqCst) {
-                // Had a second chance (was true, now set to false)
-                continue;
-            }
-
-            return Some(FrameId::from_usize(current_idx));
-        }
-
-        // If get here, literally every single frame is Pinned. The buffer pool is exhausted.
-        None
+        frame.pin.store(false, Ordering::Release);
     }
 
     // Find a frame to evict and pin it
@@ -94,21 +64,21 @@ impl ClockReplacer {
             // Move hand forward for next iteration
             *hand = (*hand + 1) % num_frames;
 
-            let current_pins = frame.pin.load(Ordering::SeqCst);
+            let current_pins = frame.pin.load(Ordering::Relaxed);
             if current_pins {
                 // This page is being used. Cannot evict. Skip it.
                 continue;
             }
             // Check reference bit: swap atomically returns old value and sets to false
-            if frame.ref_bit.swap(false, Ordering::SeqCst) {
+            if frame.ref_bit.swap(false, Ordering::Relaxed) {
                 // Had a second chance (was true, now set to false)
                 continue;
             }
 
             // Pin the frame
             let frame = &self.frames[current_idx];
-            frame.pin.store(true, Ordering::SeqCst);
-            frame.ref_bit.store(true, Ordering::SeqCst);
+            frame.pin.store(true, Ordering::Relaxed);
+            frame.ref_bit.store(true, Ordering::Relaxed);
             let frame_id = FrameId::from_usize(current_idx);
             cleanup(frame_id);
             return Some(frame_id);
@@ -161,12 +131,12 @@ mod tests {
     fn test_evict() {
         let r = ClockReplacer::new(5);
         (0..5).for_each(|i| {
-            assert_eq!(r.victim(), Some(FrameId::from_usize(i)));
+            assert_eq!(r.victim_and_pin(|_| {}), Some(FrameId::from_usize(i)));
             r.pin(FrameId::from_usize(i));
         });
-        assert_eq!(r.victim(), None);
+        assert_eq!(r.victim_and_pin(|_| {}), None);
 
         r.unpin(FrameId::from_usize(4));
-        assert_eq!(r.victim(), Some(FrameId::from_usize(4)));
+        assert_eq!(r.victim_and_pin(|_| {}), Some(FrameId::from_usize(4)));
     }
 }
