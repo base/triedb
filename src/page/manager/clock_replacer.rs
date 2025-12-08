@@ -34,7 +34,7 @@ impl ClockReplacer {
         }
 
         let frame = &self.frames[frame_id.as_usize()];
-        // First increment pin count
+        // First set pin to true
         frame.pin.store(true, Ordering::Release);
         // Then set usage bit to true (give it a second chance)
         frame.ref_bit.store(true, Ordering::Release);
@@ -64,21 +64,21 @@ impl ClockReplacer {
             // Move hand forward for next iteration
             *hand = (*hand + 1) % num_frames;
 
-            let current_pins = frame.pin.load(Ordering::Relaxed);
+            let current_pins = frame.pin.load(Ordering::Acquire);
             if current_pins {
                 // This page is being used. Cannot evict. Skip it.
                 continue;
             }
             // Check reference bit: swap atomically returns old value and sets to false
-            if frame.ref_bit.swap(false, Ordering::Relaxed) {
+            if frame.ref_bit.swap(false, Ordering::Acquire) {
                 // Had a second chance (was true, now set to false)
                 continue;
             }
 
             // Pin the frame
             let frame = &self.frames[current_idx];
-            frame.pin.store(true, Ordering::Relaxed);
-            frame.ref_bit.store(true, Ordering::Relaxed);
+            frame.pin.store(true, Ordering::Release);
+            frame.ref_bit.store(true, Ordering::Release);
             let frame_id = FrameId::from_usize(current_idx);
             cleanup(frame_id);
             return Some(frame_id);
