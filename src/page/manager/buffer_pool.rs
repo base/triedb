@@ -341,10 +341,10 @@ impl PageManager {
 
     fn select_frame_id(&self, page_id: PageId) -> Result<FrameId, PageError> {
         loop {
-            // Check if page is in the cache
-            if let Some(frame_id) = self.page_table.get(&page_id) {
-                self.replacer.pin(*frame_id);
-                return Ok(*frame_id);
+            // Use get().map() to release the DashMap lock immediately before pinning
+            if let Some(frame_id) = self.page_table.get(&page_id).map(|r| *r) {
+                self.replacer.pin(frame_id);
+                return Ok(frame_id);
             }
             // Otherwise, need to load page from disk
             if self.loading_pages.insert(page_id) {
