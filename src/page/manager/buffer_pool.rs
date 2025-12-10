@@ -66,19 +66,20 @@ pub(crate) type FxMap<K, V> = DashMap<K, V, FxBuildHasher>;
 pub(crate) type FxSet<K> = DashSet<K, FxBuildHasher>;
 
 pub struct PageManager {
-    num_frames: u32,
-    page_count: AtomicU32,
-    file: RwLock<File>,
-    file_len: AtomicU64,
-    frames: Arc<Vec<Frame>>, /* list of frames that hold pages' data, indexed by frame id with
-                              * fix num_frames size */
     page_table: FxMap<PageId, FrameId>, /* mapping between page id and buffer pool frames,
                                          * indexed by page id with fix num_frames size */
+    frames: Arc<Vec<Frame>>, /* list of frames that hold pages' data, indexed by frame id with
+                              * fix num_frames size */
     replacer: Arc<ClockReplacer>,
+    loading_pages: FxSet<PageId>,
+    page_count: AtomicU32,
+    num_frames: u32,
+
     updated_pages: Arc<FxMap<PageId, FrameId>>,
     new_pages: Mutex<Vec<(FrameId, PageId)>>,
-    loading_pages: FxSet<PageId>,
 
+    file: RwLock<File>,
+    file_len: AtomicU64,
     io_uring: Arc<RwLock<IoUring>>,
     tx_job: Sender<WriteMessage>,
     drop_pages: Mutex<Vec<PageId>>,
