@@ -44,8 +44,7 @@ impl ClockReplacer {
 
         let frame = &self.frames[frame_id.as_usize()];
         // Clear pin bit (bit 0), keep ref_bit unchanged
-        let current = frame.state.load(Ordering::Relaxed);
-        frame.state.store(current & 0b10, Ordering::Release);
+        frame.state.fetch_and(0b10, Ordering::Release);
     }
 
     // Find a frame to evict and pin it
@@ -77,7 +76,6 @@ impl ClockReplacer {
             }
 
             // Pin the frame: set both pin (bit 0) and ref_bit (bit 1) to true
-            let frame = &self.frames[current_idx];
             frame.state.store(0b11, Ordering::Relaxed);
             let frame_id = FrameId::from_usize(current_idx);
             cleanup(frame_id);
