@@ -170,10 +170,81 @@ impl<DB: Deref<Target = Database>> Transaction<DB, RW> {
         Ok(())
     }
 
+    /// Applies changes to the trie using the standard sequential approach.
+    pub fn set_values(
+        &mut self,
+        changes: &mut [(RawPath, Option<TrieValue>)],
+    ) -> Result<(), TransactionError> {
+        self.database
+            .storage_engine
+            .set_values_serial(&mut self.context, changes)
+            .map_err(|_| TransactionError)
+    }
+
+    /// Same as set_values but with timing output for profiling.
+    pub fn set_values_timed(
+        &mut self,
+        changes: &mut [(RawPath, Option<TrieValue>)],
+        print_timing: bool,
+    ) -> Result<(), TransactionError> {
+        self.database
+            .storage_engine
+            .set_values_serial_timed(&mut self.context, changes, print_timing)
+            .map_err(|_| TransactionError)
+    }
+
+    /// Applies changes to the trie using parallel hash computation.
+    ///
+    /// For large batches (>1000 changes), this may provide better performance
+    /// by computing hashes in parallel using Rayon.
+    pub fn set_values_parallel(
+        &mut self,
+        changes: &mut [(RawPath, Option<TrieValue>)],
+    ) -> Result<(), TransactionError> {
+        self.database
+            .storage_engine
+            .set_values(&mut self.context, changes)
+            .map_err(|_| TransactionError)
+    }
+
+    /// Same as set_values_parallel but with timing output for profiling.
+    pub fn set_values_parallel_timed(
+        &mut self,
+        changes: &mut [(RawPath, Option<TrieValue>)],
+        print_timing: bool,
+    ) -> Result<(), TransactionError> {
+        self.database
+            .storage_engine
+            .set_values_parallel_timed(&mut self.context, changes, print_timing)
+            .map_err(|_| TransactionError)
+    }
+
+    /// Applies changes to the trie using parallel subtree processing (V2).
+    ///
+    /// This is a new parallel approach that:
+    /// 1. Processes same-page changes first (handles page splits)
+    /// 2. Spawns parallel tasks for cross-page children
+    /// 3. Computes hashes inline during traversal
+    ///
+    /// For batches with >1000 changes, this should provide significant speedup.
+    /// For smaller batches, falls back to serial processing.
+    pub fn set_values_parallel_v2(
+        &mut self,
+        changes: &mut [(RawPath, Option<TrieValue>)],
+    ) -> Result<(), TransactionError> {
+        self.database
+            .storage_engine
+            .set_values_parallel_v2(&mut self.context, changes)
+            .map_err(|_| TransactionError)
+    }
+
     pub fn commit(mut self) -> Result<(), TransactionError> {
         let mut changes = self.pending_changes.drain().collect::<Vec<_>>();
         if !changes.is_empty() {
-            self.database.storage_engine.set_values(&mut self.context, changes.as_mut()).unwrap();
+            self.database
+                .storage_engine
+                .set_values_parallel_v2(&mut self.context, changes.as_mut())
+                .unwrap();
         }
 
         let mut transaction_manager = self.database.transaction_manager.lock();

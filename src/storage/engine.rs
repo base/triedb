@@ -75,6 +75,28 @@ impl PointerChangeUnhashed {
     }
 }
 
+/// Result from processing a page and its subtree in parallel mode.
+#[derive(Debug)]
+pub struct PageResult {
+    /// New pointer for this subtree (with computed hash), None if deleted
+    pub new_pointer: Option<Pointer>,
+}
+
+/// Deferred work for a cross-page child (collected during same-page processing).
+#[derive(Debug)]
+struct CrossPageWork<'a> {
+    /// The page ID of the child to process
+    child_page_id: PageId,
+    /// Changes destined for this child subtree
+    child_changes: &'a [(RawPath, Option<TrieValue>)],
+    /// Cell index of the parent node that contains the pointer to update
+    parent_cell_index: u8,
+    /// Child index within the parent node (0-15 for branch, 0 for account storage)
+    parent_child_index: u8,
+    /// Path offset for the child subtree
+    path_offset: u8,
+}
+
 impl StorageEngine {
     pub fn new(
         page_manager: PageManager,
@@ -332,11 +354,23 @@ impl StorageEngine {
         }
     }
 
-    pub fn set_values(
+    pub fn set_values_serial(
+        &self,
+        context: &mut TransactionContext,
+        changes: &mut [(RawPath, Option<TrieValue>)],
+    ) -> Result<(), Error> {
+        self.set_values_serial_timed(context, changes, false)
+    }
+
+    /// Same as set_values_serial but with timing output for profiling.
+    pub fn set_values_serial_timed(
         &self,
         context: &mut TransactionContext,
         mut changes: &mut [(RawPath, Option<TrieValue>)],
+        print_timing: bool,
     ) -> Result<(), Error> {
+        use std::time::Instant;
+        let start = Instant::now();
         changes.sort_by(|a, b| a.0.cmp(&b.0));
         if context.root_node_page_id.is_none() {
             // Handle empty trie case, inserting the first new value before traversing the trie.
@@ -374,6 +408,9 @@ impl StorageEngine {
                 context.root_node_hash = EMPTY_ROOT_HASH;
             }
             PointerChange::None => (),
+        }
+        if print_timing {
+            eprintln!("  Serial timing: total={:?}", start.elapsed());
         }
         Ok(())
     }
@@ -463,32 +500,53 @@ impl StorageEngine {
     /// For small batches (<100 changes), this may have slightly higher overhead than
     /// [`set_values`] due to the two-phase approach. For large batches (>1000 changes),
     /// this should provide significant speedup on multi-core systems.
-    pub fn set_values_parallel(
+    pub fn set_values(
         &self,
         context: &mut TransactionContext,
         changes: &mut [(RawPath, Option<TrieValue>)],
     ) -> Result<(), Error> {
+        self.set_values_parallel_timed(context, changes, false)
+    }
+
+    /// Same as set_values but with timing output for profiling.
+    pub fn set_values_parallel_timed(
+        &self,
+        context: &mut TransactionContext,
+        changes: &mut [(RawPath, Option<TrieValue>)],
+        print_timing: bool,
+    ) -> Result<(), Error> {
+        use std::time::Instant;
+
         if changes.is_empty() {
             return Ok(());
         }
 
         // Phase 1: Apply changes with unhashed pointers
-        // We pass a dummy tracker that we ignore - the tree restructuring makes tracking unreliable.
+        let t1 = Instant::now();
         let mut _tracker = HashTracker::with_capacity(changes.len());
         self.set_values_unhashed(context, changes, &mut _tracker)?;
-
+        let phase1_time = t1.elapsed();
 
         // Phase 2: Collect unhashed nodes by walking the tree
+        let t2 = Instant::now();
         let mut tracker = HashTracker::with_capacity(changes.len());
         if let Some(root_page_id) = context.root_node_page_id {
             self.collect_unhashed_nodes(context, root_page_id, 0, &mut tracker, None, 0)?;
         }
+        let phase2_time = t2.elapsed();
 
         // Phase 3: Compute hashes in parallel
+        let t3 = Instant::now();
         if !tracker.is_empty() {
             use crate::storage::parallel_hasher::ParallelHasher;
             let hasher = ParallelHasher::new(self, &tracker);
             hasher.hash_all(context)?;
+        }
+        let phase3_time = t3.elapsed();
+
+        if print_timing {
+            eprintln!("  Parallel timing: phase1={:?} phase2={:?} phase3={:?} nodes={} max_depth={}",
+                phase1_time, phase2_time, phase3_time, tracker.len(), tracker.max_depth());
         }
 
         Ok(())
@@ -2501,6 +2559,859 @@ impl StorageEngine {
 
         let location = node_location(child_slotted_page.id(), new_cell_index);
         Ok(PointerChangeUnhashed::Update(Pointer::new_unhashed(location), 0))
+    }
+
+    // ==================== Parallel Subtree Processing (V2) ====================
+    // This approach parallelizes at page boundaries, processing same-page changes
+    // first (handling splits), then spawning parallel tasks for cross-page children.
+
+    /// Minimum number of changes in a subtree to justify spawning a parallel task.
+    const MIN_CHANGES_FOR_SPAWN: usize = 100;
+
+    /// Minimum total changes to use parallel processing at all.
+    const PARALLEL_THRESHOLD: usize = 1000;
+
+    /// Entry point for parallel subtree processing.
+    ///
+    /// This is a new parallel approach that parallelizes at page boundaries:
+    /// 1. Process all same-page changes first (handles page splits)
+    /// 2. Spawn parallel tasks for cross-page children
+    /// 3. Update pointers with results from parallel tasks
+    /// 4. Compute hashes inline
+    ///
+    /// For small batches (<1000 changes), falls back to serial processing.
+    pub fn set_values_parallel_v2(
+        &self,
+        context: &mut TransactionContext,
+        changes: &mut [(RawPath, Option<TrieValue>)],
+    ) -> Result<(), Error> {
+        if changes.len() < Self::PARALLEL_THRESHOLD {
+            return self.set_values_serial(context, changes);
+        }
+
+        changes.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Handle empty trie case
+        if context.root_node_page_id.is_none() {
+            let page = self.allocate_page(context)?;
+            let mut slotted_page = SlottedPageMut::try_from(page)?;
+            let ((path, value), remaining_changes) = changes.split_first_mut().unwrap();
+            let value = value.as_ref().expect("unable to delete from empty trie");
+            let root_pointer =
+                self.initialize_empty_trie(context, path, value, &mut slotted_page)?;
+            context.root_node_page_id = root_pointer.location().page_id();
+            context.root_node_hash = root_pointer.rlp().as_hash().unwrap();
+            // Explicitly drop slotted_page before recursive call to release page 1
+            drop(slotted_page);
+            if remaining_changes.is_empty() {
+                return Ok(());
+            }
+            // Continue with remaining changes
+            return self.set_values_parallel_v2(context, remaining_changes);
+        }
+
+        // Invalidate cache entries for storage paths
+        changes.iter().for_each(|(path, _)| {
+            if path.len() == STORAGE_PATH_LENGTH {
+                let address_path =
+                    AddressPath::new(path.slice(..ADDRESS_PATH_LENGTH).try_into().unwrap());
+                context.contract_account_loc_cache.remove(&address_path.into());
+            }
+        });
+
+        let root_page_id = context.root_node_page_id.unwrap();
+        let result = self.process_page_parallel(context, root_page_id, changes, 0)?;
+
+        // Update root from result
+        match result.new_pointer {
+            Some(ptr) => {
+                context.root_node_page_id = ptr.location().page_id();
+                context.root_node_hash = ptr.rlp().as_hash().unwrap_or(EMPTY_ROOT_HASH);
+            }
+            None => {
+                context.root_node_page_id = None;
+                context.root_node_hash = EMPTY_ROOT_HASH;
+            }
+        }
+
+        // Update page_count from page_manager since parallel tasks may have allocated pages
+        context.page_count = self.page_manager.size();
+
+        Ok(())
+    }
+
+    /// Recursively processes a page with parallel cross-page spawning.
+    ///
+    /// Algorithm:
+    /// 1. Apply same-page changes (may cause splits, handled via retry)
+    /// 2. Spawn parallel tasks for cross-page children (>= MIN_CHANGES_FOR_SPAWN)
+    /// 3. Update cross-page pointers with results
+    /// 4. Compute hash for this page's root
+    fn process_page_parallel(
+        &self,
+        context: &TransactionContext,
+        page_id: PageId,
+        changes: &[(RawPath, Option<TrieValue>)],
+        path_offset: u8,
+    ) -> Result<PageResult, Error> {
+        // Clone context for this subtree's modifications
+        let mut local_context = context.clone();
+
+        // Apply changes and get actual_page_id (may differ from page_id if page was cloned)
+        let (pointer_change, cross_page_work, actual_page_id) =
+            self.apply_same_page_changes(&mut local_context, page_id, changes, path_offset)?;
+
+        // Handle case where entire subtree was deleted
+        if let PointerChange::Delete = pointer_change {
+            return Ok(PageResult { new_pointer: None });
+        }
+
+        // If no cross-page work, we're done - return the result directly
+        if cross_page_work.is_empty() {
+            let new_pointer = match pointer_change {
+                PointerChange::Update(ptr) => Some(ptr),
+                PointerChange::None => {
+                    // Get current pointer from page - use actual_page_id!
+                    let page = self.get_page(&local_context, actual_page_id)?;
+                    let slotted = SlottedPage::try_from(page)?;
+                    let node: Node = slotted.get_value(0)?;
+                    Some(Pointer::new(node_location(actual_page_id, 0), node.to_rlp_node()))
+                }
+                PointerChange::Delete => None,
+            };
+            return Ok(PageResult { new_pointer });
+        }
+
+        // Partition cross-page work into parallel vs inline based on size
+        let (parallel_work, inline_work): (Vec<_>, Vec<_>) = cross_page_work
+            .into_iter()
+            .partition(|w| w.child_changes.len() >= Self::MIN_CHANGES_FOR_SPAWN);
+
+        // Process small subtrees inline (no spawn overhead)
+        let mut work_results: Vec<(PageId, u8, u8, PageResult)> = Vec::new();
+        for work in inline_work {
+            let result = self.process_page_parallel(
+                &local_context,
+                work.child_page_id,
+                work.child_changes,
+                work.path_offset,
+            )?;
+            work_results.push((
+                page_id, // The parent page where we need to update the pointer
+                work.parent_cell_index,
+                work.parent_child_index,
+                result,
+            ));
+        }
+
+        // Spawn parallel tasks for large subtrees using rayon's parallel iterator
+        if !parallel_work.is_empty() {
+            use rayon::prelude::*;
+
+            // Pre-create task data with cloned contexts (to avoid capturing &local_context in par_iter)
+            // TransactionContext is not Sync because TransactionMetrics uses Cell<u32>,
+            // so we must clone before going parallel
+            let task_data: Vec<_> = parallel_work
+                .iter()
+                .map(|work| {
+                    (
+                        local_context.clone(),
+                        work.child_page_id,
+                        work.child_changes,
+                        work.path_offset,
+                        work.parent_cell_index,
+                        work.parent_child_index,
+                    )
+                })
+                .collect();
+
+            // Use parallel iterator to process work items
+            // Each item is processed independently with its pre-cloned context
+            let parallel_results: Vec<_> = self.thread_pool.install(|| {
+                task_data
+                    .into_par_iter()
+                    .map(|(task_context, child_page_id, child_changes, path_offset, parent_cell_idx, parent_child_idx)| {
+                        let result = self.process_page_parallel(
+                            &task_context,
+                            child_page_id,
+                            child_changes,
+                            path_offset,
+                        );
+                        (parent_cell_idx, parent_child_idx, result)
+                    })
+                    .collect()
+            });
+
+            // Collect results
+            for (parent_cell_index, parent_child_index, result) in parallel_results {
+                work_results.push((page_id, parent_cell_index, parent_child_index, result?));
+            }
+        }
+
+        // Update pointers for all cross-page children
+        if !work_results.is_empty() {
+            // Use actual_page_id - the page was already cloned in apply_same_page_changes
+            let page = self.get_mut_clone(&mut local_context, actual_page_id)?;
+            let mut slotted_page = SlottedPageMut::try_from(page)?;
+
+            for (_parent_page, cell_index, child_index, result) in work_results {
+                let mut node: Node = slotted_page.get_value(cell_index)?;
+                match result.new_pointer {
+                    Some(new_ptr) => {
+                        node.set_child(child_index, new_ptr)?;
+                    }
+                    None => {
+                        node.remove_child(child_index)?;
+                    }
+                }
+                slotted_page.set_value(cell_index, &node)?;
+            }
+
+            // Recompute hash for root node after all updates - use actual_page_id!
+            let root_node: Node = slotted_page.get_value(0)?;
+            let rlp = root_node.to_rlp_node();
+            return Ok(PageResult {
+                new_pointer: Some(Pointer::new(node_location(actual_page_id, 0), rlp)),
+            });
+        }
+
+        // Return the pointer from initial processing - use actual_page_id!
+        let new_pointer = match pointer_change {
+            PointerChange::Update(ptr) => Some(ptr),
+            PointerChange::None => {
+                let page = self.get_page(&local_context, actual_page_id)?;
+                let slotted = SlottedPage::try_from(page)?;
+                let node: Node = slotted.get_value(0)?;
+                Some(Pointer::new(node_location(actual_page_id, 0), node.to_rlp_node()))
+            }
+            PointerChange::Delete => None,
+        };
+
+        Ok(PageResult { new_pointer })
+    }
+
+    /// Applies all same-page changes and collects cross-page work.
+    ///
+    /// This is similar to set_values_in_page but:
+    /// 1. Only processes nodes on the current page
+    /// 2. Defers cross-page children to the returned Vec
+    /// 3. Handles page splits by retrying with remaining changes
+    /// Applies all same-page changes and collects cross-page work.
+    /// Returns the PointerChange, the cross-page work, and the ACTUAL page ID (which may differ
+    /// from the input if the page was cloned).
+    fn apply_same_page_changes<'a>(
+        &self,
+        context: &mut TransactionContext,
+        page_id: PageId,
+        changes: &'a [(RawPath, Option<TrieValue>)],
+        path_offset: u8,
+    ) -> Result<(PointerChange, Vec<CrossPageWork<'a>>, PageId), Error> {
+        let page = self.get_mut_clone(context, page_id)?;
+        let mut slotted_page = SlottedPageMut::try_from(page)?;
+        // Get the ACTUAL page ID after potential cloning (may differ if snapshot changed)
+        let actual_page_id = slotted_page.id();
+        let mut cross_page_work: Vec<CrossPageWork<'a>> = Vec::new();
+        let mut split_count = 0;
+
+        loop {
+            let result = self.apply_same_page_recursive(
+                context,
+                changes,
+                path_offset,
+                &mut slotted_page,
+                0,
+                &mut cross_page_work,
+            );
+
+            match result {
+                Ok(pointer_change) => {
+                    return Ok((pointer_change, cross_page_work, actual_page_id));
+                }
+                Err(Error::PageSplit(_handled_total)) => {
+                    // After a split, the page structure changes. Cell indices in cross_page_work
+                    // may be invalid. We must re-traverse ALL changes from scratch.
+                    // (NOT skip handled_total - those changes may have been deferred, not applied!)
+                    context.transaction_metrics.inc_pages_split();
+                    split_count += 1;
+                    if split_count > 20 {
+                        return Err(Error::PageError(PageError::PageSplitLimitReached));
+                    }
+                    // Clear cross-page work and retry from scratch
+                    cross_page_work.clear();
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Recursive same-page traversal that defers cross-page work.
+    ///
+    /// Similar to set_values_in_cloned_page but when encountering a cross-page
+    /// child, it adds to cross_page_work instead of recursing.
+    fn apply_same_page_recursive<'a>(
+        &self,
+        context: &mut TransactionContext,
+        changes: &'a [(RawPath, Option<TrieValue>)],
+        path_offset: u8,
+        slotted_page: &mut SlottedPageMut<'_>,
+        page_index: u8,
+        cross_page_work: &mut Vec<CrossPageWork<'a>>,
+    ) -> Result<PointerChange, Error> {
+        if changes.is_empty() {
+            return Ok(PointerChange::None);
+        }
+
+        let mut node = slotted_page.get_value::<Node>(page_index)?;
+
+        let (shortest_common_prefix_idx, common_prefix_length) =
+            find_shortest_common_prefix(changes, path_offset, &node);
+
+        let first_change = &changes[shortest_common_prefix_idx];
+        let path = first_change.0.slice(path_offset as usize..);
+        let value = first_change.1.as_ref();
+        let common_prefix = path.slice(0..common_prefix_length);
+
+        // Case 1: Path doesn't match node prefix - create new branch
+        if common_prefix.len() < node.prefix().len() {
+            if value.is_none() {
+                let (changes_left, changes_right) = changes.split_at(shortest_common_prefix_idx);
+                let changes_right = &changes_right[1..];
+                if changes_right.is_empty() {
+                    return self.apply_same_page_recursive(
+                        context,
+                        changes_left,
+                        path_offset,
+                        slotted_page,
+                        page_index,
+                        cross_page_work,
+                    );
+                } else if changes_left.is_empty() {
+                    return self.apply_same_page_recursive(
+                        context,
+                        changes_right,
+                        path_offset,
+                        slotted_page,
+                        page_index,
+                        cross_page_work,
+                    );
+                } else {
+                    unreachable!("shortest_common_prefix_idx is not at either end");
+                }
+            }
+            return self.handle_missing_parent_branch_parallel(
+                context,
+                changes,
+                path_offset,
+                slotted_page,
+                page_index,
+                &mut node,
+                &common_prefix,
+                cross_page_work,
+            );
+        }
+
+        // Case 2: Path matches node prefix exactly
+        if common_prefix.len() == path.len() {
+            assert_eq!(shortest_common_prefix_idx, 0);
+            return self.handle_exact_prefix_match_parallel(
+                context,
+                changes,
+                path_offset,
+                slotted_page,
+                page_index,
+                &mut node,
+                path,
+                value,
+                cross_page_work,
+            );
+        }
+
+        // Case 3: Account leaf with storage
+        if node.is_account_leaf() {
+            return self.handle_account_node_traversal_parallel(
+                context,
+                changes,
+                path_offset,
+                slotted_page,
+                page_index,
+                &mut node,
+                &common_prefix,
+                cross_page_work,
+            );
+        }
+
+        // Case 4: Branch node
+        assert!(node.is_branch());
+        self.handle_branch_node_traversal_parallel(
+            context,
+            changes,
+            path_offset,
+            slotted_page,
+            page_index,
+            &mut node,
+            &common_prefix,
+            cross_page_work,
+        )
+    }
+
+    /// Parallel version of handle_missing_parent_branch.
+    fn handle_missing_parent_branch_parallel<'a>(
+        &self,
+        context: &mut TransactionContext,
+        changes: &'a [(RawPath, Option<TrieValue>)],
+        path_offset: u8,
+        slotted_page: &mut SlottedPageMut<'_>,
+        cell_index: u8,
+        node: &mut Node,
+        common_prefix: &RawPath,
+        cross_page_work: &mut Vec<CrossPageWork<'a>>,
+    ) -> Result<PointerChange, Error> {
+        // Create a new branch node with the common prefix
+        let mut new_parent_branch = Node::new_branch(common_prefix)?;
+
+        // Ensure page has enough space
+        if slotted_page.num_free_bytes() <
+            new_parent_branch.size() + CELL_POINTER_SIZE - common_prefix.len() / 2
+        {
+            self.split_page(context, slotted_page)?;
+            return Err(Error::PageSplit(0));
+        }
+
+        let node_branch_index = node.prefix().get_unchecked(common_prefix.len());
+        node.set_prefix(node.prefix().slice(common_prefix.len() + 1..))?;
+        let rlp_node = node.to_rlp_node();
+        slotted_page.set_value(cell_index, node)?;
+
+        let new_parent_branch_cell_index = slotted_page.next_free_cell_index()?;
+        new_parent_branch.set_child(
+            node_branch_index,
+            Pointer::new(Location::for_cell(new_parent_branch_cell_index), rlp_node),
+        )?;
+        let inserted_branch_cell_index = slotted_page.insert_value(&new_parent_branch)?;
+        debug_assert_eq!(inserted_branch_cell_index, new_parent_branch_cell_index);
+        slotted_page.swap_cell_pointers(cell_index, new_parent_branch_cell_index)?;
+
+        // Recurse to insert changes via the new branch
+        self.apply_same_page_recursive(
+            context,
+            changes,
+            path_offset,
+            slotted_page,
+            cell_index,
+            cross_page_work,
+        )
+    }
+
+    /// Parallel version of handle_exact_prefix_match.
+    fn handle_exact_prefix_match_parallel<'a>(
+        &self,
+        context: &mut TransactionContext,
+        changes: &'a [(RawPath, Option<TrieValue>)],
+        path_offset: u8,
+        slotted_page: &mut SlottedPageMut<'_>,
+        page_index: u8,
+        node: &mut Node,
+        path: RawPath,
+        value: Option<&TrieValue>,
+        cross_page_work: &mut Vec<CrossPageWork<'a>>,
+    ) -> Result<PointerChange, Error> {
+        if value.is_none() {
+            // Delete the node
+            if node.has_children() {
+                self.delete_subtrie(context, slotted_page, page_index)?;
+            }
+            slotted_page.delete_value(page_index)?;
+            assert_eq!(changes.len(), 1);
+            return Ok(PointerChange::Delete);
+        }
+
+        let (_, remaining_changes) = changes.split_first().unwrap();
+
+        // Skip if value is the same
+        if &node.value()? == value.unwrap() {
+            if remaining_changes.is_empty() {
+                return Ok(PointerChange::None);
+            }
+            return self.apply_same_page_recursive(
+                context,
+                remaining_changes,
+                path_offset,
+                slotted_page,
+                page_index,
+                cross_page_work,
+            );
+        }
+
+        // Update the node with the new value
+        let mut new_node = Node::new_leaf(&path, value.unwrap())?;
+        if node.has_children() {
+            if let Some(child_pointer) = node.direct_child()? {
+                new_node.set_child(0, child_pointer.clone())?;
+            }
+        }
+
+        let old_node_size = node.size();
+        let new_node_size = new_node.size();
+        if new_node_size > old_node_size {
+            let node_size_incr = new_node_size - old_node_size;
+            if slotted_page.num_free_bytes() < node_size_incr {
+                self.split_page(context, slotted_page)?;
+                return Err(Error::PageSplit(0));
+            }
+        }
+
+        slotted_page.set_value(page_index, &new_node)?;
+
+        if remaining_changes.is_empty() {
+            let rlp_node = new_node.to_rlp_node();
+            Ok(PointerChange::Update(Pointer::new(
+                node_location(slotted_page.id(), page_index),
+                rlp_node,
+            )))
+        } else {
+            self.apply_same_page_recursive(
+                context,
+                remaining_changes,
+                path_offset,
+                slotted_page,
+                page_index,
+                cross_page_work,
+            )
+        }
+    }
+
+    /// Parallel version of handle_account_node_traversal.
+    fn handle_account_node_traversal_parallel<'a>(
+        &self,
+        context: &mut TransactionContext,
+        changes: &'a [(RawPath, Option<TrieValue>)],
+        path_offset: u8,
+        slotted_page: &mut SlottedPageMut<'_>,
+        page_index: u8,
+        node: &mut Node,
+        common_prefix: &RawPath,
+        cross_page_work: &mut Vec<CrossPageWork<'a>>,
+    ) -> Result<PointerChange, Error> {
+        let child_pointer = node.direct_child()?;
+
+        if let Some(child_pointer) = child_pointer {
+            let child_location = child_pointer.location();
+            let new_path_offset = path_offset + common_prefix.len() as u8;
+
+            if let Some(child_cell_index) = child_location.cell_index() {
+                // Same page - recurse immediately
+                let child_pointer_change = self.apply_same_page_recursive(
+                    context,
+                    changes,
+                    new_path_offset,
+                    slotted_page,
+                    child_cell_index,
+                    cross_page_work,
+                )?;
+
+                match child_pointer_change {
+                    PointerChange::Update(new_child_pointer) => {
+                        self.update_node_child(
+                            node,
+                            slotted_page,
+                            page_index,
+                            Some(new_child_pointer),
+                            0,
+                        )?;
+                        let rlp_node = node.to_rlp_node();
+                        Ok(PointerChange::Update(Pointer::new(
+                            node_location(slotted_page.id(), page_index),
+                            rlp_node,
+                        )))
+                    }
+                    PointerChange::Delete => {
+                        self.update_node_child(node, slotted_page, page_index, None, 0)?;
+                        let rlp_node = node.to_rlp_node();
+                        Ok(PointerChange::Update(Pointer::new(
+                            node_location(slotted_page.id(), page_index),
+                            rlp_node,
+                        )))
+                    }
+                    PointerChange::None => Ok(PointerChange::None),
+                }
+            } else {
+                // Cross-page - defer to parallel processing
+                let child_page_id = child_location.page_id().unwrap();
+                cross_page_work.push(CrossPageWork {
+                    child_page_id,
+                    child_changes: changes,
+                    parent_cell_index: page_index,
+                    parent_child_index: 0,
+                    path_offset: new_path_offset,
+                });
+                // Return None for now - pointer will be updated after cross-page processing
+                Ok(PointerChange::None)
+            }
+        } else {
+            // No storage trie yet - create first storage node
+            self.create_first_storage_node_parallel(
+                context,
+                changes,
+                path_offset,
+                slotted_page,
+                page_index,
+                node,
+                common_prefix,
+                cross_page_work,
+            )
+        }
+    }
+
+    /// Parallel version of create_first_storage_node.
+    fn create_first_storage_node_parallel<'a>(
+        &self,
+        context: &mut TransactionContext,
+        changes: &'a [(RawPath, Option<TrieValue>)],
+        path_offset: u8,
+        slotted_page: &mut SlottedPageMut<'_>,
+        page_index: u8,
+        node: &mut Node,
+        common_prefix: &RawPath,
+        cross_page_work: &mut Vec<CrossPageWork<'a>>,
+    ) -> Result<PointerChange, Error> {
+        if changes.is_empty() {
+            return Ok(PointerChange::None);
+        }
+
+        let ((path, value), remaining_changes) = changes.split_first().unwrap();
+        if value.is_none() {
+            return self.apply_same_page_recursive(
+                context,
+                remaining_changes,
+                path_offset,
+                slotted_page,
+                page_index,
+                cross_page_work,
+            );
+        }
+
+        let node_size_incr = node.size_incr_with_new_child();
+        let remaining_path = path.slice(path_offset as usize + common_prefix.len()..);
+        let new_node = Node::new_leaf(&remaining_path, value.as_ref().unwrap())?;
+
+        if slotted_page.num_free_bytes() < node_size_incr + new_node.size() + CELL_POINTER_SIZE {
+            self.split_page(context, slotted_page)?;
+            return Err(Error::PageSplit(0));
+        }
+
+        let rlp_node = new_node.to_rlp_node();
+        let location = Location::for_cell(slotted_page.insert_value(&new_node)?);
+        node.set_child(0, Pointer::new(location, rlp_node))?;
+        slotted_page.set_value(page_index, node)?;
+
+        if remaining_changes.is_empty() {
+            let rlp_node = node.to_rlp_node();
+            return Ok(PointerChange::Update(Pointer::new(
+                node_location(slotted_page.id(), page_index),
+                rlp_node,
+            )));
+        }
+
+        self.apply_same_page_recursive(
+            context,
+            remaining_changes,
+            path_offset,
+            slotted_page,
+            page_index,
+            cross_page_work,
+        )
+    }
+
+    /// Parallel version of handle_branch_node_traversal.
+    fn handle_branch_node_traversal_parallel<'a>(
+        &self,
+        context: &mut TransactionContext,
+        changes: &'a [(RawPath, Option<TrieValue>)],
+        path_offset: u8,
+        slotted_page: &mut SlottedPageMut<'_>,
+        page_index: u8,
+        node: &mut Node,
+        common_prefix: &RawPath,
+        cross_page_work: &mut Vec<CrossPageWork<'a>>,
+    ) -> Result<PointerChange, Error> {
+        let mut remaining_changes = changes;
+        let mut handled_in_children: usize = 0;
+
+        for child_index in 0..16 {
+            let matching_changes;
+            (matching_changes, remaining_changes) =
+                remaining_changes.split_at(remaining_changes.partition_point(|(path, _)| {
+                    path.get_unchecked(path_offset as usize + common_prefix.len()) == child_index
+                }));
+
+            if matching_changes.is_empty() {
+                continue;
+            }
+
+            let result = self.handle_child_node_traversal_parallel(
+                context,
+                matching_changes,
+                path_offset,
+                slotted_page,
+                page_index,
+                node,
+                common_prefix,
+                child_index,
+                cross_page_work,
+            );
+
+            match result {
+                Err(Error::PageSplit(processed)) => {
+                    return Err(Error::PageSplit(handled_in_children + processed));
+                }
+                Err(e) => return Err(e),
+                Ok(locally_processed) => {
+                    // Only count changes that were actually processed locally on this page.
+                    // Cross-page deferred changes return 0 and should not be counted as handled
+                    // in case a later PageSplit requires retry.
+                    handled_in_children += locally_processed;
+                }
+            }
+        }
+
+        // Note: handled_in_children may be less than changes.len() because some changes
+        // were deferred to cross_page_work. That's intentional for PageSplit handling.
+
+        // Check if the branch node should be deleted or merged
+        self.handle_branch_node_cleanup(context, slotted_page, page_index, node)
+    }
+
+    /// Parallel version of handle_child_node_traversal.
+    ///
+    /// Returns the number of changes that were actually processed locally on this page.
+    /// Changes deferred to cross_page_work return 0, so they won't be counted as "handled"
+    /// if a PageSplit occurs later in the branch traversal.
+    fn handle_child_node_traversal_parallel<'a>(
+        &self,
+        context: &mut TransactionContext,
+        matching_changes: &'a [(RawPath, Option<TrieValue>)],
+        path_offset: u8,
+        slotted_page: &mut SlottedPageMut<'_>,
+        page_index: u8,
+        node: &mut Node,
+        common_prefix: &RawPath,
+        child_index: u8,
+        cross_page_work: &mut Vec<CrossPageWork<'a>>,
+    ) -> Result<usize, Error> {
+        let child_pointer = node.child(child_index)?;
+        let new_path_offset = path_offset + common_prefix.len() as u8 + 1;
+
+        match child_pointer {
+            Some(child_pointer) => {
+                let child_location = child_pointer.location();
+
+                if let Some(child_cell_index) = child_location.cell_index() {
+                    // Same page - recurse immediately
+                    let child_pointer_change = self.apply_same_page_recursive(
+                        context,
+                        matching_changes,
+                        new_path_offset,
+                        slotted_page,
+                        child_cell_index,
+                        cross_page_work,
+                    )?;
+
+                    match child_pointer_change {
+                        PointerChange::Update(new_child_pointer) => {
+                            self.update_node_child(
+                                node,
+                                slotted_page,
+                                page_index,
+                                Some(new_child_pointer),
+                                child_index,
+                            )?;
+                        }
+                        PointerChange::Delete => {
+                            self.update_node_child(node, slotted_page, page_index, None, child_index)?;
+                        }
+                        PointerChange::None => {}
+                    }
+                } else {
+                    // Cross-page - defer to parallel processing
+                    let child_page_id = child_location.page_id().unwrap();
+                    cross_page_work.push(CrossPageWork {
+                        child_page_id,
+                        child_changes: matching_changes,
+                        parent_cell_index: page_index,
+                        parent_child_index: child_index,
+                        path_offset: new_path_offset,
+                    });
+                    // Don't update pointer now - will be updated after parallel processing
+                    // Return 0 because these changes are deferred, not processed locally
+                    return Ok(0);
+                }
+            }
+            None => {
+                // Child doesn't exist - create new leaf
+                // Filter out leading deletes
+                let index_of_first_non_delete =
+                    matching_changes.iter().position(|(_, value)| value.is_some());
+
+                let matching_changes_filtered = match index_of_first_non_delete {
+                    Some(index) => &matching_changes[index..],
+                    None => &[],
+                };
+
+                if matching_changes_filtered.is_empty() {
+                    // All changes were deletes for non-existent nodes, count as processed
+                    return Ok(matching_changes.len());
+                }
+
+                let ((path, value), remaining) = matching_changes_filtered.split_first().unwrap();
+                let remaining_path = path.slice(path_offset as usize + common_prefix.len() + 1..);
+                let value = value.as_ref().unwrap();
+
+                let node_size_incr = node.size_incr_with_new_child();
+                let new_node = Node::new_leaf(&remaining_path, value)?;
+
+                if slotted_page.num_free_bytes() <
+                    node_size_incr + new_node.size() + CELL_POINTER_SIZE
+                {
+                    self.split_page(context, slotted_page)?;
+                    return Err(Error::PageSplit(0));
+                }
+
+                let rlp_node = new_node.to_rlp_node();
+                let location = Location::for_cell(slotted_page.insert_value(&new_node)?);
+                node.set_child(child_index, Pointer::new(location, rlp_node))?;
+                slotted_page.set_value(page_index, node)?;
+
+                // If more changes, recurse on the new leaf
+                if !remaining.is_empty() {
+                    let child_pointer_change = self.apply_same_page_recursive(
+                        context,
+                        remaining,
+                        new_path_offset,
+                        slotted_page,
+                        location.cell_index().unwrap(),
+                        cross_page_work,
+                    )?;
+
+                    match child_pointer_change {
+                        PointerChange::Update(new_child_pointer) => {
+                            self.update_node_child(
+                                node,
+                                slotted_page,
+                                page_index,
+                                Some(new_child_pointer),
+                                child_index,
+                            )?;
+                        }
+                        PointerChange::Delete => {
+                            self.update_node_child(node, slotted_page, page_index, None, child_index)?;
+                        }
+                        PointerChange::None => {}
+                    }
+                }
+            }
+        }
+        // All matching changes were processed locally on this page
+        Ok(matching_changes.len())
     }
 }
 
@@ -4830,7 +5741,7 @@ mod tests {
 
         // Apply using parallel method
         let mut changes = vec![(path.clone(), Some(TrieValue::Account(account.clone())))];
-        engine.set_values_parallel(&mut context, &mut changes).unwrap();
+        engine.set_values(&mut context, &mut changes).unwrap();
 
         // Verify the account was written
         let read_account = engine.get_account(&mut context, &AddressPath::for_address(address)).unwrap();
@@ -4916,7 +5827,7 @@ mod tests {
 
         // Apply using parallel method
         let mut changes2 = changes.clone();
-        engine2.set_values_parallel(&mut context2, &mut changes2).unwrap();
+        engine2.set_values(&mut context2, &mut changes2).unwrap();
 
         assert_eq!(
             context1.root_node_hash, context2.root_node_hash,
@@ -4948,7 +5859,7 @@ mod tests {
         let mut changes1 = changes.clone();
         engine1.set_values(&mut context1, &mut changes1).unwrap();
         let mut changes2 = changes.clone();
-        engine2.set_values_parallel(&mut context2, &mut changes2).unwrap();
+        engine2.set_values(&mut context2, &mut changes2).unwrap();
 
         assert_eq!(
             context1.root_node_hash, context2.root_node_hash,
@@ -4973,11 +5884,674 @@ mod tests {
         engine1.set_values(&mut context1, &mut delete_changes1).unwrap();
 
         let mut delete_changes2 = delete_changes.clone();
-        engine2.set_values_parallel(&mut context2, &mut delete_changes2).unwrap();
+        engine2.set_values(&mut context2, &mut delete_changes2).unwrap();
 
         assert_eq!(
             context1.root_node_hash, context2.root_node_hash,
             "Delete/update batch must match"
         );
+    }
+
+    /// Debug test for parallel_v2 with small trie - compares structure recursively
+    #[test]
+    fn test_parallel_v2_small_debug() {
+        use crate::node::{Node, NodeKind};
+
+        // Helper to recursively dump trie structure
+        fn dump_trie(
+            engine: &StorageEngine,
+            context: &TransactionContext,
+            page_id: PageId,
+            cell_index: u8,
+            depth: usize,
+            prefix: &str,
+        ) -> Vec<String> {
+            let mut lines = Vec::new();
+            let indent = "  ".repeat(depth);
+
+            let page = match engine.get_page(context, page_id) {
+                Ok(p) => p,
+                Err(e) => {
+                    lines.push(format!("{}ERROR getting page {:?}: {:?}", indent, page_id, e));
+                    return lines;
+                }
+            };
+            let slotted = match SlottedPage::try_from(page) {
+                Ok(s) => s,
+                Err(e) => {
+                    lines.push(format!("{}ERROR slotted page {:?}: {:?}", indent, page_id, e));
+                    return lines;
+                }
+            };
+            let node: Node = match slotted.get_value(cell_index) {
+                Ok(n) => n,
+                Err(e) => {
+                    lines.push(format!("{}ERROR getting node at cell {}: {:?}", indent, cell_index, e));
+                    return lines;
+                }
+            };
+
+            let rlp = node.to_rlp_node();
+            let hash_str = if let Some(h) = rlp.as_hash() {
+                format!("{:?}", h)
+            } else {
+                format!("inline({}b)", rlp.as_ref().len())
+            };
+
+            match node.kind() {
+                NodeKind::StorageLeaf { value_rlp } => {
+                    lines.push(format!(
+                        "{}STORAGE_LEAF prefix={} value_len={} hash={}",
+                        indent,
+                        prefix,
+                        value_rlp.len(),
+                        hash_str
+                    ));
+                }
+                NodeKind::AccountLeaf { nonce_rlp, balance_rlp, code_hash, storage_root } => {
+                    lines.push(format!(
+                        "{}ACCOUNT prefix={} nonce_len={} balance_len={} hash={}",
+                        indent, prefix, nonce_rlp.len(), balance_rlp.len(), hash_str
+                    ));
+                    if let Some(storage_ptr) = storage_root {
+                        let loc = storage_ptr.location();
+                        if let Some(child_page) = loc.page_id() {
+                            let child_cell = loc.cell_index().unwrap_or(0);
+                            lines.extend(dump_trie(
+                                engine, context, child_page, child_cell, depth + 1, "storage"
+                            ));
+                        } else if let Some(child_cell) = loc.cell_index() {
+                            lines.extend(dump_trie(
+                                engine, context, page_id, child_cell, depth + 1, "storage"
+                            ));
+                        }
+                    }
+                }
+                NodeKind::Branch { children } => {
+                    lines.push(format!("{}BRANCH prefix={} hash={}", indent, prefix, hash_str));
+                    for (i, child_opt) in children.iter().enumerate() {
+                        if let Some(child_ptr) = child_opt {
+                            let loc = child_ptr.location();
+                            let child_prefix = format!("{}{:x}", prefix, i);
+                            if let Some(child_page) = loc.page_id() {
+                                let child_cell = loc.cell_index().unwrap_or(0);
+                                lines.extend(dump_trie(
+                                    engine, context, child_page, child_cell, depth + 1, &child_prefix
+                                ));
+                            } else if let Some(child_cell) = loc.cell_index() {
+                                lines.extend(dump_trie(
+                                    engine, context, page_id, child_cell, depth + 1, &child_prefix
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            lines
+        }
+
+        let mut rng = StdRng::seed_from_u64(42);
+
+        // Generate 2000 accounts - stress test with many splits and cross-page scenarios
+        let num_accounts = 2000;
+        let changes: Vec<(RawPath, Option<TrieValue>)> = (0..num_accounts)
+            .map(|i| {
+                let mut addr_bytes = [0u8; 20];
+                // Use deterministic addresses for reproducibility
+                addr_bytes[0] = (i * 17) as u8;  // Spread across first nibble
+                addr_bytes[1] = (i * 31) as u8;
+                rng.fill(&mut addr_bytes[2..]);
+                let address = Address::from_slice(&addr_bytes);
+                let path = RawPath::from(AddressPath::for_address(address));
+                let account = create_test_account(i as u64 * 100, i as u64);
+                if i < 10 {
+                    eprintln!("Account {}: addr={} path_prefix={:02x}{:02x}",
+                        i, address, path.get_unchecked(0), path.get_unchecked(1));
+                }
+                (path, Some(TrieValue::Account(account)))
+            })
+            .collect();
+        eprintln!("... ({} accounts total)", num_accounts);
+
+        // Test serial - use enough pages for the number of accounts
+        let max_pages = std::cmp::max(100, num_accounts as u32 / 2);
+        let (engine1, mut context1) = create_test_engine(max_pages);
+        let mut changes1 = changes.clone();
+        engine1.set_values_serial(&mut context1, &mut changes1).unwrap();
+        let serial_hash = context1.root_node_hash;
+        let serial_root_page = context1.root_node_page_id.unwrap();
+
+        eprintln!("\n=== SERIAL TRIE ===");
+        eprintln!("Root hash: {:?}", serial_hash);
+        eprintln!("Root page: {:?}", serial_root_page);
+        // Only dump for small tests to avoid huge output
+        let serial_dump = if num_accounts <= 100 {
+            dump_trie(&engine1, &context1, serial_root_page, 0, 0, "")
+        } else {
+            vec![]
+        };
+        for line in &serial_dump {
+            eprintln!("{}", line);
+        }
+
+        // Test parallel_v2 - but first we need to lower the threshold
+        // For this test, let's manually call process_page_parallel
+        let (engine2, mut context2) = create_test_engine(max_pages);
+        let mut changes2 = changes.clone();
+
+        // Lower threshold for testing
+        engine2.set_values_serial(&mut context2, &mut changes2).unwrap();
+        // Actually, let's use the serial path and then compare
+
+        // For a fair comparison, let's manually invoke parallel processing
+        // by patching the threshold to 0
+        let (engine3, mut context3) = create_test_engine(max_pages);
+        let mut changes3 = changes.clone();
+
+        // Manually implement what set_values_parallel_v2 does but with threshold=0
+        changes3.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Handle empty trie - insert first account
+        let page = engine3.allocate_page(&mut context3).unwrap();
+        let mut slotted_page = SlottedPageMut::try_from(page).unwrap();
+        let ((path, value), remaining) = changes3.split_first_mut().unwrap();
+        let value = value.as_ref().unwrap();
+        let root_pointer = engine3.initialize_empty_trie(&mut context3, path, value, &mut slotted_page).unwrap();
+        context3.root_node_page_id = root_pointer.location().page_id();
+        context3.root_node_hash = root_pointer.rlp().as_hash().unwrap();
+        drop(slotted_page);
+
+        // Now process remaining with parallel approach
+        if !remaining.is_empty() {
+            let root_page_id = context3.root_node_page_id.unwrap();
+            eprintln!("\nCalling process_page_parallel with {} remaining changes", remaining.len());
+            let result = engine3.process_page_parallel(&context3, root_page_id, remaining, 0).unwrap();
+
+            match result.new_pointer {
+                Some(ptr) => {
+                    context3.root_node_page_id = ptr.location().page_id();
+                    context3.root_node_hash = ptr.rlp().as_hash().unwrap_or(EMPTY_ROOT_HASH);
+                }
+                None => {
+                    context3.root_node_page_id = None;
+                    context3.root_node_hash = EMPTY_ROOT_HASH;
+                }
+            }
+        }
+
+        let parallel_hash = context3.root_node_hash;
+        let parallel_root_page = context3.root_node_page_id.unwrap();
+
+        eprintln!("\n=== PARALLEL TRIE ===");
+        eprintln!("Root hash: {:?}", parallel_hash);
+        eprintln!("Root page: {:?}", parallel_root_page);
+        // Only dump for small tests to avoid huge output
+        let parallel_dump = if num_accounts <= 100 {
+            dump_trie(&engine3, &context3, parallel_root_page, 0, 0, "")
+        } else {
+            vec![]
+        };
+        for line in &parallel_dump {
+            eprintln!("{}", line);
+        }
+
+        // Compare line by line (only for small tests with dumps)
+        if !serial_dump.is_empty() && !parallel_dump.is_empty() {
+            eprintln!("\n=== COMPARISON ===");
+            let max_lines = serial_dump.len().max(parallel_dump.len());
+            let mut differences = 0;
+            for i in 0..max_lines {
+                let serial_line = serial_dump.get(i).map(|s| s.as_str()).unwrap_or("<missing>");
+                let parallel_line = parallel_dump.get(i).map(|s| s.as_str()).unwrap_or("<missing>");
+                if serial_line != parallel_line {
+                    eprintln!("DIFF at line {}:", i);
+                    eprintln!("  Serial:   {}", serial_line);
+                    eprintln!("  Parallel: {}", parallel_line);
+                    differences += 1;
+                }
+            }
+            eprintln!("Total differences: {}", differences);
+        }
+
+        assert_eq!(
+            serial_hash, parallel_hash,
+            "Hashes differ! serial={:?} parallel={:?}", serial_hash, parallel_hash
+        );
+    }
+
+    /// Test parallel_v2 produces same results as serial
+    #[test]
+    fn test_parallel_v2_correctness() {
+        let mut rng = StdRng::seed_from_u64(99999);
+
+        // Generate 2000 random accounts (above PARALLEL_THRESHOLD)
+        let changes: Vec<(RawPath, Option<TrieValue>)> = (0..2000)
+            .map(|_| {
+                let mut addr_bytes = [0u8; 20];
+                rng.fill(&mut addr_bytes);
+                let address = Address::from_slice(&addr_bytes);
+                let path = RawPath::from(AddressPath::for_address(address));
+                let account = random_test_account(&mut rng);
+                (path, Some(TrieValue::Account(account)))
+            })
+            .collect();
+
+        // Test serial
+        let (engine1, mut context1) = create_test_engine(10000);
+        let mut changes1 = changes.clone();
+        engine1.set_values_serial(&mut context1, &mut changes1).unwrap();
+        let serial_hash = context1.root_node_hash;
+
+        // Test parallel_v2 - first populate the trie with serial, then use parallel
+        let (engine2, mut context2) = create_test_engine(10000);
+
+        // First, insert some data using serial to establish the trie structure
+        let initial_batch_size = 1500;
+        let mut initial_changes: Vec<_> = changes.iter().take(initial_batch_size).cloned().collect();
+        engine2.set_values_serial(&mut context2, &mut initial_changes).unwrap();
+
+        // Now insert the rest using parallel_v2
+        let mut remaining_changes: Vec<_> = changes.iter().skip(initial_batch_size).cloned().collect();
+        engine2.set_values_parallel_v2(&mut context2, &mut remaining_changes).unwrap();
+
+        // Finally insert the same initial batch again to complete the same set of changes
+        // This won't work correctly - let's use a different approach
+
+        // Actually, let's just test that parallel_v2 works on an existing trie
+        let (engine3, mut context3) = create_test_engine(10000);
+        // Insert all 2000 using parallel_v2 from empty
+        let mut changes3 = changes.clone();
+        eprintln!("Starting parallel_v2 from empty trie with {} changes", changes3.len());
+        engine3.set_values_parallel_v2(&mut context3, &mut changes3).unwrap();
+        let parallel_hash = context3.root_node_hash;
+
+        assert_eq!(
+            serial_hash, parallel_hash,
+            "set_values_serial and set_values_parallel_v2 must produce identical root hashes"
+        );
+    }
+
+    /// Test parallel_v2 works correctly across multiple sequential batches
+    #[test]
+    fn test_parallel_v2_sequential_batches() {
+        let mut rng = StdRng::seed_from_u64(11111);
+
+        // Generate 2000 initial accounts
+        let initial_changes: Vec<(RawPath, Option<TrieValue>)> = (0..2000)
+            .map(|_| {
+                let mut addr_bytes = [0u8; 20];
+                rng.fill(&mut addr_bytes);
+                let address = Address::from_slice(&addr_bytes);
+                let path = RawPath::from(AddressPath::for_address(address));
+                let account = random_test_account(&mut rng);
+                (path, Some(TrieValue::Account(account)))
+            })
+            .collect();
+
+        // Generate 2000 more accounts for second batch
+        let second_changes: Vec<(RawPath, Option<TrieValue>)> = (0..2000)
+            .map(|_| {
+                let mut addr_bytes = [0u8; 20];
+                rng.fill(&mut addr_bytes);
+                let address = Address::from_slice(&addr_bytes);
+                let path = RawPath::from(AddressPath::for_address(address));
+                let account = random_test_account(&mut rng);
+                (path, Some(TrieValue::Account(account)))
+            })
+            .collect();
+
+        // Test serial - two batches
+        let (engine1, mut context1) = create_test_engine(20000);
+        let mut changes1a = initial_changes.clone();
+        engine1.set_values_serial(&mut context1, &mut changes1a).unwrap();
+        let mut changes1b = second_changes.clone();
+        engine1.set_values_serial(&mut context1, &mut changes1b).unwrap();
+        let serial_hash = context1.root_node_hash;
+
+        // Test parallel_v2 - two batches
+        let (engine2, mut context2) = create_test_engine(20000);
+        let mut changes2a = initial_changes.clone();
+        engine2.set_values_parallel_v2(&mut context2, &mut changes2a).unwrap();
+        let mut changes2b = second_changes.clone();
+        engine2.set_values_parallel_v2(&mut context2, &mut changes2b).unwrap();
+        let parallel_hash = context2.root_node_hash;
+
+        assert_eq!(
+            serial_hash, parallel_hash,
+            "Multiple sequential batches with parallel_v2 must produce same hash as serial"
+        );
+    }
+
+    /// Test that parallel_v2 works correctly when applying the same changes twice
+    /// (simulating the profiling scenario where the same 100k accounts are added 5 times)
+    #[test]
+    fn test_parallel_v2_repeated_updates() {
+        let mut rng = StdRng::seed_from_u64(22222);
+
+        // Generate accounts
+        let changes: Vec<(RawPath, Option<TrieValue>)> = (0..2000)
+            .map(|_| {
+                let mut addr_bytes = [0u8; 20];
+                rng.fill(&mut addr_bytes);
+                let address = Address::from_slice(&addr_bytes);
+                let path = RawPath::from(AddressPath::for_address(address));
+                let account = random_test_account(&mut rng);
+                (path, Some(TrieValue::Account(account)))
+            })
+            .collect();
+
+        // Test serial - apply same changes twice
+        let (engine1, mut context1) = create_test_engine(20000);
+        let mut changes1a = changes.clone();
+        engine1.set_values_serial(&mut context1, &mut changes1a).unwrap();
+        let serial_hash_1 = context1.root_node_hash;
+        eprintln!("Serial run 1: {:?}", serial_hash_1);
+
+        let mut changes1b = changes.clone();
+        engine1.set_values_serial(&mut context1, &mut changes1b).unwrap();
+        let serial_hash_2 = context1.root_node_hash;
+        eprintln!("Serial run 2: {:?}", serial_hash_2);
+
+        // Hashes should be the same (same data applied twice = no change)
+        assert_eq!(serial_hash_1, serial_hash_2, "Serial: applying same data twice should not change hash");
+
+        // Test parallel_v2 - apply same changes twice
+        let (engine2, mut context2) = create_test_engine(20000);
+        let mut changes2a = changes.clone();
+        engine2.set_values_parallel_v2(&mut context2, &mut changes2a).unwrap();
+        let parallel_hash_1 = context2.root_node_hash;
+        eprintln!("Parallel run 1: {:?}", parallel_hash_1);
+
+        // This is where the profiling fails - second run
+        let mut changes2b = changes.clone();
+        match engine2.set_values_parallel_v2(&mut context2, &mut changes2b) {
+            Ok(_) => {
+                let parallel_hash_2 = context2.root_node_hash;
+                eprintln!("Parallel run 2: {:?}", parallel_hash_2);
+                assert_eq!(parallel_hash_1, parallel_hash_2, "Parallel: applying same data twice should not change hash");
+            }
+            Err(e) => {
+                panic!("Parallel run 2 failed with error: {:?}", e);
+            }
+        }
+
+        assert_eq!(serial_hash_1, parallel_hash_1, "Serial and parallel should produce same hash");
+    }
+
+    /// Test that simulates the profiling scenario more closely:
+    /// - Initial batch inserted with serial
+    /// - Multiple parallel_v2 batches on top
+    #[test]
+    fn test_parallel_v2_after_serial_initial() {
+        let mut rng = StdRng::seed_from_u64(33333);
+
+        // Generate initial accounts (like the 1M initial accounts in profiling)
+        let initial_changes: Vec<(RawPath, Option<TrieValue>)> = (0..5000)
+            .map(|_| {
+                let mut addr_bytes = [0u8; 20];
+                rng.fill(&mut addr_bytes);
+                let address = Address::from_slice(&addr_bytes);
+                let path = RawPath::from(AddressPath::for_address(address));
+                let account = random_test_account(&mut rng);
+                (path, Some(TrieValue::Account(account)))
+            })
+            .collect();
+
+        // Generate new accounts (like the 100k new accounts in profiling)
+        let new_changes: Vec<(RawPath, Option<TrieValue>)> = (0..2000)
+            .map(|_| {
+                let mut addr_bytes = [0u8; 20];
+                rng.fill(&mut addr_bytes);
+                let address = Address::from_slice(&addr_bytes);
+                let path = RawPath::from(AddressPath::for_address(address));
+                let account = random_test_account(&mut rng);
+                (path, Some(TrieValue::Account(account)))
+            })
+            .collect();
+
+        // Insert initial with serial
+        let (engine, mut context) = create_test_engine(50000);
+        let mut initial = initial_changes.clone();
+        engine.set_values_serial(&mut context, &mut initial).unwrap();
+        eprintln!("After initial serial insert: root={:?}", context.root_node_hash);
+
+        // Apply new changes with parallel_v2 - run 1
+        let mut changes1 = new_changes.clone();
+        engine.set_values_parallel_v2(&mut context, &mut changes1).unwrap();
+        let hash_after_run1 = context.root_node_hash;
+        eprintln!("After parallel run 1: root={:?}", hash_after_run1);
+
+        // Apply same changes again with parallel_v2 - run 2
+        let mut changes2 = new_changes.clone();
+        match engine.set_values_parallel_v2(&mut context, &mut changes2) {
+            Ok(_) => {
+                let hash_after_run2 = context.root_node_hash;
+                eprintln!("After parallel run 2: root={:?}", hash_after_run2);
+                // Applying same data should not change the hash
+                assert_eq!(hash_after_run1, hash_after_run2,
+                    "Applying same data twice should not change hash");
+            }
+            Err(e) => {
+                panic!("Parallel run 2 failed: {:?}", e);
+            }
+        }
+    }
+
+    /// Test that replicates the profiling scenario: Database API with commits between runs.
+    /// This test FAILS - reproducing the InvalidCellPointer bug.
+    #[test]
+    fn test_parallel_v2_with_database_commits() {
+        use crate::Database;
+        use tempdir::TempDir;
+
+        let tmp_dir = TempDir::new("test_parallel_v2_commits").unwrap();
+        let db_path = tmp_dir.path().join("test.db");
+
+        // Create database and insert initial data
+        let db = Database::create_new(&db_path).unwrap();
+
+        let mut rng = StdRng::seed_from_u64(55555);
+
+        // Generate initial accounts (like the 1M initial accounts in profiling)
+        let initial_changes: Vec<(RawPath, Option<TrieValue>)> = (0..10000)
+            .map(|_| {
+                let mut addr_bytes = [0u8; 20];
+                rng.fill(&mut addr_bytes);
+                let address = Address::from_slice(&addr_bytes);
+                let path = RawPath::from(AddressPath::for_address(address));
+                let account = random_test_account(&mut rng);
+                (path, Some(TrieValue::Account(account)))
+            })
+            .collect();
+
+        // Generate new accounts (like the 100k new accounts in profiling)
+        let new_changes: Vec<(RawPath, Option<TrieValue>)> = (0..2000)
+            .map(|_| {
+                let mut addr_bytes = [0u8; 20];
+                rng.fill(&mut addr_bytes);
+                let address = Address::from_slice(&addr_bytes);
+                let path = RawPath::from(AddressPath::for_address(address));
+                let account = random_test_account(&mut rng);
+                (path, Some(TrieValue::Account(account)))
+            })
+            .collect();
+
+        // Insert initial with serial, then COMMIT
+        {
+            let mut txn = db.begin_rw().unwrap();
+            let mut initial = initial_changes.clone();
+            txn.set_values(&mut initial).unwrap();
+            txn.commit().unwrap();
+        }
+        eprintln!("After initial commit: state_root={:?}", db.state_root());
+
+        // Apply new changes with parallel_v2, then COMMIT (run 1)
+        let hash_after_run1;
+        {
+            let mut txn = db.begin_rw().unwrap();
+            let mut changes = new_changes.clone();
+            txn.set_values_parallel_v2(&mut changes).unwrap();
+            hash_after_run1 = txn.state_root();
+            eprintln!("Before run 1 commit: state_root={:?}", hash_after_run1);
+            txn.commit().unwrap();
+        }
+        eprintln!("After run 1 commit: state_root={:?}", db.state_root());
+
+        // Apply same changes with parallel_v2 again, then COMMIT (run 2)
+        // This is where the profiling script fails with InvalidCellPointer
+        {
+            let mut txn = db.begin_rw().unwrap();
+            eprintln!("Run 2 starting with state_root={:?}", txn.state_root());
+            let mut changes = new_changes.clone();
+            match txn.set_values_parallel_v2(&mut changes) {
+                Ok(_) => {
+                    let hash_after_run2 = txn.state_root();
+                    eprintln!("Run 2 completed: state_root={:?}", hash_after_run2);
+                    // Applying same data should not change the hash
+                    assert_eq!(hash_after_run1, hash_after_run2,
+                        "Applying same data twice should produce same hash");
+                    txn.commit().unwrap();
+                }
+                Err(e) => {
+                    panic!("Run 2 failed with: {:?}", e);
+                }
+            }
+        }
+    }
+
+    /// Test that simulates the benchmark scenario: reopen database then use parallel_v2.
+    #[test]
+    fn test_parallel_v2_reopen_database() {
+        use crate::Database;
+        use tempdir::TempDir;
+
+        let tmp_dir = TempDir::new("test_parallel_v2_reopen").unwrap();
+        let db_path = tmp_dir.path().join("test.db");
+
+        let mut rng = StdRng::seed_from_u64(77777);
+
+        // Generate initial accounts
+        let initial_changes: Vec<(RawPath, Option<TrieValue>)> = (0..10000)
+            .map(|_| {
+                let mut addr_bytes = [0u8; 20];
+                rng.fill(&mut addr_bytes);
+                let address = Address::from_slice(&addr_bytes);
+                let path = RawPath::from(AddressPath::for_address(address));
+                let account = random_test_account(&mut rng);
+                (path, Some(TrieValue::Account(account)))
+            })
+            .collect();
+
+        // Generate new accounts for the second run
+        let new_changes: Vec<(RawPath, Option<TrieValue>)> = (0..2000)
+            .map(|_| {
+                let mut addr_bytes = [0u8; 20];
+                rng.fill(&mut addr_bytes);
+                let address = Address::from_slice(&addr_bytes);
+                let path = RawPath::from(AddressPath::for_address(address));
+                let account = random_test_account(&mut rng);
+                (path, Some(TrieValue::Account(account)))
+            })
+            .collect();
+
+        // Create database and insert initial data with serial, then close
+        let initial_root;
+        {
+            let db = Database::create_new(&db_path).unwrap();
+            let mut txn = db.begin_rw().unwrap();
+            let mut initial = initial_changes.clone();
+            txn.set_values(&mut initial).unwrap();
+            txn.commit().unwrap();
+            initial_root = db.state_root();
+            eprintln!("After initial commit: state_root={:?}", initial_root);
+            // Database is dropped here (closed)
+        }
+
+        // Reopen the database
+        let db = Database::open(&db_path).unwrap();
+        eprintln!("Reopened database: state_root={:?}", db.state_root());
+        assert_eq!(db.state_root(), initial_root, "State root should persist after reopen");
+
+        // Apply new changes with parallel_v2
+        {
+            let mut txn = db.begin_rw().unwrap();
+            eprintln!("Starting parallel_v2 insert with {} changes", new_changes.len());
+            let mut changes = new_changes.clone();
+            match txn.set_values_parallel_v2(&mut changes) {
+                Ok(_) => {
+                    eprintln!("Parallel_v2 completed: state_root={:?}", txn.state_root());
+                    txn.commit().unwrap();
+                }
+                Err(e) => {
+                    panic!("Parallel_v2 failed with: {:?}", e);
+                }
+            }
+        }
+    }
+
+    /// Test with larger trie to reproduce the crud_benchmarks failure.
+    /// The benchmark uses 1M accounts then inserts 10k more.
+    #[test]
+    fn test_parallel_v2_large_trie() {
+        use crate::Database;
+        use tempdir::TempDir;
+
+        let tmp_dir = TempDir::new("test_parallel_v2_large").unwrap();
+        let db_path = tmp_dir.path().join("test.db");
+
+        let mut rng = StdRng::seed_from_u64(88888);
+
+        // Generate 100k initial accounts (scaled down from 1M to keep test fast)
+        let initial_changes: Vec<(RawPath, Option<TrieValue>)> = (0..100_000)
+            .map(|_| {
+                let mut addr_bytes = [0u8; 20];
+                rng.fill(&mut addr_bytes);
+                let address = Address::from_slice(&addr_bytes);
+                let path = RawPath::from(AddressPath::for_address(address));
+                let account = random_test_account(&mut rng);
+                (path, Some(TrieValue::Account(account)))
+            })
+            .collect();
+
+        // Generate 10k new accounts (same as benchmark)
+        let new_changes: Vec<(RawPath, Option<TrieValue>)> = (0..10_000)
+            .map(|_| {
+                let mut addr_bytes = [0u8; 20];
+                rng.fill(&mut addr_bytes);
+                let address = Address::from_slice(&addr_bytes);
+                let path = RawPath::from(AddressPath::for_address(address));
+                let account = random_test_account(&mut rng);
+                (path, Some(TrieValue::Account(account)))
+            })
+            .collect();
+
+        // Create database and insert initial data with set_values (serial)
+        {
+            let db = Database::create_new(&db_path).unwrap();
+            let mut txn = db.begin_rw().unwrap();
+            let mut initial = initial_changes.clone();
+            txn.set_values(&mut initial).unwrap();
+            txn.commit().unwrap();
+            eprintln!("After initial 100k insert: state_root={:?}", db.state_root());
+        }
+
+        // Reopen the database
+        let db = Database::open(&db_path).unwrap();
+        eprintln!("Reopened database: state_root={:?}", db.state_root());
+
+        // Apply new changes with parallel_v2 using Transaction API (same as benchmark)
+        {
+            let mut txn = db.begin_rw().unwrap();
+            let mut changes = new_changes.clone();
+            eprintln!("Calling set_values_parallel_v2 with {} changes", changes.len());
+            match txn.set_values_parallel_v2(&mut changes) {
+                Ok(_) => {
+                    eprintln!("set_values_parallel_v2 succeeded, state_root={:?}", txn.state_root());
+                    txn.commit().unwrap();
+                }
+                Err(e) => panic!("set_values_parallel_v2 failed with: {:?}", e),
+            }
+        }
+        eprintln!("Final state_root={:?}", db.state_root());
     }
 }
