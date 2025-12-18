@@ -1,6 +1,7 @@
 use crossbeam_channel::{Receiver, Sender};
 use fxhash::FxBuildHasher;
 use io_uring::{opcode, types, IoUring};
+use proptest::num;
 use std::{
     ffi::CString,
     fs::File,
@@ -33,11 +34,17 @@ use crate::{
 struct Frame {
     ptr: *mut [u8; Page::SIZE],
     page_id: AtomicU32, // 0 means None, otherwise it's the page_id
+    state: AtomicU32,   // Bit 0: pin (If true, this frame cannot be evicted)
+                        // Bit 1: ref_bit (Second Chance bit)
 }
 
 impl Clone for Frame {
     fn clone(&self) -> Self {
-        Frame { ptr: self.ptr, page_id: AtomicU32::new(self.page_id.load(Ordering::Acquire)) }
+        Frame {
+            ptr: self.ptr,
+            page_id: AtomicU32::new(self.page_id.load(Ordering::SeqCst)),
+            state: AtomicU32::new(self.state.load(Ordering::SeqCst)),
+        }
     }
 }
 
@@ -62,15 +69,47 @@ impl FrameId {
     }
 }
 
+struct Frames(Vec<Frame>);
+impl Frames {
+    fn allocate(num_frames: usize) -> Self {
+        let mut frames = Vec::with_capacity(num_frames);
+        (0..num_frames).into_iter().for_each(|_| {
+            let boxed_array = Box::new([0; Page::SIZE]);
+            let ptr = Box::into_raw(boxed_array);
+            frames.push(Frame { ptr, page_id: AtomicU32::new(0), state: AtomicU32::new(0) });
+        });
+        Self(frames)
+    }
+
+    // Pin a frame so that it will not be evicted.
+    fn pin(&self, frame_id: FrameId) {
+        todo!()
+    }
+
+    // Unpin a frame.
+    fn unpin(&self, frame_id: FrameId) {
+        todo!()
+    }
+
+    // Find a frame to be evicted, also pin that frame and running cleanup F function.
+    fn victim_and_pin<F>(&self, cleanup: F) -> Option<FrameId>
+    where
+        F: FnOnce(FrameId),
+    {
+        todo!()
+    }
+}
+
 pub(crate) type FxMap<K, V> = DashMap<K, V, FxBuildHasher>;
 pub(crate) type FxSet<K> = DashSet<K, FxBuildHasher>;
 
 pub struct PageManager {
     page_table: FxMap<PageId, FrameId>, /* mapping between page id and buffer pool frames,
                                          * indexed by page id with fix num_frames size */
-    frames: Arc<Vec<Frame>>, /* list of frames that hold pages' data, indexed by frame id with
-                              * fix num_frames size */
-    replacer: Arc<ClockReplacer>,
+    frames: Arc<Frames>, /* list of frames that hold pages' data, indexed by frame id with
+                          * fix num_frames size */
+    frame_lock_replacer_hand: Mutex<usize>, /* CLOCK cache replacer hand */
+    // replacer: Arc<ClockReplacer>,
     loading_pages: FxSet<PageId>,
     page_count: AtomicU32,
     num_frames: u32,
@@ -93,18 +132,7 @@ enum WriteMessage {
 
 impl std::fmt::Debug for PageManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PageManager")
-            .field("num_frames", &self.num_frames)
-            .field("page_count", &self.page_count)
-            .field("file", &self.file)
-            .field("file_len", &self.file_len)
-            .field("frames", &self.frames)
-            .field("page_table", &self.page_table)
-            // .field("original_free_frame_idx", &self.original_free_frame_idx)
-            // .field("lru_replacer", &self.lru_replacer)
-            // .field("loading_page", &self.loading_page)
-            .field("io_uring", &"<IoUring>")
-            .finish()
+        f.debug_struct("PageManager").field("num_frames", &self.num_frames).finish()
     }
 }
 
@@ -148,18 +176,9 @@ impl PageManager {
         let file_len = AtomicU64::new(file.metadata().map_err(PageError::IO)?.len());
         let page_table =
             DashMap::with_capacity_and_hasher(num_frames as usize, FxBuildHasher::default());
-        let mut frames = Vec::with_capacity(num_frames as usize);
-        for _ in 0..num_frames {
-            let boxed_array = Box::new([0; Page::SIZE]);
-            let ptr = Box::into_raw(boxed_array);
-            frames.push(Frame { ptr, page_id: AtomicU32::new(0) });
-        }
-        // let lru_replacer = Arc::new(CacheEvict::new(num_frames as usize));
-        // let loading_page =
-        //     DashSet::with_capacity_and_hasher(num_frames as usize, FxBuildHasher::default());
-        let replacer = ClockReplacer::new(num_frames as usize);
+        let frames = Frames::allocate(num_frames as usize);
 
-        // Initialize io_uring with queue depth base on num_frames
+        // Initialize io_uring with queue depth
         let queue_depth = num_frames.min(2048) as u32;
         let io_uring = IoUring::new(queue_depth)
             .map_err(|e| PageError::IO(io::Error::new(io::ErrorKind::Other, e)))?;
@@ -171,11 +190,8 @@ impl PageManager {
             file: RwLock::new(file),
             file_len,
             frames: Arc::new(frames),
+            frame_lock_replacer_hand: Mutex::new(0),
             page_table,
-            // original_free_frame_idx: AtomicU32::new(0),
-            // lru_replacer,
-            // loading_page,
-            replacer: Arc::new(replacer),
             updated_pages: Arc::new(DashMap::with_hasher(FxBuildHasher::default())),
             new_pages: Mutex::new(Vec::new()),
             loading_pages: DashSet::with_hasher(FxBuildHasher::default()),
@@ -195,11 +211,11 @@ impl PageManager {
         let frames = self.frames.clone();
         let io_uring = self.io_uring.clone();
         let updated_pages = self.updated_pages.clone();
-        let replacer = self.replacer.clone();
         thread::spawn(move || {
             loop {
                 match rx_job.recv() {
                     Ok(WriteMessage::Pages(pages)) => {
+                        // First, write pages to disk
                         let result = Self::write_updated_pages(
                             io_uring.clone(),
                             frames.clone(),
@@ -210,6 +226,7 @@ impl PageManager {
                         if result.is_err() {
                             panic!("{:?}", result);
                         }
+                        // Then unpin those writtern pages so that the pages could be evicted and reused
                         pages.iter().for_each(|(page_id, frame_id)| {
                             let frame = &frames[frame_id.0 as usize];
                             if let PageState::Dirty(_) =
@@ -217,7 +234,7 @@ impl PageManager {
                             {
                                 return;
                             }
-                            replacer.unpin(*frame_id);
+                            frames.unpin(*frame_id);
                             // It's possible that between checking for dirty state and unpin, the
                             // page is get_mut again. In that case, re-pin the frame.
                             if let PageState::Dirty(_) =
@@ -245,7 +262,7 @@ impl PageManager {
 
     fn write_updated_pages(
         ring: Arc<RwLock<IoUring>>,
-        frames: Arc<Vec<Frame>>,
+        frames: Arc<Frames>,
         pages: &[(PageId, FrameId)],
         file: File,
     ) -> io::Result<()> {
@@ -257,7 +274,7 @@ impl PageManager {
             let page_id = page.0;
             let frame_id = page.1;
             let offset = page_id.as_offset();
-            let frame = &frames[frame_id.0 as usize];
+            let frame = &frames.0[frame_id.0 as usize];
             let page_data =
                 unsafe { std::slice::from_raw_parts(frame.ptr as *const u8, Page::SIZE) };
 
