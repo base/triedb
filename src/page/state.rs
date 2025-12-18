@@ -151,6 +151,22 @@ impl PageState {
         }
     }
 
+    /// Check if value from a raw pointer is in a dirty state.
+    ///
+    /// # Safety
+    ///
+    /// * `ptr` must be properly aligned.
+    /// * Access to the data pointed by `ptr` must adhere to the [memory model for page state
+    ///   access].
+    ///
+    /// [valid]: core::ptr#safety
+    /// [memory model for page state access]: self#memory-model
+    #[inline]
+    pub(super) unsafe fn is_dirty(ptr: *mut u64) -> bool {
+        // SAFETY: guaranteed by the caller
+        *ptr & Self::DIRTY_MASK != 0
+    }
+
     //#[inline]
     //pub(super) fn occupied(snapshot_id: SnapshotId) -> Option<Self> {
     //    if snapshot_id & Self::DIRTY_MASK != 0 {
@@ -216,6 +232,18 @@ mod tests {
         assert_eq!(PageState::from(0), PageState::Unused);
         assert_eq!(PageState::from(0x123), PageState::Occupied(0x123));
         assert_eq!(PageState::from(0x8000000000000123), PageState::Dirty(0x123));
+    }
+
+    #[test]
+    fn state_is_dirty_from_ptr() {
+        let mut data = 123u64;
+
+        let is_dirty = unsafe { PageState::is_dirty(&raw mut data) };
+        assert_eq!(is_dirty, false);
+
+        data = data | PageState::DIRTY_MASK;
+        let is_dirty = unsafe { PageState::is_dirty(&raw mut data) };
+        assert_eq!(is_dirty, true);
     }
 
     #[test]

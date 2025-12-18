@@ -52,11 +52,20 @@ impl Frame {
     // Unpin the frame if the page is not dirty.
     // If the page is in dirty state, returns false.
     fn unpin(&self) -> bool {
-        todo!()
+        let is_dirty = unsafe { PageState::is_dirty(self.ptr.cast()) };
+
+        if is_dirty {
+            return false;
+        }
+        // Clear pin bit (bit 0), keep ref_bit (bit 1) unchanged
+        self.state.fetch_and(0b10, Ordering::Release);
+        true
     }
 
+    #[inline(always)]
     fn pin(&self) {
-        todo!()
+        // Set both pin (bit 0) and ref_bit (bit 1) to true
+        self.state.store(0b11, Ordering::Release);
     }
 }
 
@@ -70,7 +79,7 @@ unsafe impl Sync for Frame {}
 pub(crate) struct FrameId(u32);
 
 impl FrameId {
-    #[inline]
+    #[inline(always)]
     pub(crate) const fn as_usize(&self) -> usize {
         self.0 as usize
     }
@@ -98,14 +107,11 @@ impl Frames {
         &self.0[frame_id.0 as usize]
     }
 
-    // // Pin a frame so that it will not be evicted.
-    // fn pin(&self, frame_id: FrameId) {
-    //     todo!()
-    // }
-
-    // Unpin a frame.
-    fn unpin(&self, frame_id: FrameId) {
-        todo!()
+    // Unpin the frame if the occupied page is not dirty.
+    // If the page is in dirty state, returns false.
+    fn unpin(&self, frame_id: FrameId) -> bool {
+        let frame = self.get(frame_id);
+        frame.unpin()
     }
 
     // Find a frame to be evicted, also pin that frame and running cleanup F function.
@@ -574,10 +580,14 @@ impl PageManager {
         // Submit all pending operations
         ring_guard.submit()?;
 
-        new_pages.iter().for_each(|(frame_id, _)| self.frames.unpin(*frame_id));
+        new_pages.iter().for_each(|(frame_id, _)| {
+            self.frames.unpin(*frame_id);
+        });
         new_pages.clear();
 
-        self.updated_pages.iter().for_each(|entry| self.frames.unpin(*entry.value()));
+        self.updated_pages.iter().for_each(|entry| {
+            self.frames.unpin(*entry.value());
+        });
         self.updated_pages.clear();
 
         self.drop_pages.lock().clear();
@@ -765,7 +775,7 @@ mod tests {
         for i in 1..=10 {
             let page_id = PageId::new(i).unwrap();
             let frame_id = m.page_table.get(&page_id).expect("page not in cache");
-            let frame = m.frames.get(frame_id.as_usize()).unwrap();
+            let frame = m.frames.get(*frame_id);
             assert_eq!(frame.page_id.load(Ordering::Relaxed), page_id.as_u32());
         }
     }
