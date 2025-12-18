@@ -121,6 +121,11 @@ impl Frames {
     {
         todo!()
     }
+
+    #[cfg(test)]
+    fn count_pinned(&self) -> usize {
+        self.0.iter().filter(|i| (i.state.load(Ordering::SeqCst) & 0b01) != 0).count()
+    }
 }
 
 pub(crate) type FxMap<K, V> = DashMap<K, V, FxBuildHasher>;
@@ -866,9 +871,9 @@ mod tests {
         let mut p = m.allocate(snapshot).expect("page allocation failed");
         p.contents_mut().iter_mut().for_each(|byte| *byte = 0xab);
         drop(p);
-        assert_eq!(m.replacer.count_pinned(), 1);
+        assert_eq!(m.frames.count_pinned(), 1);
         m.sync().expect("sync failed");
-        assert_eq!(m.replacer.count_pinned(), 0);
+        assert_eq!(m.frames.count_pinned(), 0);
 
         seek(&f, 0);
         assert_eq!(len(&f), 1024 * Page::SIZE);
@@ -880,9 +885,9 @@ mod tests {
             let mut p = m.allocate(snapshot + i as u64).expect("page allocation failed");
             p.contents_mut().iter_mut().for_each(|byte| *byte = 0xab ^ (i as u8));
         }
-        assert_eq!(m.replacer.count_pinned(), 255);
+        assert_eq!(m.frames.count_pinned(), 255);
         m.sync().expect("sync failed");
-        assert_eq!(m.replacer.count_pinned(), 0);
+        assert_eq!(m.frames.count_pinned(), 0);
 
         assert_eq!(len(&f), 1024 * Page::SIZE);
         for i in 1..=255 {
@@ -918,7 +923,7 @@ mod tests {
                 let page = m.get(page_id).expect("page not in cache");
                 assert_eq!(page.contents(), &mut [0xab ^ (i as u8); Page::DATA_SIZE]);
                 let frame_id = m.page_table.get(&page_id).expect("page not in cache");
-                let frame = &m.frames[frame_id.0 as usize];
+                let frame = m.frames.get(*frame_id);
                 assert_eq!(frame.ptr as *const u8, page.all_contents().as_ptr());
             }
         }
@@ -933,7 +938,7 @@ mod tests {
                 let page = m.get_mut(snapshot + i as u64, page_id).expect("page not in cache");
                 assert_eq!(page.contents(), &mut [0xab ^ (i as u8); Page::DATA_SIZE]);
                 let frame_id = m.page_table.get(&page_id).expect("page not in cache");
-                let frame = &m.frames[frame_id.0 as usize];
+                let frame = m.frames.get(*frame_id);
                 assert_eq!(frame.ptr as *const u8, page.all_contents().as_ptr());
             }
         }
