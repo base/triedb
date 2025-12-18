@@ -103,13 +103,13 @@ impl Frames {
     //     todo!()
     // }
 
-    // // Unpin a frame.
-    // fn unpin(&self, frame_id: FrameId) {
-    //     todo!()
-    // }
+    // Unpin a frame.
+    fn unpin(&self, frame_id: FrameId) {
+        todo!()
+    }
 
     // Find a frame to be evicted, also pin that frame and running cleanup F function.
-    fn victim_and_pin<F>(&self, cleanup: F) -> Option<FrameId>
+    fn victim_and_pin<F>(&self, cleanup: F) -> Option<(FrameId, &Frame)>
     where
         F: FnOnce(FrameId),
     {
@@ -409,14 +409,13 @@ impl PageManager {
     /// by the select_frame_id pattern in get() and get_mut().
     /// The result FrameId get pinned after this function.
     fn load_page_from_disk(&self, page_id: PageId) -> Result<FrameId, PageError> {
-        let frame_id = self
+        let (frame_id, frame) = self
             .frames
             .victim_and_pin(|fid| {
                 self.cleanup_victim_page(fid);
             })
             .ok_or(PageError::OutOfMemory)?;
 
-        let frame = self.frames.get(frame_id);
         frame.page_id.store(page_id.as_u32(), Ordering::Relaxed);
         unsafe {
             self.file
@@ -442,8 +441,8 @@ impl PageManager {
     ///
     /// Returns an error if the buffer pool is full.
     pub fn allocate(&self, snapshot_id: SnapshotId) -> Result<PageMut<'_>, PageError> {
-        let frame_id = self
-            .replacer
+        let (frame_id, frame) = self
+            .frames
             .victim_and_pin(|fid| {
                 self.cleanup_victim_page(fid);
             })
@@ -453,9 +452,9 @@ impl PageManager {
         self.new_pages.lock().push((frame_id, page_id));
         self.grow_if_needed(new_count as u64 * Page::SIZE as u64)?;
         self.page_table.insert(page_id, frame_id);
-        self.frames[frame_id.0 as usize].page_id.store(page_id.as_u32(), Ordering::Relaxed);
-        let data = self.frames[frame_id.0 as usize].ptr;
-        unsafe { PageMut::acquire_unchecked(page_id, snapshot_id, data, self) }
+
+        frame.page_id.store(page_id.as_u32(), Ordering::Relaxed);
+        unsafe { PageMut::acquire_unchecked(page_id, snapshot_id, frame.ptr, self) }
     }
 
     /// Checks if a page is currently in the Dirty state.
@@ -468,7 +467,7 @@ impl PageManager {
         }
         // A page is dirty if it is in the page_table
         if let Some(frame_id) = self.page_table.get(&page_id) {
-            let frame = &self.frames[frame_id.0 as usize];
+            let frame = self.frames.get(*frame_id);
             // SAFETY: We're just reading the state atomically, respecting the memory model
             let state = unsafe { RawPageState::from_ptr(frame.ptr.cast()) };
 
@@ -504,7 +503,7 @@ impl PageManager {
             let iovecs: Vec<libc::iovec> = new_pages
                 .iter()
                 .map(|(frame_id, _)| {
-                    let frame = &self.frames[frame_id.0 as usize];
+                    let frame = self.frames.get(*frame_id);
                     libc::iovec { iov_base: frame.ptr as *mut libc::c_void, iov_len: Page::SIZE }
                 })
                 .collect();
@@ -545,7 +544,7 @@ impl PageManager {
         for entry in self.updated_pages.iter() {
             let frame_id = *entry.value();
             let page_id = *entry.key();
-            let frame = &self.frames[frame_id.0 as usize];
+            let frame = self.frames.get(frame_id);
             let offset = page_id.as_offset();
 
             let page_data =
@@ -575,10 +574,10 @@ impl PageManager {
         // Submit all pending operations
         ring_guard.submit()?;
 
-        new_pages.iter().for_each(|(frame_id, _)| self.replacer.unpin(*frame_id));
+        new_pages.iter().for_each(|(frame_id, _)| self.frames.unpin(*frame_id));
         new_pages.clear();
 
-        self.updated_pages.iter().for_each(|entry| self.replacer.unpin(*entry.value()));
+        self.updated_pages.iter().for_each(|entry| self.frames.unpin(*entry.value()));
         self.updated_pages.clear();
 
         self.drop_pages.lock().clear();
@@ -627,7 +626,7 @@ impl PageManager {
     #[inline]
     pub fn drop_page(&self, page_id: PageId) {
         if let Some(frame_id) = self.page_table.get(&page_id) {
-            self.replacer.unpin(*frame_id);
+            self.frames.unpin(*frame_id);
         }
     }
 
