@@ -48,6 +48,18 @@ impl Clone for Frame {
     }
 }
 
+impl Frame {
+    // Unpin the frame if the page is not dirty.
+    // If the page is in dirty state, returns false.
+    fn unpin(&self) -> bool {
+        todo!()
+    }
+
+    fn pin(&self) {
+        todo!()
+    }
+}
+
 // SAFETY: Frame contains a pointer to heap-allocated memory that we own exclusively.
 // The memory is allocated via Box and we manage its lifetime, so it's safe to send
 // between threads.
@@ -81,15 +93,20 @@ impl Frames {
         Self(frames)
     }
 
-    // Pin a frame so that it will not be evicted.
-    fn pin(&self, frame_id: FrameId) {
-        todo!()
+    #[inline(always)]
+    fn get(&self, frame_id: FrameId) -> &Frame {
+        &self.0[frame_id.0 as usize]
     }
 
-    // Unpin a frame.
-    fn unpin(&self, frame_id: FrameId) {
-        todo!()
-    }
+    // // Pin a frame so that it will not be evicted.
+    // fn pin(&self, frame_id: FrameId) {
+    //     todo!()
+    // }
+
+    // // Unpin a frame.
+    // fn unpin(&self, frame_id: FrameId) {
+    //     todo!()
+    // }
 
     // Find a frame to be evicted, also pin that frame and running cleanup F function.
     fn victim_and_pin<F>(&self, cleanup: F) -> Option<FrameId>
@@ -228,22 +245,24 @@ impl PageManager {
                         }
                         // Then unpin those writtern pages so that the pages could be evicted and reused
                         pages.iter().for_each(|(page_id, frame_id)| {
-                            let frame = &frames[frame_id.0 as usize];
-                            if let PageState::Dirty(_) =
-                                unsafe { RawPageState::from_ptr(frame.ptr.cast()).load() }
-                            {
-                                return;
+                            let frame = frames.get(*frame_id);
+                            // if let PageState::Dirty(_) =
+                            //     unsafe { RawPageState::from_ptr(frame.ptr.cast()).load() }
+                            // {
+                            //     return;
+                            // }
+                            // frames.unpin(*frame_id);
+                            // // It's possible that between checking for dirty state and unpin, the
+                            // // page is get_mut again. In that case, re-pin the frame.
+                            // if let PageState::Dirty(_) =
+                            //     unsafe { RawPageState::from_ptr(frame.ptr.cast()).load() }
+                            // {
+                            //     frame.pin(*frame_id);
+                            //     return;
+                            // }
+                            if frame.unpin() {
+                                updated_pages.remove(page_id);
                             }
-                            frames.unpin(*frame_id);
-                            // It's possible that between checking for dirty state and unpin, the
-                            // page is get_mut again. In that case, re-pin the frame.
-                            if let PageState::Dirty(_) =
-                                unsafe { RawPageState::from_ptr(frame.ptr.cast()).load() }
-                            {
-                                replacer.pin(*frame_id);
-                                return;
-                            }
-                            updated_pages.remove(page_id);
                         });
                     }
                     Ok(WriteMessage::Shutdown) => {
@@ -274,7 +293,7 @@ impl PageManager {
             let page_id = page.0;
             let frame_id = page.1;
             let offset = page_id.as_offset();
-            let frame = &frames.0[frame_id.0 as usize];
+            let frame = frames.get(frame_id);
             let page_data =
                 unsafe { std::slice::from_raw_parts(frame.ptr as *const u8, Page::SIZE) };
 
@@ -331,11 +350,8 @@ impl PageManager {
         if page_id > self.page_count.load(Ordering::Relaxed) {
             return Err(PageError::PageNotFound(page_id));
         }
-
-        // Atomically get or load the page
-        let frame_id = self.select_frame_id(page_id)?;
-
-        let frame = &self.frames[frame_id.0 as usize];
+        // Get or load the page from disk.
+        let (_, frame) = self.select_frame(page_id)?;
         unsafe { Page::from_ptr(page_id, frame.ptr, self) }
     }
 
@@ -348,29 +364,30 @@ impl PageManager {
         if page_id > self.page_count.load(Ordering::Relaxed) {
             return Err(PageError::PageNotFound(page_id));
         }
-
-        // Atomically get or load the page
-        let frame_id = self.select_frame_id(page_id)?;
-
+        // Get or load the page from disk.
+        let (frame_id, frame) = self.select_frame(page_id)?;
         self.add_updated_page(page_id, frame_id);
-        let frame = &self.frames[frame_id.0 as usize];
         unsafe { PageMut::from_ptr(page_id, snapshot_id, frame.ptr, self) }
     }
 
-    fn select_frame_id(&self, page_id: PageId) -> Result<FrameId, PageError> {
+    // Return frame for given page_id.
+    // If the page_id is in frames, return from the cache. Otherwise, get an evicted frame_id and load data from the disk. In both case, pin the frame index.
+    fn select_frame(&self, page_id: PageId) -> Result<(FrameId, &Frame), PageError> {
         loop {
-            // Use get().map() to release the DashMap lock immediately before pinning
-            if let Some(frame_id) = self.page_table.get(&page_id).map(|r| *r) {
-                self.replacer.pin(frame_id);
-                return Ok(frame_id);
+            // If the page_id is in the cache. Hold dashmap lock until returning.
+            if let Some(frame_id) = self.page_table.get(&page_id) {
+                let frame = self.frames.get(*frame_id);
+                frame.pin();
+                return Ok((*frame_id, frame));
             }
-            // Otherwise, need to load page from disk
+            // Otherwise, need to load page from disk.
             if self.loading_pages.insert(page_id) {
-                // This thread is the first to load the page
+                // This thread is the first to load the page. Load page from disk and also pin the frame.
                 let frame_id = self.load_page_from_disk(page_id)?;
                 self.page_table.insert(page_id, frame_id);
+                let frame = self.frames.get(frame_id);
                 self.loading_pages.remove(&page_id);
-                return Ok(frame_id);
+                return Ok((frame_id, frame));
             }
             // Another thread is already loading this page, spin/yield and retry
             std::thread::yield_now();
@@ -379,13 +396,11 @@ impl PageManager {
 
     // Remove the current pageid, frame_id from page_table.
     fn cleanup_victim_page(&self, frame_id: FrameId) {
-        let current_frame = self.frames.get(frame_id.as_usize());
-        if let Some(current_frame) = current_frame {
-            let stored_id = current_frame.page_id.load(Ordering::Acquire);
-            if stored_id != 0 {
-                if let Some(old_page_id) = PageId::new(stored_id) {
-                    self.page_table.remove(&old_page_id);
-                }
+        let current_frame = self.frames.get(frame_id);
+        let stored_id = current_frame.page_id.load(Ordering::Acquire);
+        if stored_id != 0 {
+            if let Some(old_page_id) = PageId::new(stored_id) {
+                self.page_table.remove(&old_page_id);
             }
         }
     }
@@ -395,18 +410,18 @@ impl PageManager {
     /// The result FrameId get pinned after this function.
     fn load_page_from_disk(&self, page_id: PageId) -> Result<FrameId, PageError> {
         let frame_id = self
-            .replacer
+            .frames
             .victim_and_pin(|fid| {
                 self.cleanup_victim_page(fid);
             })
             .ok_or(PageError::OutOfMemory)?;
 
-        self.frames[frame_id.0 as usize].page_id.store(page_id.as_u32(), Ordering::Relaxed);
-        let buf: *mut [u8; Page::SIZE] = self.frames[frame_id.0 as usize].ptr;
+        let frame = self.frames.get(frame_id);
+        frame.page_id.store(page_id.as_u32(), Ordering::Relaxed);
         unsafe {
             self.file
                 .read()
-                .read_exact_at(&mut *buf, page_id.as_offset() as u64)
+                .read_exact_at(&mut *frame.ptr, page_id.as_offset() as u64)
                 .map_err(PageError::IO)?;
         }
         Ok(frame_id)
