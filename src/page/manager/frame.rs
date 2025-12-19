@@ -6,10 +6,10 @@ use crate::{
     snapshot::SnapshotId,
 };
 use parking_lot::Mutex;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 #[derive(Debug)]
-struct Frame {
+pub(crate) struct Frame {
     ptr: *mut [u8; Page::SIZE],
     page_id: AtomicU32, // 0 means None, otherwise it's the page_id
     state: AtomicU32,   // Bit 0: pin (If true, this frame cannot be evicted)
@@ -29,7 +29,8 @@ impl Clone for Frame {
 impl Frame {
     // Unpin the frame if the page is not dirty.
     // If the page is in dirty state, returns false.
-    fn unpin(&self) -> bool {
+    #[inline]
+    pub(crate) fn unpin(&self) -> bool {
         let is_dirty = unsafe { PageState::is_dirty(self.ptr.cast()) };
 
         if is_dirty {
@@ -40,8 +41,8 @@ impl Frame {
         true
     }
 
-    #[inline(always)]
-    fn pin(&self) {
+    #[inline]
+    pub(crate) fn pin(&self) {
         // Set both pin (bit 0) and ref_bit (bit 1) to true
         self.state.store(0b11, Ordering::Release);
     }
@@ -68,13 +69,13 @@ impl FrameId {
     }
 }
 
-struct Frames {
+pub(crate) struct Frames {
     inner: Vec<Frame>,
     hand: Mutex<usize>,
 }
 
 impl Frames {
-    fn allocate(num_frames: usize) -> Self {
+    pub(crate) fn allocate(num_frames: usize) -> Self {
         let mut frames = Vec::with_capacity(num_frames);
         (0..num_frames).into_iter().for_each(|_| {
             let boxed_array = Box::new([0; Page::SIZE]);
@@ -85,19 +86,19 @@ impl Frames {
     }
 
     #[inline(always)]
-    fn get(&self, frame_id: FrameId) -> &Frame {
+    pub(crate) fn get(&self, frame_id: FrameId) -> &Frame {
         &self.inner[frame_id.0 as usize]
     }
 
     // Unpin the frame if the occupied page is not dirty.
     // If the page is in dirty state, returns false.
-    fn unpin(&self, frame_id: FrameId) -> bool {
+    pub(crate) fn unpin(&self, frame_id: FrameId) -> bool {
         let frame = self.get(frame_id);
         frame.unpin()
     }
 
     // Find a frame to be evicted, also pin that frame and running cleanup F function.
-    fn victim_and_pin<F>(&self, cleanup: F) -> Option<(FrameId, &Frame)>
+    pub(crate) fn victim_and_pin<F>(&self, cleanup: F) -> Option<(FrameId, &Frame)>
     where
         F: FnOnce(FrameId),
     {
@@ -140,3 +141,51 @@ impl Frames {
         self.inner.iter().filter(|i| (i.state.load(Ordering::SeqCst) & 0b01) != 0).count()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pin() {
+        let r = ClockReplacer::new(5);
+        r.pin(FrameId::from_usize(0));
+        assert_eq!(r.count_pinned(), 1);
+        r.pin(FrameId::from_usize(0));
+        assert_eq!(r.count_pinned(), 1);
+        r.pin(FrameId::from_usize(4));
+        assert_eq!(r.count_pinned(), 2);
+    }
+
+    #[test]
+    fn test_upin() {
+        let r = ClockReplacer::new(5);
+        r.pin(FrameId::from_usize(0));
+        r.pin(FrameId::from_usize(1));
+        r.pin(FrameId::from_usize(1));
+        r.pin(FrameId::from_usize(2));
+        assert_eq!(r.count_pinned(), 3);
+
+        r.unpin(FrameId::from_usize(2));
+        assert_eq!(r.count_pinned(), 2);
+
+        r.unpin(FrameId::from_usize(1));
+        assert_eq!(r.count_pinned(), 1);
+        r.unpin(FrameId::from_usize(1));
+        assert_eq!(r.count_pinned(), 1);
+    }
+
+    #[test]
+    fn test_evict() {
+        let r = ClockReplacer::new(5);
+        (0..5).for_each(|i| {
+            assert_eq!(r.victim_and_pin(|_| {}), Some(FrameId::from_usize(i)));
+            r.pin(FrameId::from_usize(i));
+        });
+        assert_eq!(r.victim_and_pin(|_| {}), None);
+
+        r.unpin(FrameId::from_usize(4));
+        assert_eq!(r.victim_and_pin(|_| {}), Some(FrameId::from_usize(4)));
+    }
+}
+
