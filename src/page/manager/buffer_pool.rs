@@ -64,6 +64,8 @@ impl std::fmt::Debug for PageManager {
 }
 
 impl PageManager {
+    const MIN_IO_URING_QUEUE_DEPTH: u32 = 2048;
+
     pub fn options() -> PageManagerOptions {
         PageManagerOptions::new()
     }
@@ -106,7 +108,7 @@ impl PageManager {
         let frames = Frames::allocate(num_frames as usize);
 
         // Initialize io_uring with queue depth
-        let queue_depth = num_frames.min(2048) as u32;
+        let queue_depth = num_frames.min(Self::MIN_IO_URING_QUEUE_DEPTH) as u32;
         let io_uring = IoUring::new(queue_depth)
             .map_err(|e| PageError::IO(io::Error::new(io::ErrorKind::Other, e)))?;
 
@@ -154,22 +156,8 @@ impl PageManager {
                         }
                         // Then unpin those writtern pages so that the pages could be evicted and reused
                         pages.iter().for_each(|(page_id, frame_id)| {
-                            let frame = frames.get(*frame_id);
-                            // if let PageState::Dirty(_) =
-                            //     unsafe { RawPageState::from_ptr(frame.ptr.cast()).load() }
-                            // {
-                            //     return;
-                            // }
-                            // frames.unpin(*frame_id);
-                            // // It's possible that between checking for dirty state and unpin, the
-                            // // page is get_mut again. In that case, re-pin the frame.
-                            // if let PageState::Dirty(_) =
-                            //     unsafe { RawPageState::from_ptr(frame.ptr.cast()).load() }
-                            // {
-                            //     frame.pin(*frame_id);
-                            //     return;
-                            // }
-                            if frame.unpin() {
+                            // TODO: Could have race condition btw unpin and remove actions.
+                            if let Some(true) = frames.unpin(*frame_id) {
                                 updated_pages.remove(page_id);
                             }
                         });
@@ -202,28 +190,30 @@ impl PageManager {
             let page_id = page.0;
             let frame_id = page.1;
             let offset = page_id.as_offset();
-            let frame = frames.get(frame_id);
-            let page_data =
-                unsafe { std::slice::from_raw_parts(frame.ptr as *const u8, Page::SIZE) };
+            if let Some(frame) = frames.get(frame_id) {
+                let page_data =
+                    unsafe { std::slice::from_raw_parts(frame.ptr as *const u8, Page::SIZE) };
 
-            // Create write operation
-            let write_op = opcode::Write::new(types::Fd(fd), page_data.as_ptr(), Page::SIZE as u32)
-                .offset(offset as u64)
-                .build()
-                .user_data(op_count);
-            // Submit to ring
-            loop {
-                let mut sq = ring_guard.submission();
-                match unsafe { sq.push(&write_op) } {
-                    Ok(_) => {
-                        op_count += 1;
-                        drop(sq);
-                        break;
-                    }
-                    Err(_) => {
-                        // Submission queue is full, submit and wait
-                        drop(sq);
-                        let _ = ring_guard.submit_and_wait(1);
+                // Create write operation
+                let write_op =
+                    opcode::Write::new(types::Fd(fd), page_data.as_ptr(), Page::SIZE as u32)
+                        .offset(offset as u64)
+                        .build()
+                        .user_data(op_count);
+                // Submit to ring
+                loop {
+                    let mut sq = ring_guard.submission();
+                    match unsafe { sq.push(&write_op) } {
+                        Ok(_) => {
+                            op_count += 1;
+                            drop(sq);
+                            break;
+                        }
+                        Err(_) => {
+                            // Submission queue is full, submit and wait
+                            drop(sq);
+                            let _ = ring_guard.submit_and_wait(1);
+                        }
                     }
                 }
             }
@@ -285,7 +275,7 @@ impl PageManager {
         loop {
             // If the page_id is in the cache. Hold dashmap lock until returning.
             if let Some(frame_id) = self.page_table.get(&page_id) {
-                let frame = self.frames.get(*frame_id);
+                let frame = self.frames.get(*frame_id).unwrap();
                 frame.pin();
                 return Ok((*frame_id, frame));
             }
@@ -294,7 +284,7 @@ impl PageManager {
                 // This thread is the first to load the page. Load page from disk and also pin the frame.
                 let frame_id = self.load_page_from_disk(page_id)?;
                 self.page_table.insert(page_id, frame_id);
-                let frame = self.frames.get(frame_id);
+                let frame = self.frames.get(frame_id).unwrap();
                 self.loading_pages.remove(&page_id);
                 return Ok((frame_id, frame));
             }
@@ -305,7 +295,7 @@ impl PageManager {
 
     // Remove the current pageid, frame_id from page_table.
     fn cleanup_victim_page(&self, frame_id: FrameId) {
-        let current_frame = self.frames.get(frame_id);
+        let current_frame = self.frames.get(frame_id).unwrap();
         let stored_id = current_frame.page_id.load(Ordering::Acquire);
         if stored_id != 0 {
             if let Some(old_page_id) = PageId::new(stored_id) {
@@ -376,7 +366,7 @@ impl PageManager {
         }
         // A page is dirty if it is in the page_table
         if let Some(frame_id) = self.page_table.get(&page_id) {
-            let frame = self.frames.get(*frame_id);
+            let frame = self.frames.get(*frame_id).unwrap();
             // SAFETY: We're just reading the state atomically, respecting the memory model
             let state = unsafe { RawPageState::from_ptr(frame.ptr.cast()) };
 
@@ -412,7 +402,7 @@ impl PageManager {
             let iovecs: Vec<libc::iovec> = new_pages
                 .iter()
                 .map(|(frame_id, _)| {
-                    let frame = self.frames.get(*frame_id);
+                    let frame = self.frames.get(*frame_id).unwrap();
                     libc::iovec { iov_base: frame.ptr as *mut libc::c_void, iov_len: Page::SIZE }
                 })
                 .collect();
@@ -453,7 +443,7 @@ impl PageManager {
         for entry in self.updated_pages.iter() {
             let frame_id = *entry.value();
             let page_id = *entry.key();
-            let frame = self.frames.get(frame_id);
+            let frame = self.frames.get(frame_id).unwrap();
             let offset = page_id.as_offset();
 
             let page_data =
@@ -678,7 +668,7 @@ mod tests {
         for i in 1..=10 {
             let page_id = PageId::new(i).unwrap();
             let frame_id = m.page_table.get(&page_id).expect("page not in cache");
-            let frame = m.frames.get(*frame_id);
+            let frame = m.frames.get(*frame_id).unwrap();
             assert_eq!(frame.page_id.load(Ordering::Relaxed), page_id.as_u32());
         }
     }
@@ -821,7 +811,7 @@ mod tests {
                 let page = m.get(page_id).expect("page not in cache");
                 assert_eq!(page.contents(), &mut [0xab ^ (i as u8); Page::DATA_SIZE]);
                 let frame_id = m.page_table.get(&page_id).expect("page not in cache");
-                let frame = m.frames.get(*frame_id);
+                let frame = m.frames.get(*frame_id).unwrap();
                 assert_eq!(frame.ptr as *const u8, page.all_contents().as_ptr());
             }
         }
@@ -836,7 +826,7 @@ mod tests {
                 let page = m.get_mut(snapshot + i as u64, page_id).expect("page not in cache");
                 assert_eq!(page.contents(), &mut [0xab ^ (i as u8); Page::DATA_SIZE]);
                 let frame_id = m.page_table.get(&page_id).expect("page not in cache");
-                let frame = m.frames.get(*frame_id);
+                let frame = m.frames.get(*frame_id).unwrap();
                 assert_eq!(frame.ptr as *const u8, page.all_contents().as_ptr());
             }
         }

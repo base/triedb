@@ -1,19 +1,13 @@
-use crate::{
-    page::{
-        state::{PageState, RawPageState},
-        Page, PageError, PageId, PageManagerOptions, PageMut,
-    },
-    snapshot::SnapshotId,
-};
+use crate::page::{state::PageState, Page};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 #[derive(Debug)]
 pub(crate) struct Frame {
-    ptr: *mut [u8; Page::SIZE],
-    page_id: AtomicU32, // 0 means None, otherwise it's the page_id
-    state: AtomicU32,   // Bit 0: pin (If true, this frame cannot be evicted)
-                        // Bit 1: ref_bit (Second Chance bit)
+    pub(crate) ptr: *mut [u8; Page::SIZE],
+    pub(crate) page_id: AtomicU32, // 0 means None, otherwise it's the page_id
+    state: AtomicU32,              // Bit 0: pin (If true, this frame cannot be evicted)
+                                   // Bit 1: ref_bit (Second Chance bit)
 }
 
 impl Clone for Frame {
@@ -58,14 +52,10 @@ unsafe impl Sync for Frame {}
 pub(crate) struct FrameId(u32);
 
 impl FrameId {
-    #[inline(always)]
-    pub(crate) const fn as_usize(&self) -> usize {
-        self.0 as usize
-    }
-
+    /// Constructs a new `FrameId` from `u32`
     #[inline]
-    pub(crate) const fn from_usize(value: usize) -> Self {
-        FrameId(value as u32)
+    pub(crate) const fn new(id: u32) -> Self {
+        FrameId(id)
     }
 }
 
@@ -85,16 +75,24 @@ impl Frames {
         Self { inner: frames, hand: Mutex::new(0) }
     }
 
-    #[inline(always)]
-    pub(crate) fn get(&self, frame_id: FrameId) -> &Frame {
-        &self.inner[frame_id.0 as usize]
+    #[inline]
+    pub(crate) fn get(&self, frame_id: FrameId) -> Option<&Frame> {
+        self.inner.get(frame_id.0 as usize)
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn pin(&self, frame_id: FrameId) -> Option<()> {
+        let frame = self.get(frame_id)?;
+        Some(frame.pin())
     }
 
     // Unpin the frame if the occupied page is not dirty.
     // If the page is in dirty state, returns false.
-    pub(crate) fn unpin(&self, frame_id: FrameId) -> bool {
-        let frame = self.get(frame_id);
-        frame.unpin()
+    #[inline]
+    pub(crate) fn unpin(&self, frame_id: FrameId) -> Option<bool> {
+        let frame = self.get(frame_id)?;
+        Some(frame.unpin())
     }
 
     // Find a frame to be evicted, also pin that frame and running cleanup F function.
@@ -127,7 +125,7 @@ impl Frames {
 
             // Pin the frame: set both pin (bit 0) and ref_bit (bit 1) to true
             frame.state.store(0b11, Ordering::Relaxed);
-            let frame_id = FrameId::from_usize(current_idx);
+            let frame_id = FrameId::new(current_idx as u32);
             cleanup(frame_id);
             return Some((frame_id, frame));
         }
@@ -137,7 +135,7 @@ impl Frames {
     }
 
     #[cfg(test)]
-    fn count_pinned(&self) -> usize {
+    pub(crate) fn count_pinned(&self) -> usize {
         self.inner.iter().filter(|i| (i.state.load(Ordering::SeqCst) & 0b01) != 0).count()
     }
 }
@@ -148,44 +146,45 @@ mod tests {
 
     #[test]
     fn test_pin() {
-        let r = ClockReplacer::new(5);
-        r.pin(FrameId::from_usize(0));
-        assert_eq!(r.count_pinned(), 1);
-        r.pin(FrameId::from_usize(0));
-        assert_eq!(r.count_pinned(), 1);
-        r.pin(FrameId::from_usize(4));
-        assert_eq!(r.count_pinned(), 2);
+        let f = Frames::allocate(5);
+        f.pin(FrameId::new(0));
+        assert_eq!(f.count_pinned(), 1);
+        f.pin(FrameId::new(0));
+        assert_eq!(f.count_pinned(), 1);
+        f.pin(FrameId::new(4));
+        assert_eq!(f.count_pinned(), 2);
     }
 
     #[test]
     fn test_upin() {
-        let r = ClockReplacer::new(5);
-        r.pin(FrameId::from_usize(0));
-        r.pin(FrameId::from_usize(1));
-        r.pin(FrameId::from_usize(1));
-        r.pin(FrameId::from_usize(2));
-        assert_eq!(r.count_pinned(), 3);
+        let f = Frames::allocate(5);
+        f.pin(FrameId::new(0));
+        f.pin(FrameId::new(0));
+        f.pin(FrameId::new(1));
+        f.pin(FrameId::new(2));
+        assert_eq!(f.count_pinned(), 3);
 
-        r.unpin(FrameId::from_usize(2));
-        assert_eq!(r.count_pinned(), 2);
+        f.unpin(FrameId::new(2));
+        assert_eq!(f.count_pinned(), 2);
 
-        r.unpin(FrameId::from_usize(1));
-        assert_eq!(r.count_pinned(), 1);
-        r.unpin(FrameId::from_usize(1));
-        assert_eq!(r.count_pinned(), 1);
+        f.unpin(FrameId::new(1));
+        assert_eq!(f.count_pinned(), 1);
+        f.unpin(FrameId::new(1));
+        assert_eq!(f.count_pinned(), 1);
     }
 
     #[test]
     fn test_evict() {
-        let r = ClockReplacer::new(5);
+        let f = Frames::allocate(5);
         (0..5).for_each(|i| {
-            assert_eq!(r.victim_and_pin(|_| {}), Some(FrameId::from_usize(i)));
-            r.pin(FrameId::from_usize(i));
+            let result = f.victim_and_pin(|_| {}).unwrap();
+            assert_eq!(result.0, FrameId::new(i));
+            f.pin(FrameId::new(i));
         });
-        assert_eq!(r.victim_and_pin(|_| {}), None);
+        assert_eq!(f.victim_and_pin(|_| {}).is_none(), true);
 
-        r.unpin(FrameId::from_usize(4));
-        assert_eq!(r.victim_and_pin(|_| {}), Some(FrameId::from_usize(4)));
+        f.unpin(FrameId::new(4));
+        let evicted = f.victim_and_pin(|_| {}).unwrap();
+        assert_eq!(evicted.0, FrameId::new(4));
     }
 }
-
