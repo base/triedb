@@ -1,5 +1,6 @@
 use crate::{
     page::{
+        manager::dirty::DirtyPages,
         state::{PageState, RawPageState},
         Page, PageError, PageId, PageManagerOptions, PageMut,
     },
@@ -21,6 +22,7 @@ pub struct PageManager {
     file: Mutex<File>,
     file_len: AtomicU64,
     page_count: AtomicU32,
+    dirty_pages: Mutex<DirtyPages>,
 }
 
 impl PageManager {
@@ -104,6 +106,7 @@ impl PageManager {
             file: Mutex::new(file),
             file_len: AtomicU64::new(file_len),
             page_count: AtomicU32::new(opts.page_count),
+            dirty_pages: Mutex::new(DirtyPages::default()),
         })
     }
 
@@ -216,6 +219,8 @@ impl PageManager {
         // SAFETY: We have checked that the page fits inside the memory map.
         let data = unsafe { self.mmap.as_mut_ptr().byte_add(offset).cast() };
 
+        self.mark_dirty(page_id);
+
         // TODO: This is actually unsafe, as it's possible to call `get()` arbitrary times before
         // calling this function (this will be fixed in a future commit).
         unsafe { PageMut::from_ptr(page_id, snapshot_id, data) }
@@ -236,6 +241,8 @@ impl PageManager {
         let offset = page_id.as_offset();
         // SAFETY: We have checked that the page fits inside the memory map.
         let data = unsafe { self.mmap.as_mut_ptr().byte_add(offset).cast() };
+
+        self.mark_dirty(page_id);
 
         // SAFETY:
         // - This is a newly created page at the end of the file, so we're guaranteed to have
@@ -265,10 +272,22 @@ impl PageManager {
         Ok(matches!(state.load(), PageState::Dirty(_)))
     }
 
-    /// Syncs pages to the backing file.
+    /// Adds a page to the dirty set, to be flushed to disk on next sync.
+    #[inline]
+    fn mark_dirty(&self, page_id: PageId) {
+        self.dirty_pages.lock().mark_dirty(page_id);
+    }
+
+    /// Syncs dirty pages to the backing file.
+    /// This performs up to N+1 flushes, where N is the number of pages in the dirty set.
     pub fn sync(&self) -> io::Result<()> {
         if cfg!(not(miri)) {
-            self.mmap.flush()
+            let mut dirty_pages = self.dirty_pages.lock();
+            for (offset, length) in dirty_pages.byte_runs() {
+                self.mmap.flush_range(offset, length)?;
+            }
+            dirty_pages.clear();
+            Ok(())
         } else {
             Ok(())
         }
