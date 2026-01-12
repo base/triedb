@@ -1106,7 +1106,7 @@ impl StorageEngine {
     fn merge_with_child_on_same_page(
         &self,
         slotted_page: &mut SlottedPageMut<'_>,
-        page_index: u8,
+        parent_cell_index: u8,
         child_cell_index: u8,
         path_prefix: Nibbles,
     ) -> Result<PointerChange, Error> {
@@ -1120,10 +1120,10 @@ impl StorageEngine {
 
         // Delete both nodes and insert the merged one
         slotted_page.delete_value(child_cell_index)?;
-        slotted_page.set_value(page_index, &child_node)?;
+        slotted_page.set_value(parent_cell_index, &child_node)?;
 
         Ok(PointerChange::Update(Pointer::new(
-            node_location(slotted_page.id(), page_index),
+            node_location(slotted_page.id(), parent_cell_index),
             rlp_node,
         )))
     }
