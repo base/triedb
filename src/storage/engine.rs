@@ -3834,8 +3834,8 @@ mod tests {
             slot_nibbles[0] = 0; // First nibble = 0
             slot_nibbles[1] = i % 16;
             slot_nibbles[2] = i / 16;
-            for j in 3..64 {
-                slot_nibbles[j] = (i + j as u8) % 16;
+            for (j, nibble) in slot_nibbles.iter_mut().enumerate().skip(3) {
+                *nibble = (i + j as u8) % 16;
             }
 
             let path = StoragePath::for_address_path_and_slot_hash(
@@ -3856,8 +3856,8 @@ mod tests {
             slot_nibbles[0] = 1; // First nibble = 1
             slot_nibbles[1] = i % 16;
             slot_nibbles[2] = i / 16;
-            for j in 3..64 {
-                slot_nibbles[j] = (i + j as u8) % 16;
+            for (j, nibble) in slot_nibbles.iter_mut().enumerate().skip(3) {
+                *nibble = (i + j as u8) % 16;
             }
 
             let path = StoragePath::for_address_path_and_slot_hash(
