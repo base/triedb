@@ -1133,17 +1133,10 @@ impl StorageEngine {
 
         // Delete both nodes and insert the merged one
         slotted_page.delete_value(child_cell_index)?;
-        slotted_page.delete_value(page_index)?;
-
-        let only_child_node_index = slotted_page.insert_value(&only_child_node)?;
-
-        // If we are the root of the page, we must insert at index 0
-        if page_index == 0 {
-            assert_eq!(only_child_node_index, page_index);
-        }
+        slotted_page.set_value(page_index, &only_child_node)?;
 
         Ok(PointerChange::Update(Pointer::new(
-            node_location(slotted_page.id(), only_child_node_index),
+            node_location(slotted_page.id(), page_index),
             rlp_node,
         )))
     }
