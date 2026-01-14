@@ -18,7 +18,7 @@ use crate::{
     storage::value::Value,
 };
 use alloy_primitives::StorageValue;
-use alloy_trie::{nodes::RlpNode, EMPTY_ROOT_HASH};
+use alloy_trie::{Nibbles, EMPTY_ROOT_HASH};
 use parking_lot::Mutex;
 use rayon::ThreadPool;
 use std::{
@@ -1071,85 +1071,72 @@ impl StorageEngine {
         only_child_index: u8,
         only_child_node_pointer: &Pointer,
     ) -> Result<PointerChange, Error> {
-        // Get the child node
-        let (mut only_child_node, child_slotted_page) =
-            if let Some(cell_index) = only_child_node_pointer.location().cell_index() {
-                // Child is on the same page
-                (slotted_page.get_value::<Node>(cell_index)?, None)
-            } else {
-                // Child is on another page
-                let child_page = self.get_mut_clone(
-                    context,
-                    only_child_node_pointer.location().page_id().expect("page_id should exist"),
-                )?;
-                let child_slotted_page = SlottedPageMut::try_from(child_page)?;
-                (child_slotted_page.get_value(0)?, Some(child_slotted_page))
-            };
+        // Compute the prefix to prepend to the child's prefix:
+        // parent's prefix + child index
+        let mut path_prefix = *node.prefix();
+        path_prefix.push(only_child_index);
 
-        // Create the new merged prefix
-        let mut new_nibbles = *node.prefix();
-        new_nibbles.push(only_child_index);
-        new_nibbles = new_nibbles.join(only_child_node.prefix());
-        only_child_node.set_prefix(new_nibbles)?;
-
-        // Get the RLP node for the merged child
-        let rlp_node = only_child_node.to_rlp_node();
-
-        let child_is_in_same_page = child_slotted_page.is_none();
-
-        if child_is_in_same_page {
+        if let Some(child_cell_index) = only_child_node_pointer.location().cell_index() {
             // Child is on the same page
             self.merge_with_child_on_same_page(
                 slotted_page,
                 page_index,
-                only_child_node,
-                only_child_node_pointer,
-                rlp_node,
+                child_cell_index,
+                path_prefix,
             )
         } else {
             // Child is on another page
+            let child_page_id =
+                only_child_node_pointer.location().page_id().expect("page_id should exist");
+            let child_page = self.get_mut_clone(context, child_page_id)?;
+            let child_slotted_page = SlottedPageMut::try_from(child_page)?;
+
             self.merge_with_child_on_different_page(
                 context,
                 slotted_page,
                 page_index,
-                only_child_node,
-                child_slotted_page.unwrap(),
-                rlp_node,
+                child_slotted_page,
+                path_prefix,
             )
         }
     }
 
-    /// Handles merging a branch with a child on the same page
+    /// Handles merging a branch with a child on the same page.
+    /// Reads fresh child node data to avoid stale child pointers.
     fn merge_with_child_on_same_page(
         &self,
         slotted_page: &mut SlottedPageMut<'_>,
-        page_index: u8,
-        only_child_node: Node,
-        only_child_node_pointer: &Pointer,
-        rlp_node: RlpNode,
+        parent_cell_index: u8,
+        child_cell_index: u8,
+        path_prefix: Nibbles,
     ) -> Result<PointerChange, Error> {
-        let child_cell_index =
-            only_child_node_pointer.location().cell_index().expect("cell index should exist");
+        // Read fresh child node and apply merged prefix
+        let mut child_node: Node = slotted_page.get_value(child_cell_index)?;
+        let merged_prefix = path_prefix.join(child_node.prefix());
+        child_node.set_prefix(merged_prefix)?;
+
+        // Compute RLP from the fresh node with merged prefix
+        let rlp_node = child_node.to_rlp_node();
 
         // Delete both nodes and insert the merged one
         slotted_page.delete_value(child_cell_index)?;
-        slotted_page.set_value(page_index, &only_child_node)?;
+        slotted_page.set_value(parent_cell_index, &child_node)?;
 
         Ok(PointerChange::Update(Pointer::new(
-            node_location(slotted_page.id(), page_index),
+            node_location(slotted_page.id(), parent_cell_index),
             rlp_node,
         )))
     }
 
-    // Handles merging a branch with a child on a different page
+    /// Handles merging a branch with a child on a different page.
+    /// Reads fresh child node data to avoid stale child pointers.
     fn merge_with_child_on_different_page(
         &self,
         context: &mut TransactionContext,
         slotted_page: &mut SlottedPageMut<'_>,
         page_index: u8,
-        only_child_node: Node,
         mut child_slotted_page: SlottedPageMut<'_>,
-        rlp_node: RlpNode,
+        path_prefix: Nibbles,
     ) -> Result<PointerChange, Error> {
         let branch_page_id = slotted_page.id();
 
@@ -1159,9 +1146,19 @@ impl StorageEngine {
             // Not returning Error::PageSplit because we're splitting the child page
         }
 
-        // Delete ourselves and update the child
+        // Delete ourselves
         slotted_page.delete_value(page_index)?;
-        child_slotted_page.set_value(0, &only_child_node)?;
+
+        // Read fresh child node and apply merged prefix
+        let mut child_node: Node = child_slotted_page.get_value(0)?;
+        let merged_prefix = path_prefix.join(child_node.prefix());
+        child_node.set_prefix(merged_prefix)?;
+
+        // Compute RLP from the fresh node with merged prefix
+        let rlp_node = child_node.to_rlp_node();
+
+        // Write back the updated node
+        child_slotted_page.set_value(0, &child_node)?;
 
         // If we're the root node, orphan our page
         if page_index == 0 {
@@ -1538,6 +1535,7 @@ mod tests {
     };
     use alloy_primitives::{address, b256, hex, keccak256, Address, StorageKey, B256, U256};
     use alloy_trie::{
+        nodes::RlpNode,
         root::{storage_root_unhashed, storage_root_unsorted},
         Nibbles, EMPTY_ROOT_HASH, KECCAK_EMPTY,
     };
@@ -3806,5 +3804,92 @@ mod tests {
             "parent page {parent_page_id} is not in the orphan page list"
         );
         assert_eq!(count, 4, "Expected 4 orphan pages after the delete operation");
+    }
+
+    /// Tests the bug at the storage trie level (branch within storage).
+    ///
+    /// Creates a storage trie with a branch structure using controlled paths,
+    /// fills the page, then triggers a merge by deleting storage slots.
+    #[test]
+    fn test_stale_pointer_in_storage_trie_branch_merge() {
+        let (storage_engine, mut context) = create_test_engine(1000);
+
+        let address = address!("0x1234567890abcdef1234567890abcdef12345678");
+        let account = create_test_account(100, 1);
+        let address_path = AddressPath::for_address(address);
+        storage_engine
+            .set_values(
+                &mut context,
+                vec![(address_path.clone().into(), Some(account.into()))].as_mut(),
+            )
+            .unwrap();
+
+        // Create storage slots with CONTROLLED slot hashes (bypassing keccak256)
+        // Use StoragePath::for_address_path_and_slot_hash for direct control
+
+        // Group 1: Slot paths starting with nibble 0
+        let mut group1_paths = Vec::new();
+        for i in 0u8..40 {
+            let mut slot_nibbles = [0u8; 64];
+            slot_nibbles[0] = 0; // First nibble = 0
+            slot_nibbles[1] = i % 16;
+            slot_nibbles[2] = i / 16;
+            for (j, nibble) in slot_nibbles.iter_mut().enumerate().skip(3) {
+                *nibble = (i + j as u8) % 16;
+            }
+
+            let path = StoragePath::for_address_path_and_slot_hash(
+                address_path.clone(),
+                Nibbles::from_nibbles(slot_nibbles),
+            );
+            let value = StorageValue::from(U256::from(i as u64 + 1));
+            storage_engine
+                .set_values(&mut context, vec![(path.clone().into(), Some(value.into()))].as_mut())
+                .unwrap();
+            group1_paths.push(path);
+        }
+
+        // Group 2: Slot paths starting with nibble 1 (sibling branch)
+        let mut group2_paths = Vec::new();
+        for i in 0u8..40 {
+            let mut slot_nibbles = [0u8; 64];
+            slot_nibbles[0] = 1; // First nibble = 1
+            slot_nibbles[1] = i % 16;
+            slot_nibbles[2] = i / 16;
+            for (j, nibble) in slot_nibbles.iter_mut().enumerate().skip(3) {
+                *nibble = (i + j as u8) % 16;
+            }
+
+            let path = StoragePath::for_address_path_and_slot_hash(
+                address_path.clone(),
+                Nibbles::from_nibbles(slot_nibbles),
+            );
+            let value = StorageValue::from(U256::from(i as u64 + 100));
+            storage_engine
+                .set_values(&mut context, vec![(path.clone().into(), Some(value.into()))].as_mut())
+                .unwrap();
+            group2_paths.push(path);
+        }
+
+        // Delete all slots from group 2, leaving only group 1
+        // This triggers branch merge at storage trie level
+        // If the page has < 200 free bytes, split_page is called
+        for path in &group2_paths {
+            storage_engine
+                .set_values(&mut context, vec![(path.clone().into(), None)].as_mut())
+                .unwrap();
+        }
+
+        // Verify group 1 slots are still readable
+        // BUG: This fails with InvalidCellPointer if merge corrupted pointers
+        for (i, path) in group1_paths.iter().enumerate() {
+            let result = storage_engine.get_storage(&mut context, path);
+            assert!(
+                result.is_ok(),
+                "BUG: Storage slot {} unreadable after branch merge: {:?}",
+                i,
+                result.err()
+            );
+        }
     }
 }
