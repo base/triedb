@@ -5,14 +5,22 @@ use crate::{
     },
     snapshot::SnapshotId,
 };
+use crossbeam_channel::{Receiver, Sender};
 use memmap2::{Advice, MmapOptions, MmapRaw};
 use parking_lot::Mutex;
 use std::{
     fs::File,
-    io,
+    io, mem,
     path::Path,
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
+    thread,
 };
+
+enum WriteMessage {
+    Pages(Vec<PageId>),
+    #[allow(dead_code)]
+    Shutdown,
+}
 
 // Manages pages in a memory mapped file.
 #[derive(Debug)]
@@ -21,6 +29,9 @@ pub struct PageManager {
     file: Mutex<File>,
     file_len: AtomicU64,
     page_count: AtomicU32,
+
+    drop_pages: Mutex<Vec<PageId>>,
+    tx_job: Sender<WriteMessage>,
 }
 
 impl PageManager {
@@ -99,12 +110,20 @@ impl PageManager {
             file_len / (Page::SIZE as u64)
         );
 
-        Ok(Self {
+        let (tx_job, rx_job) = crossbeam_channel::unbounded();
+
+        let page_manager = PageManager {
             mmap,
             file: Mutex::new(file),
             file_len: AtomicU64::new(file_len),
             page_count: AtomicU32::new(opts.page_count),
-        })
+
+            drop_pages: Mutex::new(Vec::new()),
+            tx_job,
+        };
+        page_manager.start_write_worker(rx_job)?;
+
+        Ok(page_manager)
     }
 
     /// Returns the number of pages currently stored in the file.
@@ -268,6 +287,10 @@ impl PageManager {
     /// Syncs pages to the backing file.
     pub fn sync(&self) -> io::Result<()> {
         if cfg!(not(miri)) {
+            let mut drop_pages = self.drop_pages.lock();
+            println!("drop_pages {}: {:?}", drop_pages.len(), drop_pages);
+            drop_pages.clear();
+
             self.mmap.flush()
         } else {
             Ok(())
@@ -280,7 +303,33 @@ impl PageManager {
     }
 
     pub fn drop_page_mut(&self, page_id: PageId) {
-        // TODO
+        let mut drop_pages = self.drop_pages.lock();
+        drop_pages.push(page_id);
+        if drop_pages.len() >= 8 {
+            // Todo: Handle this error
+            let pages: Vec<PageId> = drop_pages.drain(..).collect();
+            drop(drop_pages);
+            self.tx_job.send(WriteMessage::Pages(pages)).unwrap();
+        }
+    }
+
+    fn start_write_worker(&self, rx_job: Receiver<WriteMessage>) -> Result<(), PageError> {
+        thread::spawn(move || loop {
+            match rx_job.recv() {
+                Ok(WriteMessage::Pages(pages)) => {
+                    println!("receiving pages {}: {:?}", pages.len(), pages);
+                }
+                Ok(WriteMessage::Shutdown) => {
+                    todo!()
+                }
+                Err(_) => {
+                    // Channel closed
+                    todo!()
+                }
+            }
+        });
+
+        Ok(())
     }
 }
 

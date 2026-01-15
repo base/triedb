@@ -19,6 +19,7 @@ parking_lot = { version = "0.12.4", features = ["send_guard"] }
 fxhash = "0.2.1"
 static_assertions = "1.1.0"
 rayon = "1.10.0"
+crossbeam-channel = "0.5.15"
 
 [dev-dependencies]
 criterion = "0.6.0"
