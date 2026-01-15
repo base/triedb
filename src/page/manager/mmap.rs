@@ -34,6 +34,7 @@ pub struct PageManager {
     page_count: AtomicU32,
 
     drop_pages: Mutex<Vec<PageId>>,
+    new_page_from: AtomicU32,
     tx_job: Sender<WriteMessage>,
 }
 
@@ -121,6 +122,7 @@ impl PageManager {
             file_len: AtomicU64::new(file_len),
             page_count: AtomicU32::new(opts.page_count),
 
+            new_page_from: AtomicU32::new(opts.page_count),
             drop_pages: Mutex::new(Vec::new()),
             tx_job,
         };
@@ -291,6 +293,7 @@ impl PageManager {
     pub fn sync(&self) -> io::Result<()> {
         if cfg!(not(miri)) {
             self.drop_pages.lock().clear();
+            self.new_page_from.store(self.page_count.load(Ordering::Relaxed), Ordering::Relaxed);
             self.mmap.flush()
         } else {
             Ok(())
@@ -303,6 +306,9 @@ impl PageManager {
     }
 
     pub fn drop_page_mut(&self, page_id: PageId) {
+        if page_id.as_u32() >= self.new_page_from.load(Ordering::Relaxed) {
+            return;
+        }
         let mut drop_pages = self.drop_pages.lock();
         drop_pages.push(page_id);
         if drop_pages.len() >= 8 {
