@@ -10,9 +10,12 @@ use memmap2::{Advice, MmapOptions, MmapRaw};
 use parking_lot::Mutex;
 use std::{
     fs::File,
-    io, mem,
+    io,
     path::Path,
-    sync::atomic::{AtomicU32, AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU32, AtomicU64, Ordering},
+        Arc,
+    },
     thread,
 };
 
@@ -25,7 +28,7 @@ enum WriteMessage {
 // Manages pages in a memory mapped file.
 #[derive(Debug)]
 pub struct PageManager {
-    mmap: MmapRaw,
+    mmap: Arc<MmapRaw>,
     file: Mutex<File>,
     file_len: AtomicU64,
     page_count: AtomicU32,
@@ -113,7 +116,7 @@ impl PageManager {
         let (tx_job, rx_job) = crossbeam_channel::unbounded();
 
         let page_manager = PageManager {
-            mmap,
+            mmap: Arc::new(mmap),
             file: Mutex::new(file),
             file_len: AtomicU64::new(file_len),
             page_count: AtomicU32::new(opts.page_count),
@@ -287,10 +290,7 @@ impl PageManager {
     /// Syncs pages to the backing file.
     pub fn sync(&self) -> io::Result<()> {
         if cfg!(not(miri)) {
-            let mut drop_pages = self.drop_pages.lock();
-            println!("drop_pages {}: {:?}", drop_pages.len(), drop_pages);
-            drop_pages.clear();
-
+            self.drop_pages.lock().clear();
             self.mmap.flush()
         } else {
             Ok(())
@@ -314,17 +314,20 @@ impl PageManager {
     }
 
     fn start_write_worker(&self, rx_job: Receiver<WriteMessage>) -> Result<(), PageError> {
+        let mmap = self.mmap.clone();
         thread::spawn(move || loop {
             match rx_job.recv() {
                 Ok(WriteMessage::Pages(pages)) => {
-                    println!("receiving pages {}: {:?}", pages.len(), pages);
+                    // println!("receiving pages {}: {:?}", pages.len(), pages);
+                    // Todo: propergate error
+                    pages.iter().for_each(|p| mmap.flush_range(p.as_offset(), Page::SIZE).unwrap());
                 }
                 Ok(WriteMessage::Shutdown) => {
                     todo!()
                 }
                 Err(_) => {
                     // Channel closed
-                    todo!()
+                    break;
                 }
             }
         });
