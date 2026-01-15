@@ -344,7 +344,9 @@ mod tests {
         let mut data = DataArray([0; Page::SIZE]);
         data.0[..8].copy_from_slice(&snapshot.to_le_bytes());
 
-        let page = unsafe { Page::from_ptr(id, &mut data.0).expect("loading page failed") };
+        let page_manager = PageManager::open_temp_file().unwrap();
+        let page =
+            unsafe { Page::from_ptr(id, &mut data.0, &page_manager).expect("loading page failed") };
 
         assert_eq!(page.id(), 42);
         assert_eq!(page.snapshot_id(), snapshot);
@@ -357,8 +359,10 @@ mod tests {
         let snapshot = 1337;
         let mut data = DataArray([0; Page::SIZE]);
 
+        let page_manager = PageManager::open_temp_file().unwrap();
         let page_mut = unsafe {
-            PageMut::from_ptr(id, snapshot, &mut data.0).expect("loading mutable page failed")
+            PageMut::from_ptr(id, snapshot, &mut data.0, &page_manager)
+                .expect("loading mutable page failed")
         };
 
         assert_eq!(page_mut.id(), 42);

@@ -199,7 +199,7 @@ impl PageManager {
 
         // SAFETY: All memory from the memory map is accessed through `Page` or `PageMut`, thus
         // respecting the page state access memory model.
-        unsafe { Page::from_ptr(page_id, data) }
+        unsafe { Page::from_ptr(page_id, data, self) }
     }
 
     /// Retrieves a mutable page from the memory mapped file.
@@ -218,7 +218,7 @@ impl PageManager {
 
         // TODO: This is actually unsafe, as it's possible to call `get()` arbitrary times before
         // calling this function (this will be fixed in a future commit).
-        unsafe { PageMut::from_ptr(page_id, snapshot_id, data) }
+        unsafe { PageMut::from_ptr(page_id, snapshot_id, data, self) }
     }
 
     /// Adds a new page.
@@ -243,7 +243,7 @@ impl PageManager {
         //   time, they would get a different `page_id`.
         // - All memory from the memory map is accessed through `Page` or `PageMut`, thus respecting
         //   the page state access memory model.
-        unsafe { PageMut::acquire_unchecked(page_id, snapshot_id, data) }
+        unsafe { PageMut::acquire_unchecked(page_id, snapshot_id, data, self) }
     }
 
     /// Checks if a page is currently in the Dirty state.

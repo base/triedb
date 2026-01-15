@@ -101,10 +101,10 @@ impl SlottedPage<'_> {
             .map(|cp| cp.length())
             .sum::<u16>();
 
-        self.page.contents().len() -
-            total_occupied_space as usize -
-            CELL_POINTER_SIZE * num_cells as usize -
-            1
+        self.page.contents().len()
+            - total_occupied_space as usize
+            - CELL_POINTER_SIZE * num_cells as usize
+            - 1
     }
 
     fn num_dead_bytes(&self, num_cells: u8) -> usize {
@@ -294,11 +294,11 @@ impl<'a> SlottedPageMut<'a> {
             .sum::<u16>();
 
         let new_num_cells = max(num_cells, index + 1);
-        if (total_occupied_space +
-            additional_slot_length +
-            new_num_cells as u16 * CELL_POINTER_SIZE as u16 +
-            1) as usize >
-            Page::DATA_SIZE
+        if (total_occupied_space
+            + additional_slot_length
+            + new_num_cells as u16 * CELL_POINTER_SIZE as u16
+            + 1) as usize
+            > Page::DATA_SIZE
         {
             return Ok(false);
         }
@@ -466,7 +466,7 @@ impl fmt::Debug for SlottedPageMut<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::page::page_id;
+    use crate::page::{page_id, PageManager};
 
     #[repr(align(4096))]
     struct DataArray([u8; Page::SIZE]);
@@ -474,7 +474,8 @@ mod tests {
     #[test]
     fn test_insert_get_value() {
         let mut data = DataArray([0; Page::SIZE]);
-        let page = PageMut::new(page_id!(42), 123, &mut data.0);
+        let page_manager = PageManager::open_temp_file().unwrap();
+        let page = PageMut::new(page_id!(42), 123, &mut data.0, &page_manager);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
         let v1 = String::from("hello");
@@ -502,7 +503,8 @@ mod tests {
     #[test]
     fn test_insert_set_value() {
         let mut data = DataArray([0; Page::SIZE]);
-        let page = PageMut::new(page_id!(42), 123, &mut data.0);
+        let page_manager = PageManager::open_temp_file().unwrap();
+        let page = PageMut::new(page_id!(42), 123, &mut data.0, &page_manager);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
         let v1 = String::from("hello");
@@ -522,7 +524,8 @@ mod tests {
     #[test]
     fn test_set_value_same_length() {
         let mut data = DataArray([0; Page::SIZE]);
-        let page = PageMut::new(page_id!(42), 123, &mut data.0);
+        let page_manager = PageManager::open_temp_file().unwrap();
+        let page = PageMut::new(page_id!(42), 123, &mut data.0, &page_manager);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
         let v1 = String::from("hello");
@@ -552,7 +555,8 @@ mod tests {
     #[test]
     fn test_set_value_shrink() {
         let mut data = DataArray([0; Page::SIZE]);
-        let page = PageMut::new(page_id!(42), 123, &mut data.0);
+        let page_manager = PageManager::open_temp_file().unwrap();
+        let page = PageMut::new(page_id!(42), 123, &mut data.0, &page_manager);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
         let v1 = String::from("hello");
@@ -584,7 +588,8 @@ mod tests {
     #[test]
     fn test_set_value_shrink_with_neighbors() {
         let mut data = DataArray([0; Page::SIZE]);
-        let page = PageMut::new(page_id!(42), 123, &mut data.0);
+        let page_manager = PageManager::open_temp_file().unwrap();
+        let page = PageMut::new(page_id!(42), 123, &mut data.0, &page_manager);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
         let v1 = String::from("one");
@@ -644,7 +649,8 @@ mod tests {
     #[test]
     fn test_set_value_grow() {
         let mut data = DataArray([0; Page::SIZE]);
-        let page = PageMut::new(page_id!(42), 123, &mut data.0);
+        let page_manager = PageManager::open_temp_file().unwrap();
+        let page = PageMut::new(page_id!(42), 123, &mut data.0, &page_manager);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
         let v1 = String::from("this");
@@ -674,7 +680,8 @@ mod tests {
     #[test]
     fn test_set_value_grow_with_neighbors() {
         let mut data = DataArray([0; Page::SIZE]);
-        let page = PageMut::new(page_id!(42), 123, &mut data.0);
+        let page_manager = PageManager::open_temp_file().unwrap();
+        let page = PageMut::new(page_id!(42), 123, &mut data.0, &page_manager);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
         let v1 = String::from("one");
@@ -734,7 +741,8 @@ mod tests {
     #[test]
     fn test_allocate_get_delete_cell_pointer() {
         let mut data = DataArray([0; Page::SIZE]);
-        let page = PageMut::new(page_id!(42), 123, &mut data.0);
+        let page_manager = PageManager::open_temp_file().unwrap();
+        let page = PageMut::new(page_id!(42), 123, &mut data.0, &page_manager);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
         let cell_index = subtrie_page.insert_value(&String::from("foo")).unwrap();
         assert_eq!(cell_index, 0);
@@ -827,7 +835,8 @@ mod tests {
     #[test]
     fn test_allocate_reuse_deleted_space() {
         let mut data = DataArray([0; Page::SIZE]);
-        let page = PageMut::new(page_id!(42), 123, &mut data.0);
+        let page_manager = PageManager::open_temp_file().unwrap();
+        let page = PageMut::new(page_id!(42), 123, &mut data.0, &page_manager);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
         let i0 = subtrie_page.insert_value(&String::from_iter(&['a'; 1020])).unwrap();
@@ -856,7 +865,8 @@ mod tests {
     #[test]
     fn test_allocate_reuse_deleted_spaces() {
         let mut data = DataArray([0; Page::SIZE]);
-        let page = PageMut::new(page_id!(42), 123, &mut data.0);
+        let page_manager = PageManager::open_temp_file().unwrap();
+        let page = PageMut::new(page_id!(42), 123, &mut data.0, &page_manager);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
         // bytes 0-12 are used by the header, and the next 4072 are used by the first 4 cells
@@ -914,7 +924,8 @@ mod tests {
     #[test]
     fn test_defragment_page() {
         let mut data = DataArray([0; Page::SIZE]);
-        let page = PageMut::new(page_id!(42), 123, &mut data.0);
+        let page_manager = PageManager::open_temp_file().unwrap();
+        let page = PageMut::new(page_id!(42), 123, &mut data.0, &page_manager);
         let mut subtrie_page = SlottedPageMut::try_from(page).unwrap();
 
         let i0 = subtrie_page.insert_value(&String::from_iter(&['a'; 814])).unwrap();
@@ -960,7 +971,8 @@ mod tests {
     #[test]
     fn test_defragment_page_cells_out_of_order() {
         let mut data = DataArray([0; Page::SIZE]);
-        let page = PageMut::new(page_id!(42), 123, &mut data.0);
+        let page_manager = PageManager::open_temp_file().unwrap();
+        let page = PageMut::new(page_id!(42), 123, &mut data.0, &page_manager);
         let mut slotted_page = SlottedPageMut::try_from(page).unwrap();
 
         slotted_page.set_num_cells(16);
