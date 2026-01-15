@@ -278,6 +278,10 @@ impl PageManager {
     pub fn close(self) -> io::Result<()> {
         self.sync()
     }
+
+    pub fn drop_page_mut(&self, page_id: PageId) {
+        // TODO
+    }
 }
 
 impl Drop for PageManager {
