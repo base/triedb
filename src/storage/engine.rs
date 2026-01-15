@@ -1315,6 +1315,11 @@ impl StorageEngine {
     pub fn debugger(&self) -> crate::storage::debug::StorageDebugger<'_> {
         crate::storage::debug::StorageDebugger::new(&self.page_manager)
     }
+
+    /// Returns an ExplorerService for the interactive web UI.
+    pub fn explorer(&self) -> crate::storage::explorer::ExplorerService<'_> {
+        crate::storage::explorer::ExplorerService::new(self)
+    }
 }
 
 fn node_location(page_id: PageId, page_index: u8) -> Location {
