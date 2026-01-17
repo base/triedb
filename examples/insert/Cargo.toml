@@ -1,0 +1,13 @@
+[package]
+name = "insert"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alloy-primitives = "1.2.1"
+alloy-trie = "0.8.1"
+rand = "0.9.1"
+triedb = { path = "../.." }
+
+[profile.release]
+debug = true
