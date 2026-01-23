@@ -32,7 +32,7 @@ pub struct DatabaseOptions {
     create_new: bool,
     wipe: bool,
     meta_path: Option<PathBuf>,
-    max_pages: u32,
+    max_pages: Option<NonZero<u32>>,
     num_threads: Option<NonZero<usize>>,
 }
 
@@ -86,8 +86,8 @@ impl DatabaseOptions {
     }
 
     /// Sets the maximum number of pages that can be allocated.
-    pub fn max_pages(&mut self, max_pages: u32) -> &mut Self {
-        self.max_pages = max_pages;
+    pub fn max_pages(&mut self, max_pages: NonZero<u32>) -> &mut Self {
+        self.max_pages = Some(max_pages);
         self
     }
 
@@ -151,13 +151,18 @@ impl Database {
         }
 
         let page_count = meta_manager.active_slot().page_count();
-        let page_manager = PageManager::options()
+
+        let mut page_manager_options = PageManager::options();
+        page_manager_options
             .create(opts.create)
             .create_new(opts.create_new)
             .wipe(opts.wipe)
-            .page_count(page_count)
-            .open(db_path)
-            .map_err(OpenError::PageError)?;
+            .page_count(page_count);
+        if let Some(max_pages) = opts.max_pages {
+            page_manager_options.max_pages(max_pages.get());
+        }
+
+        let page_manager = page_manager_options.open(db_path).map_err(OpenError::PageError)?;
 
         let thread_pool = threadpool::builder()
             .num_threads(opts.num_threads.map(NonZero::get).unwrap_or(0))
