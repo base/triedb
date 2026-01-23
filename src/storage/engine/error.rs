@@ -2,42 +2,33 @@
 
 use crate::{node::NodeError, page::PageError};
 use std::io;
+use thiserror::Error;
 
 /// Errors that can occur during storage engine operations.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum Error {
     /// I/O error from underlying storage.
-    IO(io::Error),
+    #[error("I/O error: {0}")]
+    IO(#[from] io::Error),
     /// Error operating on trie nodes.
-    NodeError(NodeError),
+    #[error("Node error: {0}")]
+    NodeError(#[from] NodeError),
     /// Error operating on pages.
-    PageError(PageError),
+    #[error("Page error: {0}")]
+    PageError(#[from] PageError),
     /// Invalid common prefix index during trie traversal.
+    #[error("Invalid common prefix index")]
     InvalidCommonPrefixIndex,
     /// Invalid snapshot ID for the operation.
+    #[error("Invalid snapshot ID")]
     InvalidSnapshotId,
     /// Page split required; contains count of changes already processed.
+    #[error("Page split required after {0} changes")]
     PageSplit(usize),
     /// Debug operation error.
+    #[error("Debug error: {0}")]
     DebugError(String),
     /// Proof generation error.
+    #[error("Proof error: {0}")]
     ProofError(String),
-}
-
-impl From<PageError> for Error {
-    fn from(error: PageError) -> Self {
-        Self::PageError(error)
-    }
-}
-
-impl From<NodeError> for Error {
-    fn from(error: NodeError) -> Self {
-        Self::NodeError(error)
-    }
-}
-
-impl From<io::Error> for Error {
-    fn from(error: io::Error) -> Self {
-        Self::IO(error)
-    }
 }
