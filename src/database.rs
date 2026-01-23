@@ -451,13 +451,16 @@ mod tests {
         let file_path = tmp_dir.path().join("test.db");
         let db = Database::create_new(&file_path).unwrap();
 
+        let tx = db.begin_rw().unwrap();
+        assert_eq!(tx.commit().unwrap(), EMPTY_ROOT_HASH);
+
         let address1 = address!("0xd8da6bf26964af9d7eed9e03e53415d37aa96045");
         let account1 = Account::new(1, U256::from(100), EMPTY_ROOT_HASH, KECCAK_EMPTY);
 
         let mut tx = db.begin_rw().unwrap();
         tx.set_account(AddressPath::for_address(address1), Some(account1.clone())).unwrap();
 
-        tx.commit().unwrap();
+        assert_ne!(tx.commit().unwrap(), EMPTY_ROOT_HASH);
         db.close().unwrap();
 
         let db = Database::open(&file_path).unwrap();

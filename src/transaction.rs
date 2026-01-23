@@ -170,7 +170,7 @@ impl<DB: Deref<Target = Database>> Transaction<DB, RW> {
         Ok(())
     }
 
-    pub fn commit(mut self) -> Result<(), TransactionError> {
+    pub fn commit(mut self) -> Result<B256, TransactionError> {
         let mut changes = self.pending_changes.drain().collect::<Vec<_>>();
         if !changes.is_empty() {
             self.database.storage_engine.set_values(&mut self.context, changes.as_mut()).unwrap();
@@ -184,7 +184,7 @@ impl<DB: Deref<Target = Database>> Transaction<DB, RW> {
         transaction_manager.remove_tx(self.context.snapshot_id, true);
 
         self.committed = true;
-        Ok(())
+        Ok(self.context.root_node_hash)
     }
 
     pub fn rollback(mut self) -> Result<(), TransactionError> {
@@ -199,12 +199,12 @@ impl<DB: Deref<Target = Database>> Transaction<DB, RW> {
 }
 
 impl<DB: Deref<Target = Database>> Transaction<DB, RO> {
-    pub fn commit(mut self) -> Result<(), TransactionError> {
+    pub fn commit(mut self) -> Result<B256, TransactionError> {
         let mut transaction_manager = self.database.transaction_manager.lock();
         transaction_manager.remove_tx(self.context.snapshot_id, false);
 
         self.committed = true;
-        Ok(())
+        Ok(self.context.root_node_hash)
     }
 }
 
