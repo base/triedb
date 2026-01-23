@@ -1879,6 +1879,7 @@ dependencies = [
  "rayon",
  "sealed",
  "static_assertions",
+ "thiserror",
  "zerocopy 0.8.24",
 ]
 
