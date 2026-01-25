@@ -17,6 +17,7 @@ use arrayvec::ArrayVec;
 use proptest::{arbitrary, strategy, strategy::Strategy};
 use proptest_derive::Arbitrary;
 use std::cmp::{max, min};
+use thiserror::Error;
 
 const MAX_PREFIX_LENGTH: usize = 64;
 
@@ -54,10 +55,13 @@ pub enum NodeKind {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum NodeError {
+    #[error("children unsupported")]
     ChildrenUnsupported,
+    #[error("max prefix length exceeded")]
     MaxPrefixLengthExceeded,
+    #[error("no value")]
     NoValue,
 }
 
