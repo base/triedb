@@ -397,6 +397,8 @@ impl PageManager {
 
         // Write contiguous new pages as a batch using writev.
         // Note: iovecs must stay alive until operations complete, so we define it outside the scope
+        // IOV_MAX is typically 1024 on most systems, so we batch writes to respect this limit
+        const IOV_MAX: usize = 1024;
         let _iovecs = if !new_pages.is_empty() {
             // Collect iovec for new pages
             let iovecs: Vec<libc::iovec> = new_pages
@@ -407,28 +409,33 @@ impl PageManager {
                 })
                 .collect();
 
-            // Get the offset of the first new page
-            let first_offset = new_pages[0].1.as_offset() as u64;
+            // Split into batches of IOV_MAX to avoid EINVAL errors
+            for (batch_idx, iovec_chunk) in iovecs.chunks(IOV_MAX).enumerate() {
+                let batch_offset = new_pages[batch_idx * IOV_MAX].1.as_offset() as u64;
 
-            unsafe {
-                let writev_op =
-                    opcode::Writev::new(types::Fd(fd), iovecs.as_ptr(), iovecs.len() as u32)
-                        .offset(first_offset)
-                        .build()
-                        .user_data(op_count);
+                unsafe {
+                    let writev_op = opcode::Writev::new(
+                        types::Fd(fd),
+                        iovec_chunk.as_ptr(),
+                        iovec_chunk.len() as u32,
+                    )
+                    .offset(batch_offset)
+                    .build()
+                    .user_data(op_count);
 
-                // Submit to ring
-                loop {
-                    let mut sq = ring_guard.submission();
-                    match sq.push(&writev_op) {
-                        Ok(_) => {
-                            op_count += 1;
-                            break;
-                        }
-                        Err(_) => {
-                            // Submission queue is full, submit and wait
-                            drop(sq);
-                            ring_guard.submit_and_wait(1)?;
+                    // Submit to ring
+                    loop {
+                        let mut sq = ring_guard.submission();
+                        match sq.push(&writev_op) {
+                            Ok(_) => {
+                                op_count += 1;
+                                break;
+                            }
+                            Err(_) => {
+                                // Submission queue is full, submit and wait
+                                drop(sq);
+                                ring_guard.submit_and_wait(1)?;
+                            }
                         }
                     }
                 }
@@ -535,21 +542,21 @@ impl PageManager {
 
     #[inline]
     pub fn drop_page_mut(&self, page_id: PageId) {
-        if self.updated_pages.get(&page_id).is_some() {
-            let mut drop_pages = self.drop_pages.lock();
-            drop_pages.push(page_id);
-            if drop_pages.len() >= 10 {
-                // iter thru all items in drop_pages and remove from the drop_pages
-                let mut pages = Vec::with_capacity(10);
-                drop_pages.iter().for_each(|p| {
-                    if let Some(f) = self.page_table.get(p) {
-                        pages.push((*f.key(), *f.value()));
-                    }
-                });
-                self.tx_job.send(WriteMessage::Pages(pages)).unwrap();
-                drop_pages.clear();
-            }
-        }
+        // if self.updated_pages.get(&page_id).is_some() {
+        //     let mut drop_pages = self.drop_pages.lock();
+        //     drop_pages.push(page_id);
+        //     if drop_pages.len() >= 10 {
+        //         // iter thru all items in drop_pages and remove from the drop_pages
+        //         let mut pages = Vec::with_capacity(10);
+        //         drop_pages.iter().for_each(|p| {
+        //             if let Some(f) = self.page_table.get(p) {
+        //                 pages.push((*f.key(), *f.value()));
+        //             }
+        //         });
+        //         self.tx_job.send(WriteMessage::Pages(pages)).unwrap();
+        //         drop_pages.clear();
+        //     }
+        // }
     }
 
     fn next_page_id(&self) -> Option<(PageId, u32)> {
