@@ -188,8 +188,6 @@ impl<DB: Deref<Target = Database>> Transaction<DB, RW> {
     }
 
     pub fn rollback(mut self) -> Result<(), TransactionError> {
-        self.database.storage_engine.rollback(&self.context).unwrap();
-
         let mut transaction_manager = self.database.transaction_manager.lock();
         transaction_manager.remove_tx(self.context.snapshot_id, true);
 
