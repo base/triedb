@@ -69,6 +69,7 @@ use crate::{
     snapshot::SnapshotId,
 };
 use alloy_primitives::B256;
+use alloy_trie::EMPTY_ROOT_HASH;
 use memmap2::MmapMut;
 use std::{
     cmp::Ordering,
@@ -142,7 +143,11 @@ impl MetadataSlot {
     #[inline]
     #[must_use]
     pub fn root_node_hash(&self) -> B256 {
-        self.root_node_hash.into()
+        if self.root_node_hash == [0; 32] {
+            EMPTY_ROOT_HASH
+        } else {
+            self.root_node_hash.into()
+        }
     }
 
     /// Returns the ID of the page containing the root node.
