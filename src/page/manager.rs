@@ -1,6 +1,7 @@
 use crate::page::PageId;
 use thiserror::Error;
 
+mod dirty;
 pub(super) mod mmap;
 pub(super) mod options;
 
