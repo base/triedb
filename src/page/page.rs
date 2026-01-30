@@ -123,7 +123,7 @@ impl<'p> PageMut<'p> {
     /// Constructs a new `PageMut` from a pointer to an *occupied* page.
     ///
     /// The state of the page is atomically transitioned to dirty to ensure exclusive access. An
-    /// error is returned if the initial state of the page is found to be unused or dirty.
+    /// error is returned if the initial state of the page is found to be dirty.
     ///
     /// # Safety
     ///
@@ -140,18 +140,26 @@ impl<'p> PageMut<'p> {
         snapshot_id: SnapshotId,
         ptr: *mut [u8; Page::SIZE],
     ) -> Result<Self, PageError> {
-        let new_state = PageState::dirty(snapshot_id).expect("invalid value for `snapshot_id`");
-
         // SAFETY: guaranteed by the caller
-        match RawPageStateMut::from_ptr(ptr.cast()).fetch_update(move |s| match s {
-            PageState::Unused | PageState::Occupied(_) => Some(new_state),
-            PageState::Dirty(_) => None,
-        }) {
-            Ok(_) => Ok(Self { inner: UnsafePage { id, ptr }, phantom: PhantomData }),
-            Err(PageState::Unused) => Err(PageError::PageNotFound(id)),
-            Err(PageState::Dirty(_)) => Err(PageError::PageDirty(id)),
-            Err(PageState::Occupied(_)) => unreachable!(),
+        let value: u64 = unsafe { *ptr.cast() };
+        match PageState::from(value) {
+            PageState::Unused | PageState::Occupied(_) => {
+                let mut page = Self { inner: UnsafePage { id, ptr }, phantom: PhantomData };
+                page.set_snapshot_id(snapshot_id);
+                Ok(page)
+            }
+            PageState::Dirty(_) => Err(PageError::PageDirty(id)),
         }
+
+        // match RawPageStateMut::from_ptr(ptr.cast()).fetch_update(move |s| match s {
+        //     PageState::Unused | PageState::Occupied(_) => Some(new_state),
+        //     PageState::Dirty(_) => None,
+        // }) {
+        //     Ok(_) => Ok(Self { inner: UnsafePage { id, ptr }, phantom: PhantomData }),
+        //     Err(PageState::Dirty(_)) => Err(PageError::PageDirty(id)),
+        //     Err(PageState::Unused) => unreachable!(),
+        //     Err(PageState::Occupied(_)) => unreachable!(),
+        // }
     }
 
     /// Constructs a new `PageMut` from a pointer to an *unused* page.
@@ -348,5 +356,102 @@ mod tests {
         assert_eq!(page_mut.id(), 42);
         assert_eq!(page_mut.snapshot_id(), 1337);
         assert_eq!(page_mut.contents(), [0u8; Page::DATA_SIZE]);
+    }
+
+    #[test]
+    fn test_from_ptr_state_transitions() {
+        // Test 1: Unused state
+        {
+            let id = page_id!(100);
+            let snapshot = 500u64;
+            let mut data = DataArray([0; Page::SIZE]);
+            // Set page state to Unused (all zeros)
+            data.0[..8].copy_from_slice(&0u64.to_le_bytes());
+
+            let result = unsafe { PageMut::from_ptr(id, snapshot, &mut data.0) };
+            assert!(result.is_ok(), "Expected success on Unused state but got {:?}", result);
+            let page_mut = result.unwrap();
+            assert_eq!(page_mut.id(), 100);
+            assert_eq!(page_mut.snapshot_id(), snapshot);
+        }
+
+        // Test 2: Occupied state (should succeed)
+        {
+            let id = page_id!(101);
+            let old_snapshot = 200u64;
+            let new_snapshot = 300u64;
+            let mut data = DataArray([0; Page::SIZE]);
+            // Set page state to Occupied with old_snapshot
+            data.0[..8].copy_from_slice(&old_snapshot.to_le_bytes());
+
+            let result = unsafe { PageMut::from_ptr(id, new_snapshot, &mut data.0) };
+            assert!(result.is_ok(), "Expected success on Occupied state but got {:?}", result);
+            let page_mut = result.unwrap();
+            assert_eq!(page_mut.id(), 101);
+            assert_eq!(page_mut.snapshot_id(), new_snapshot);
+        }
+
+        // Test 3: Dirty state (should fail)
+        {
+            let id = page_id!(102);
+            let old_snapshot = 400u64;
+            let new_snapshot = 500u64;
+            let mut data = DataArray([0; Page::SIZE]);
+            // Set page state to Dirty with old_snapshot (high bit set)
+            let dirty_state = old_snapshot | (1u64 << 63);
+            data.0[..8].copy_from_slice(&dirty_state.to_le_bytes());
+
+            let result = unsafe { PageMut::from_ptr(id, new_snapshot, &mut data.0) };
+            assert!(result.is_err(), "Expected error on Dirty state but got success");
+            match result {
+                Err(PageError::PageDirty(page_id)) => {
+                    assert_eq!(page_id, 102, "Expected page ID 102 in error");
+                }
+                other => panic!("Expected PageError::PageDirty but got {:?}", other),
+            }
+        }
+
+        // Test 4: State transition verification
+        {
+            let id = page_id!(103);
+            let snapshot = 600u64;
+            let mut data = DataArray([0; Page::SIZE]);
+            // Start with Occupied state
+            let occupied_snapshot = 700u64;
+            data.0[..8].copy_from_slice(&occupied_snapshot.to_le_bytes());
+
+            // Transition to Dirty
+            let result = unsafe { PageMut::from_ptr(id, snapshot, &mut data.0) };
+            assert!(result.is_ok(), "State transition should succeed");
+
+            // Verify state is now Dirty by checking the raw state
+            let state_ptr = data.0.as_mut_ptr() as *mut u64;
+            let raw_state = unsafe { state_ptr.read() };
+            let expected_dirty = snapshot | (1u64 << 63);
+            assert_eq!(raw_state, expected_dirty, "Page state should be Dirty after from_ptr");
+        }
+
+        // Test 5: Prevents concurrent access
+        {
+            let id = page_id!(104);
+            let snapshot1 = 800u64;
+            let snapshot2 = 900u64;
+            let mut data = DataArray([0; Page::SIZE]);
+            // Start with Occupied state
+            data.0[..8].copy_from_slice(&700u64.to_le_bytes());
+
+            // First call should succeed
+            let result1 = unsafe { PageMut::from_ptr(id, snapshot1, &mut data.0) };
+            assert!(result1.is_ok(), "First access should succeed");
+
+            // Second call should fail because page is now Dirty
+            let result2 = unsafe { PageMut::from_ptr(id, snapshot2, &mut data.0) };
+            assert!(result2.is_err(), "Second access should fail");
+            assert!(
+                matches!(result2, Err(PageError::PageDirty(_))),
+                "Expected PageDirty error but got {:?}",
+                result2
+            );
+        }
     }
 }
