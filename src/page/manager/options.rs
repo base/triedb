@@ -18,10 +18,12 @@ impl PageManagerOptions {
 
         let max_pages = if cfg!(not(test)) {
             Page::MAX_COUNT
-        } else {
+        } else if cfg!(not(miri)) {
             // Because tests run in parallel, it's easy to exhaust the address space, so use a more
             // conservative limit
             Page::MAX_COUNT / 1024
+        } else {
+            2048
         };
 
         Self { open_options, page_count: 0, max_pages }
