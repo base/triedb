@@ -135,12 +135,16 @@ impl RawPageStateMut {
         &self,
         new_state: PageState,
     ) -> Result<PageState, PageState> {
+        // Convert once before the loop
+        let new_state_raw: u64 = new_state.into();
+
         self.0
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, move |current| {
-                if PageState::is_dirty(current.into()) {
+                // Work directly with u64 - check dirty bit without conversion
+                if (current & PageState::DIRTY_MASK) != 0 {
                     None
                 } else {
-                    Some(new_state.into())
+                    Some(new_state_raw)
                 }
             })
             .map(PageState::from)
