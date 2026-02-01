@@ -140,17 +140,16 @@ impl<'p> PageMut<'p> {
         snapshot_id: SnapshotId,
         ptr: *mut [u8; Page::SIZE],
     ) -> Result<Self, PageError> {
-        // SAFETY: guaranteed by the caller
-        let value: u64 = unsafe { *ptr.cast() };
-        match PageState::from(value) {
-            PageState::Unused | PageState::Occupied(_) => {
-                let mut page = Self { inner: UnsafePage { id, ptr }, phantom: PhantomData };
-                page.set_snapshot_id(snapshot_id);
-                Ok(page)
-            }
-            PageState::Dirty(_) => Err(PageError::PageDirty(id)),
+        let new_state = PageState::dirty(snapshot_id).expect("invalid value for `snapshot_id`");
+
+        match RawPageStateMut::from_ptr(ptr.cast()).fetch_update_to_dirty(new_state) {
+            Ok(_) => Ok(Self { inner: UnsafePage { id, ptr }, phantom: PhantomData }),
+            Err(PageState::Dirty(_)) => Err(PageError::PageDirty(id)),
+            Err(PageState::Unused) => unreachable!(),
+            Err(PageState::Occupied(_)) => unreachable!(),
         }
 
+        // SAFETY: guaranteed by the caller
         // match RawPageStateMut::from_ptr(ptr.cast()).fetch_update(move |s| match s {
         //     PageState::Unused | PageState::Occupied(_) => Some(new_state),
         //     PageState::Dirty(_) => None,

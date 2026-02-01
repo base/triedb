@@ -130,6 +130,22 @@ impl RawPageStateMut {
     pub(super) fn unset_dirty(&self) -> PageState {
         self.0.fetch_and(!PageState::DIRTY_MASK, Ordering::Relaxed).into()
     }
+
+    pub(super) fn fetch_update_to_dirty(
+        &self,
+        new_state: PageState,
+    ) -> Result<PageState, PageState> {
+        self.0
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, move |current| {
+                if PageState::is_dirty(current.into()) {
+                    None
+                } else {
+                    Some(new_state.into())
+                }
+            })
+            .map(PageState::from)
+            .map_err(PageState::from)
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -141,6 +157,11 @@ pub(super) enum PageState {
 
 impl PageState {
     const DIRTY_MASK: u64 = 1 << (u64::BITS - 1);
+
+    #[inline]
+    pub(super) fn is_dirty(snapshot_id: SnapshotId) -> bool {
+        snapshot_id & Self::DIRTY_MASK != 0
+    }
 
     #[inline]
     pub(super) fn dirty(snapshot_id: SnapshotId) -> Option<Self> {
