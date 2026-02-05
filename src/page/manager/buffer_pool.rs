@@ -542,21 +542,21 @@ impl PageManager {
 
     #[inline]
     pub fn drop_page_mut(&self, page_id: PageId) {
-        // if self.updated_pages.get(&page_id).is_some() {
-        //     let mut drop_pages = self.drop_pages.lock();
-        //     drop_pages.push(page_id);
-        //     if drop_pages.len() >= 10 {
-        //         // iter thru all items in drop_pages and remove from the drop_pages
-        //         let mut pages = Vec::with_capacity(10);
-        //         drop_pages.iter().for_each(|p| {
-        //             if let Some(f) = self.page_table.get(p) {
-        //                 pages.push((*f.key(), *f.value()));
-        //             }
-        //         });
-        //         self.tx_job.send(WriteMessage::Pages(pages)).unwrap();
-        //         drop_pages.clear();
-        //     }
-        // }
+        if self.updated_pages.get(&page_id).is_some() {
+            let mut drop_pages = self.drop_pages.lock();
+            drop_pages.push(page_id);
+            if drop_pages.len() >= 10 {
+                // iter thru all items in drop_pages and remove from the drop_pages
+                let mut pages = Vec::with_capacity(8);
+                drop_pages.iter().for_each(|p| {
+                    if let Some(f) = self.page_table.get(p) {
+                        pages.push((*f.key(), *f.value()));
+                    }
+                });
+                self.tx_job.send(WriteMessage::Pages(pages)).unwrap();
+                drop_pages.clear();
+            }
+        }
     }
 
     fn next_page_id(&self) -> Option<(PageId, u32)> {
