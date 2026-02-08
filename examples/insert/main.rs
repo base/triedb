@@ -84,7 +84,7 @@ fn main() {
 
     let db = DatabaseOptions::default()
         .create_new(true)
-        .num_frames(1024 * 1024 * 6)
+        .num_frames(128 * 1)
         .open(db_path)
         .unwrap();
 

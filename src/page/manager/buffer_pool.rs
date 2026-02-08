@@ -41,8 +41,8 @@ pub struct PageManager {
     page_count: AtomicU32,
     num_frames: u32,
 
-    updated_pages: Arc<FxMap<PageId, FrameId>>,
-    new_pages: Mutex<Vec<(FrameId, PageId)>>,
+    updated_pages: Arc<FxMap<PageId, FrameId>>, // list of pages were updated during the current write transaction
+    new_pages: Mutex<Vec<(FrameId, PageId)>>, // list of new pages created for the current transaction
 
     file: RwLock<File>,
     file_len: AtomicU64,
@@ -65,6 +65,7 @@ impl std::fmt::Debug for PageManager {
 
 impl PageManager {
     const MIN_IO_URING_QUEUE_DEPTH: u32 = 2048;
+    const BACKGROUND_WRITING_PAGES_THRESHOLD: usize = 10;
 
     pub fn options() -> PageManagerOptions {
         PageManagerOptions::new()
@@ -156,9 +157,13 @@ impl PageManager {
                         }
                         // Then unpin those writtern pages so that the pages could be evicted and reused
                         pages.iter().for_each(|(page_id, frame_id)| {
-                            // TODO: Could have race condition btw unpin and remove actions.
-                            if let Some(true) = frames.unpin(*frame_id) {
-                                updated_pages.remove(page_id);
+                            // TODO: only check updated_pages will not work, since the same page/frame could be read
+                            // To solve this race condition, we could create a state for pin status: PIN, UNPIN_UNWRITEN, UNPIN
+                            // When mut page get dropped, change from PIN -> UNPIN_UNWRITEN.
+                            // When use again, UNPIN_UNWRITEN/UNPIN -> PIN
+                            // After writen in the background, change UNPIN_UNWRITEN -> UNPIN.
+                            if let None = updated_pages.get(page_id) {
+                                frames.unpin(*frame_id);
                             }
                         });
                     }
@@ -542,20 +547,23 @@ impl PageManager {
 
     #[inline]
     pub fn drop_page_mut(&self, page_id: PageId) {
-        if self.updated_pages.get(&page_id).is_some() {
-            let mut drop_pages = self.drop_pages.lock();
-            drop_pages.push(page_id);
-            if drop_pages.len() >= 10 {
-                // iter thru all items in drop_pages and remove from the drop_pages
-                let mut pages = Vec::with_capacity(8);
-                drop_pages.iter().for_each(|p| {
-                    if let Some(f) = self.page_table.get(p) {
-                        pages.push((*f.key(), *f.value()));
-                    }
-                });
-                self.tx_job.send(WriteMessage::Pages(pages)).unwrap();
-                drop_pages.clear();
-            }
+        if self.updated_pages.get(&page_id).is_none() {
+            return;
+        }
+
+        let mut drop_pages = self.drop_pages.lock();
+        drop_pages.push(page_id);
+        if drop_pages.len() >= Self::BACKGROUND_WRITING_PAGES_THRESHOLD {
+            // Don't unpin those pages until they are writen the disk.
+            let mut pages = Vec::with_capacity(Self::BACKGROUND_WRITING_PAGES_THRESHOLD);
+            drop_pages.iter().for_each(|p| {
+                let f = self.page_table.get(p).unwrap();
+                pages.push((*f.key(), *f.value()));
+                let updated_page = self.updated_pages.remove(p);
+                debug_assert!(updated_page.is_some());
+            });
+            self.tx_job.send(WriteMessage::Pages(pages)).unwrap();
+            drop_pages.clear();
         }
     }
 
