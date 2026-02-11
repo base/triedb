@@ -2,20 +2,87 @@ use crate::page::{state::PageState, Page};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+pub(super) enum FrameState {
+    Unpin,          // value: 0x00
+    UnpinUnwritten, // value: 0x01
+    Pin(u32),       // value: 0x10
+}
+
+impl FrameState {
+    const PIN_MASK: u32 = 0x1 << (u32::BITS - 1);
+    const UNWRITTEN_MASK: u32 = 0x1 << (u32::BITS - 2);
+    const PIN_VALUE_MASK: u32 = !(Self::PIN_MASK | Self::UNWRITTEN_MASK);
+}
+
+impl From<u32> for FrameState {
+    fn from(value: u32) -> Self {
+        let pin: bool = value & Self::PIN_MASK != 0;
+        let unwitern: bool = value & Self::UNWRITTEN_MASK != 0;
+        match (pin, unwitern) {
+            (false, false) => Self::Unpin,
+            (false, true) => Self::UnpinUnwritten,
+            (true, _) => {
+                let pin_count = value & Self::PIN_VALUE_MASK;
+                Self::Pin(pin_count)
+            }
+        }
+    }
+}
+
+impl From<FrameState> for u32 {
+    fn from(state: FrameState) -> Self {
+        match state {
+            FrameState::Unpin => 0,
+            FrameState::UnpinUnwritten => FrameState::UNWRITTEN_MASK,
+            FrameState::Pin(val) => val | FrameState::PIN_VALUE_MASK,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct RawFrameState(AtomicU32);
+
+impl RawFrameState {
+    pub(super) fn from(state: u32) -> Self {
+        Self(AtomicU32::from(state))
+    }
+
+    pub(super) fn load(&self) -> FrameState {
+        self.0.load(Ordering::Relaxed).into()
+    }
+
+    pub(super) fn fetch_update(
+        &self,
+        mut f: impl FnMut(FrameState) -> Option<FrameState>,
+    ) -> Result<FrameState, FrameState> {
+        todo!()
+    }
+
+    pub(super) fn compare_exchange(
+        &self,
+        current: FrameState,
+        new: FrameState,
+    ) -> Result<FrameState, FrameState> {
+        self.0
+            .compare_exchange(current.into(), new.into(), Ordering::Relaxed, Ordering::Relaxed)
+            .map(FrameState::from)
+            .map_err(FrameState::from)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Frame {
     pub(crate) ptr: *mut [u8; Page::SIZE],
     pub(crate) page_id: AtomicU32, // 0 means None, otherwise it's the page_id
-    state: AtomicU32,              // Bit 0: pin (If true, this frame cannot be evicted)
-                                   // Bit 1: ref_bit (Second Chance bit)
+    state: RawFrameState,
 }
 
 impl Clone for Frame {
     fn clone(&self) -> Self {
         Frame {
             ptr: self.ptr,
-            page_id: AtomicU32::new(self.page_id.load(Ordering::SeqCst)),
-            state: AtomicU32::new(self.state.load(Ordering::SeqCst)),
+            page_id: AtomicU32::new(self.page_id.load(Ordering::Relaxed)),
+            state: RawFrameState::from(self.state.0.load(Ordering::Relaxed)),
         }
     }
 }
@@ -40,6 +107,8 @@ impl Frame {
         // Set both pin (bit 0) and ref_bit (bit 1) to true
         self.state.store(0b11, Ordering::Release);
     }
+
+    pub(crate) fn unpin_unwritten_to_unpin(&self) {}
 }
 
 // SAFETY: Frame contains a pointer to heap-allocated memory that we own exclusively.
@@ -85,6 +154,11 @@ impl Frames {
     pub(crate) fn pin(&self, frame_id: FrameId) -> Option<()> {
         let frame = self.get(frame_id)?;
         Some(frame.pin())
+    }
+
+    pub(crate) fn unpin_unwritten_to_unpin(&self, frame_id: FrameId) -> Option<bool> {
+        let frame = self.get(frame_id)?;
+        Some(frame.unpin_unwritten_to_unpin)
     }
 
     // Unpin the frame if the occupied page is not dirty.
