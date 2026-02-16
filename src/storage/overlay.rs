@@ -141,10 +141,10 @@ impl StorageEngine {
         overlay: OverlayState,
     ) -> Result<Option<AccountProof>, Error> {
         let account_nibbles = Nibbles::from(storage_path.get_address().clone());
-        let target_nibbles = HashSet::from([account_nibbles.clone()]);
+        let target_nibbles = HashSet::from([account_nibbles]);
 
-        let slot_nibbles = storage_path.get_slot().clone();
-        let raw_slot_path = RawPath::from(slot_nibbles.clone());
+        let slot_nibbles = *storage_path.get_slot();
+        let raw_slot_path = RawPath::from(slot_nibbles);
         let mut storage_targets = HashMap::default();
         storage_targets.insert(account_nibbles, HashSet::from([slot_nibbles]));
 

@@ -713,21 +713,13 @@ impl<'a> TraversalStack<'a> {
 }
 
 #[derive(Debug)]
+#[derive(Default)]
 pub struct OverlayProver {
     pub(crate) hash_builder: HashBuilder,
     pub(crate) storage_branch_updates: B256Map<HashMap<Nibbles, BranchNodeCompact>>,
     pub(crate) retained_storage_proofs: B256Map<ProofNodes>,
 }
 
-impl Default for OverlayProver {
-    fn default() -> Self {
-        Self {
-            hash_builder: HashBuilder::default(),
-            storage_branch_updates: B256Map::default(),
-            retained_storage_proofs: B256Map::default(),
-        }
-    }
-}
 
 impl OverlayProver {
     pub(crate) fn with_proof_retainer(self, targets: HashSet<Nibbles>) -> OverlayProver {
@@ -774,14 +766,14 @@ impl OverlayProver {
 
         let mut proof_map = BTreeMap::new();
         for (key, val) in matching_nodes.iter() {
-            proof_map.insert(RawPath::from(key.clone()), val.clone());
+            proof_map.insert(RawPath::from(*key), val.clone());
         }
 
         let found_account = 'info: {
             if let Some((_, last_node_bytes)) = matching_nodes.last() {
                 let mut data = last_node_bytes.as_ref();
                 if let Ok(TrieNode::Leaf(leaf)) = TrieNode::decode(&mut data) {
-                    let mut full_path = matching_nodes.last().unwrap().0.clone();
+                    let mut full_path = matching_nodes.last().unwrap().0;
                     full_path.extend(&leaf.key);
 
                     if full_path == account_nibbles {
@@ -802,7 +794,7 @@ impl OverlayProver {
 
         found_account.map(|account| {
             AccountProof {
-                hashed_address: account_nibbles.clone(),
+                hashed_address: account_nibbles,
                 account,
                 proof: proof_map,
                 storage_proofs: B256Map::default(),
@@ -812,22 +804,22 @@ impl OverlayProver {
 
     pub fn storage_proof(&self, storage_path: StoragePath) -> Option<StorageProof> {
         let account_nibbles = Nibbles::from(storage_path.get_address().clone());
-        let slot_nibbles = storage_path.get_slot().clone();
+        let slot_nibbles = *storage_path.get_slot();
         
-        let account_key = B256::from_slice(&RawPath::from(account_nibbles.clone()).pack::<32>());
+        let account_key = B256::from_slice(&RawPath::from(account_nibbles).pack::<32>());
         if let Some(storage_proof_nodes) = self.retained_storage_proofs.get(&account_key) {
             let matching_nodes = storage_proof_nodes.matching_nodes_sorted(&slot_nibbles);
             
             let mut proof_map = BTreeMap::new();
             for (key, val) in matching_nodes.iter() {
-                proof_map.insert(RawPath::from(key.clone()), val.clone());
+                proof_map.insert(RawPath::from(*key), val.clone());
             }
 
             let found_value = 'info: {
                 if let Some((_, last_node_bytes)) = matching_nodes.last() {
                     let mut data = last_node_bytes.as_ref();
                     if let Ok(TrieNode::Leaf(leaf)) = TrieNode::decode(&mut data) {
-                        let mut full_path = matching_nodes.last().unwrap().0.clone();
+                        let mut full_path = matching_nodes.last().unwrap().0;
                         full_path.extend(&leaf.key);
                         if full_path == slot_nibbles {
                              let mut value_data = leaf.value.as_ref();
