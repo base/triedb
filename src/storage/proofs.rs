@@ -324,36 +324,10 @@ impl StorageEngine {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{address, b256, hex, U256};
-    use alloy_rlp::encode;
-    use alloy_trie::{proof::verify_proof, TrieAccount, KECCAK_EMPTY};
+    use alloy_trie::KECCAK_EMPTY;
 
     use super::*;
-    use crate::storage::test_utils::{create_test_account, create_test_engine};
-
-    fn verify_account_proof(proof: &AccountProof, root: B256) {
-        let expected = Some(encode(TrieAccount {
-            nonce: proof.account.nonce,
-            balance: proof.account.balance,
-            storage_root: proof.account.storage_root,
-            code_hash: proof.account.code_hash,
-        }));
-        verify_proof(root, proof.hashed_address, expected, proof.proof.values())
-            .expect("failed to verify account proof");
-
-        for storage_proof in proof.storage_proofs.values() {
-            verify_storage_proof(storage_proof, proof.account.storage_root);
-        }
-    }
-
-    fn verify_storage_proof(proof: &StorageProof, root: B256) {
-        verify_proof(
-            root,
-            proof.hashed_slot,
-            Some(alloy_rlp::encode(proof.value)),
-            proof.proof.values(),
-        )
-        .expect("failed to verify storage proof");
-    }
+    use crate::storage::test_utils::{create_test_account, create_test_engine, verify_account_proof, verify_storage_proof};
 
     #[test]
     fn test_get_nonexistent_proof() {

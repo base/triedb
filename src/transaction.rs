@@ -8,7 +8,7 @@ use crate::{
     node::TrieValue,
     overlay::OverlayState,
     path::{AddressPath, RawPath, StoragePath},
-    storage::{overlay_root::OverlayedRoot, proofs::AccountProof},
+    storage::{overlay::OverlayedRoot, proofs::AccountProof},
 };
 use alloy_primitives::{map::HashMap, StorageValue, B256};
 pub use error::TransactionError;
