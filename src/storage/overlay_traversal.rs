@@ -32,12 +32,20 @@ use arrayvec::ArrayVec;
 /// It supports:
 /// - Efficient updates by skipping unchanged subtrees (using structural sharing).
 /// - Generating Merkle proofs for specific targets during the build process.
+// # TODO: Semantic Refactoring Needed
+//
+// This struct is used for both state tries and storage tries, but the fields have
+// different meanings depending on context:
+// - **For state tries**: `proof_targets` = account paths, `storage_proof_targets` = account → storage slots
+// - **For storage tries**: `proof_targets` = storage slot paths, `storage_proof_targets` = unused (empty)
 #[derive(Debug)]
 pub struct OverlayTrie<'a> {
     engine: &'a StorageEngine,
     context: &'a TransactionContext,
     overlay: OverlayState,
+    /// Proof targets - account paths for state tries, storage slot paths for storage tries
     proof_targets: HashSet<Nibbles>,
+    /// Storage proof targets - only used for state tries (maps account paths to storage slot paths)
     storage_proof_targets: HashMap<Nibbles, HashSet<Nibbles>>,
 }
 
