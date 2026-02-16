@@ -6,17 +6,669 @@ use crate::{
     node::{encode_account_leaf, Node, NodeKind},
     overlay::{OverlayState, OverlayValue},
     page::SlottedPage,
-    path::RawPath,
+    path::{RawPath, AddressPath, StoragePath},
     pointer::Pointer,
-    storage::engine::{Error, StorageEngine},
+    storage::{
+        engine::{Error, StorageEngine},
+        proofs::{AccountProof, StorageProof},
+        overlay::OverlayedRoot,
+    },
 };
+use std::collections::{HashSet, BTreeMap};
 use alloy_primitives::{
     map::{B256Map, HashMap},
     B256, U256,
 };
-use alloy_rlp::encode_fixed_size;
-use alloy_trie::{BranchNodeCompact, HashBuilder, Nibbles, EMPTY_ROOT_HASH};
+use alloy_rlp::{encode_fixed_size, Decodable};
+use alloy_trie::{BranchNodeCompact, HashBuilder, Nibbles, EMPTY_ROOT_HASH, nodes::TrieNode, TrieAccount};
+use alloy_trie::proof::{ProofNodes, ProofRetainer};
 use arrayvec::ArrayVec;
+
+/// Builder for constructing a new trie by applying an overlay state on top of
+/// a persistent storage engine.
+///
+/// This builder traverses the existing trie and the overlay simultaneously,
+/// constructing a new Merkle Trie (via `OverlayProver`) that represents the merged state.
+/// It supports:
+/// - Efficient updates by skipping unchanged subtrees (using structural sharing).
+/// - Generating Merkle proofs for specific targets during the build process.
+// # TODO: Semantic Refactoring Needed
+//
+// This struct is used for both state tries and storage tries, but the fields have
+// different meanings depending on context:
+// - **For state tries**: `proof_targets` = account paths, `storage_proof_targets` = account → storage slots
+// - **For storage tries**: `proof_targets` = storage slot paths, `storage_proof_targets` = unused (empty)
+#[derive(Debug)]
+pub struct OverlayTrie<'a> {
+    engine: &'a StorageEngine,
+    context: &'a TransactionContext,
+    overlay: OverlayState,
+    /// Proof targets - account paths for state tries, storage slot paths for storage tries
+    proof_targets: HashSet<Nibbles>,
+    /// Storage proof targets - only used for state tries (maps account paths to storage slot paths)
+    storage_proof_targets: HashMap<Nibbles, HashSet<Nibbles>>,
+}
+
+impl<'a> OverlayTrie<'a> {
+    pub fn new(
+        engine: &'a StorageEngine,
+        context: &'a TransactionContext,
+        overlay: OverlayState,
+    ) -> Self {
+        Self {
+            engine,
+            context,
+            overlay,
+            proof_targets: HashSet::new(),
+            storage_proof_targets: HashMap::default(),
+        }
+    }
+
+    pub fn with_proof_targets(mut self, targets: HashSet<Nibbles>) -> Self {
+        self.proof_targets = targets;
+        self
+    }
+
+    pub fn with_storage_proof_targets(
+        mut self,
+        targets: HashMap<Nibbles, HashSet<Nibbles>>,
+    ) -> Self {
+        self.storage_proof_targets = targets;
+        self
+    }
+
+    pub fn compute_root(self) -> Result<OverlayedRoot, Error> {
+        Ok(self.build()?.root())
+    }
+
+    pub fn compute_proof(self) -> Result<OverlayProver, Error> {
+        self.build()
+    }
+
+    fn build(self) -> Result<OverlayProver, Error> {
+        let mut root_builder = if !self.proof_targets.is_empty() {
+            OverlayProver::default()
+                .with_proof_retainer(self.proof_targets.clone())
+                .with_updates(true)
+        } else {
+            OverlayProver::default()
+        };
+
+        let root_page = if let Some(root_page_id) = self.context.root_node_page_id {
+            let page = self.engine.get_page(self.context, root_page_id)?;
+            SlottedPage::try_from(page).unwrap()
+        } else {
+            self.add_overlay_to_root_builder(&mut root_builder, &self.overlay)?;
+            // Finalize the hash builder state by computing the root
+            let _ = root_builder.hash_builder.root();
+            return Ok(root_builder);
+        };
+
+        let root_node: Node = root_page.get_value(0)?;
+        let mut stack = TraversalStack::new();
+        stack.push_node(
+            root_node.prefix().into(),
+            root_node,
+            Rc::new(root_page),
+            self.overlay.clone(),
+        );
+
+        self.compute_traversal(&mut stack, &mut root_builder)?;
+
+        // Finalize the hash builder state by computing the root.
+        // The root value itself is not needed here as it will be recomputed
+        // when the caller accesses the OverlayProver.
+        let _ = root_builder.hash_builder.root();
+
+        Ok(root_builder)
+    }
+
+    /// Main traversal loop: processes positions from the stack until empty.
+    ///
+    /// This is the coordinator function that delegates to specialized handlers
+    /// based on the type of trie position being processed.
+    fn compute_traversal(
+        &self,
+        stack: &mut TraversalStack<'a>,
+        root_builder: &mut OverlayProver,
+    ) -> Result<(), Error> {
+        while let Some((position, overlay)) = stack.pop() {
+            match position {
+                TriePosition::None => {
+                    self.add_overlay_to_root_builder(root_builder, &overlay)?;
+                }
+                TriePosition::Pointer(path, page, pointer, can_add_by_hash) => {
+                  self.process_pointer(path, page, pointer, can_add_by_hash, overlay, stack, root_builder)?;
+                }
+                TriePosition::Node(path, page, node) => {
+                  self.process_node(path, page, node, overlay, stack, root_builder)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Processes a pointer to a child node, potentially adding by hash if optimization applies.
+    fn process_pointer(
+        &self,
+        path: RawPath,
+        page: Rc<SlottedPage<'a>>,
+        pointer: Pointer,
+        can_add_by_hash: bool,
+        overlay: OverlayState,
+        stack: &mut TraversalStack<'a>,
+        root_builder: &mut OverlayProver,
+    ) -> Result<(), Error> {
+        // if overlay is empty and we can add by hash, skip traversing this subtree
+        if overlay.is_empty() && can_add_by_hash {
+            if let Some(hash) = pointer.rlp().as_hash() {
+                root_builder.add_branch(path.try_into().unwrap(), hash, true);
+                return Ok(());
+            }
+        }
+
+        self.process_overlayed_child(overlay, root_builder, path, &pointer, page, stack)
+    }
+
+    /// Processes a trie node with potential overlay modifications.
+    fn process_node(
+        &self,
+        path: RawPath,
+        page: Rc<SlottedPage<'a>>,
+        node: Node,
+        overlay: OverlayState,
+        stack: &mut TraversalStack<'a>,
+        root_builder: &mut OverlayProver,
+    ) -> Result<(), Error> {
+        // Split overlay into: entries before this path, matching this path, and after
+        let (pre_overlay, matching_overlay, post_overlay) = overlay.sub_slice_by_prefix(&path);
+
+        // If pre_overlay contains a prefix of this path, it means there's an overlay entry
+        // that shadows this entire subtree - skip the node and just add overlay
+        if pre_overlay.contains_prefix_of(&path) {
+            return self.add_overlay_to_root_builder(root_builder, &overlay);
+        }
+
+        // Add entries before this node, schedule entries after for later
+        self.add_overlay_to_root_builder(root_builder, &pre_overlay)?;
+        stack.push_overlay(post_overlay);
+
+        // Process this node based on its type
+        match node.into_kind() {
+            NodeKind::Branch { children } => {
+                self.handle_branch_node(path, page, children, matching_overlay, stack, root_builder)?;
+            }
+            NodeKind::AccountLeaf {
+                nonce_rlp,
+                balance_rlp,
+                code_hash,
+                storage_root,
+            } => {
+                self.handle_account_leaf(
+                    path,
+                    page,
+                    nonce_rlp,
+                    balance_rlp,
+                    code_hash,
+                    storage_root,
+                    matching_overlay,
+                    root_builder,
+                )?;
+            }
+            NodeKind::StorageLeaf { value_rlp } => {
+                self.handle_storage_leaf(path, value_rlp, matching_overlay, root_builder)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handles a branch node, processing its children with overlay modifications.
+    fn handle_branch_node(
+        &self,
+        path: RawPath,
+        page: Rc<SlottedPage<'a>>,
+        children: [Option<Pointer>; 16],
+        matching_overlay: OverlayState,
+        stack: &mut TraversalStack<'a>,
+        root_builder: &mut OverlayProver,
+    ) -> Result<(), Error> {
+        // Check if overlay has a hash node that replaces this entire branch
+        if let Some((overlay_path, Some(OverlayValue::Hash(_)))) = matching_overlay.first() {
+            if overlay_path == path {
+                return self.add_overlay_to_root_builder(root_builder, &matching_overlay);
+            }
+        }
+
+        self.process_branch_node_with_overlay(matching_overlay, &path, children, page, stack)
+    }
+
+    /// Handles an account leaf node with potential overlay modifications.
+    fn handle_account_leaf(
+        &self,
+        path: RawPath,
+        page: Rc<SlottedPage<'a>>,
+        nonce_rlp: ArrayVec<u8, 9>,
+        balance_rlp: ArrayVec<u8, 33>,
+        code_hash: B256,
+        storage_root: Option<Pointer>,
+        matching_overlay: OverlayState,
+        root_builder: &mut OverlayProver,
+    ) -> Result<(), Error> {
+        self.process_account_leaf_with_overlay(
+            &matching_overlay,
+            root_builder,
+            &path,
+            page,
+            nonce_rlp,
+            balance_rlp,
+            code_hash,
+            storage_root,
+        )
+    }
+
+    /// Handles a storage leaf node with potential overlay modifications.
+    fn handle_storage_leaf(
+        &self,
+        path: RawPath,
+        value_rlp: ArrayVec<u8, 33>,
+        matching_overlay: OverlayState,
+        root_builder: &mut OverlayProver,
+    ) -> Result<(), Error> {
+        // Check if overlay has a value that replaces this storage slot
+        if let Some((overlay_path, _)) = matching_overlay.first() {
+            if overlay_path == path {
+                return self.add_overlay_to_root_builder(root_builder, &matching_overlay);
+            }
+        }
+
+        // No overlay replacement - add the existing leaf
+        root_builder.add_leaf(path.try_into().unwrap(), &value_rlp);
+        Ok(())
+    }
+
+    fn process_branch_node_with_overlay(
+        &self,
+        mut overlay: OverlayState,
+        path: &RawPath,
+        mut children: [Option<Pointer>; 16],
+        current_page: Rc<SlottedPage<'a>>,
+        stack: &mut TraversalStack<'a>,
+    ) -> Result<(), Error> {
+        let mut child_data = ArrayVec::<_, 16>::new();
+
+        let mut minimum_possible_child_count = 0;
+        for idx in 0..16 {
+            let child_pointer = children[idx as usize].take();
+            if child_pointer.is_none() && overlay.is_empty() {
+                continue;
+            }
+
+            let mut child_path = *path;
+            child_path.push(idx);
+            let (_, child_overlay, overlay_after_child) = overlay.sub_slice_by_prefix(&child_path);
+
+            if child_pointer.is_some() && child_overlay.is_empty() {
+                minimum_possible_child_count += 1;
+            } else if let Some((_, Some(_))) = child_overlay.first() {
+                minimum_possible_child_count += 1;
+            }
+
+            child_data.push((child_path, child_pointer, child_overlay));
+            overlay = overlay_after_child;
+        }
+        let can_add_by_hash_globally = minimum_possible_child_count > 1;
+
+        for (child_path, child_pointer, child_overlay) in child_data.into_iter().rev() {
+            match child_pointer {
+                Some(pointer) => {
+                    let is_on_target_path = self.proof_targets.iter().any(|target| {
+                        target.starts_with(&Nibbles::from_nibbles(child_path.nibbles()))
+                    });
+                    let can_add_this_child_by_hash =
+                        can_add_by_hash_globally && !is_on_target_path;
+
+                    stack.push_pointer(
+                        child_path,
+                        pointer,
+                        current_page.clone(),
+                        can_add_this_child_by_hash,
+                        child_overlay,
+                    );
+                }
+                None => {
+                    if child_overlay.is_empty() {
+                        // nothing here to add
+                    } else {
+                        stack.push_overlay(child_overlay);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn compute_storage_tree(
+        &self,
+        storage_root: Option<Pointer>,
+        current_page: Option<Rc<SlottedPage<'a>>>,
+        storage_overlay: OverlayState,
+        proof_targets: HashSet<Nibbles>,
+    ) -> Result<(B256, HashMap<Nibbles, BranchNodeCompact>, ProofNodes), Error> {
+        let mut storage_root_builder = if !proof_targets.is_empty() {
+            OverlayProver::default()
+                .with_proof_retainer(proof_targets.clone())
+                .with_updates(true)
+        } else {
+            OverlayProver::default()
+        };
+        let storage_builder = self
+            .engine
+            .overlay_trie(self.context, storage_overlay)
+            .with_proof_targets(proof_targets);
+
+        match storage_root {
+            Some(pointer) => {
+                let mut storage_stack = TraversalStack::new();
+
+                let (root_storage_node, page) = if let Some(child_cell) =
+                    pointer.location().cell_index()
+                {
+                    let current_page = current_page.expect("Current page must be provided for cell index pointer");
+                    let node: Node = current_page.get_value(child_cell)?;
+                    (node, current_page)
+                } else {
+                    let storage_page = self
+                        .engine
+                        .get_page(self.context, pointer.location().page_id().unwrap())?;
+                    let slotted_page = SlottedPage::try_from(storage_page)?;
+                    let node: Node = slotted_page.get_value(0)?;
+                    (node, Rc::new(slotted_page))
+                };
+
+                storage_stack.push_node(
+                    root_storage_node.prefix().into(),
+                    root_storage_node,
+                    page,
+                    storage_builder.overlay.clone(),
+                );
+                storage_builder.compute_traversal(
+                    &mut storage_stack,
+                    &mut storage_root_builder,
+                )?;
+            }
+            None => {
+                storage_builder.add_overlay_to_root_builder(
+                    &mut storage_root_builder,
+                    &storage_builder.overlay,
+                )?;
+            }
+        };
+
+        let (mut storage_hash_builder, updated_storage_branch_nodes) =
+            storage_root_builder.hash_builder.split();
+        let root = storage_hash_builder.root();
+        let proof_nodes = storage_hash_builder.take_proof_nodes();
+        Ok((
+            root,
+            updated_storage_branch_nodes,
+            proof_nodes,
+        ))
+    }
+
+    fn compute_and_update_storage_root(
+        &self,
+        root_builder: &mut OverlayProver,
+        account_path_bytes: B256,
+        storage_root: Option<Pointer>,
+        current_page: Option<Rc<SlottedPage<'a>>>,
+        storage_overlay: OverlayState,
+        proof_targets: HashSet<Nibbles>,
+    ) -> Result<B256, Error> {
+        let (new_root, updated_storage_branch_nodes, proof_nodes) = self.compute_storage_tree(
+            storage_root,
+            current_page,
+            storage_overlay,
+            proof_targets,
+        )?;
+
+        root_builder
+            .add_storage_branch_updates(account_path_bytes, updated_storage_branch_nodes);
+
+        if !proof_nodes.is_empty() {
+            root_builder.add_storage_proofs(account_path_bytes, proof_nodes);
+        }
+
+        Ok(new_root)
+    }
+
+    fn process_account_leaf_with_overlay(
+        &self,
+        overlay: &OverlayState,
+        root_builder: &mut OverlayProver,
+        path: &RawPath,
+        current_page: Rc<SlottedPage<'a>>,
+        mut nonce_rlp: ArrayVec<u8, 9>,
+        mut balance_rlp: ArrayVec<u8, 33>,
+        mut code_hash: B256,
+        storage_root: Option<Pointer>,
+    ) -> Result<(), Error> {
+        let overlayed_account = overlay.lookup(path);
+        match overlayed_account {
+            Some(None) => {
+                return Ok(());
+            }
+            Some(Some(OverlayValue::Account(overlayed_account))) => {
+                nonce_rlp = alloy_rlp::encode_fixed_size(&overlayed_account.nonce);
+                balance_rlp = alloy_rlp::encode_fixed_size(&overlayed_account.balance);
+                code_hash = overlayed_account.code_hash;
+            }
+            _ => {
+            }
+        };
+
+        let has_storage_overlays = overlay.iter().any(|(path, _)| path.len() > 64);
+        let account_path_nibbles = Nibbles::from_nibbles(path.nibbles());
+        let storage_proof_targets = self
+            .storage_proof_targets
+            .get(&account_path_nibbles)
+            .cloned()
+            .unwrap_or_default();
+
+        if !has_storage_overlays && storage_proof_targets.is_empty() {
+            let storage_root_hash = storage_root
+                .as_ref()
+                .map_or(EMPTY_ROOT_HASH, |p| p.rlp().as_hash().unwrap_or(EMPTY_ROOT_HASH));
+
+            self.add_account_leaf_to_root_builder(
+                root_builder,
+                *path,
+                &nonce_rlp,
+                &balance_rlp,
+                &code_hash,
+                &storage_root_hash,
+            );
+            return Ok(());
+        }
+
+        let storage_overlay = overlay.with_prefix_offset(64);
+        let new_root = self.compute_and_update_storage_root(
+            root_builder,
+            B256::from_slice(&path.pack::<32>()),
+            storage_root,
+            Some(current_page),
+            storage_overlay,
+            storage_proof_targets,
+        )?;
+
+        self.add_account_leaf_to_root_builder(
+            root_builder,
+            *path,
+            &nonce_rlp,
+            &balance_rlp,
+            &code_hash,
+            &new_root,
+        );
+
+        Ok(())
+    }
+
+    fn add_account_leaf_to_root_builder(
+        &self,
+        root_builder: &mut OverlayProver,
+        path: RawPath,
+        nonce_rlp: &ArrayVec<u8, 9>,
+        balance_rlp: &ArrayVec<u8, 33>,
+        code_hash: &B256,
+        storage_root: &B256,
+    ) {
+        let mut buf = [0u8; 110];
+        let mut value_rlp = buf.as_mut();
+        let account_rlp_length =
+            encode_account_leaf(nonce_rlp, balance_rlp, code_hash, storage_root, &mut value_rlp);
+        root_builder.add_leaf(path.try_into().unwrap(), &buf[..account_rlp_length]);
+    }
+
+    fn process_overlayed_child(
+        &self,
+        overlay: OverlayState,
+        root_builder: &mut OverlayProver,
+        mut child_path: RawPath,
+        child: &Pointer,
+        current_page: Rc<SlottedPage<'a>>,
+        stack: &mut TraversalStack<'a>,
+    ) -> Result<(), Error> {
+        if let Some((overlay_path, overlay_value)) = overlay.first() {
+            if child_path == overlay_path &&
+                !matches!(overlay_value, Some(OverlayValue::Account(_)))
+            {
+                self.add_overlay_to_root_builder(root_builder, &overlay)?;
+                return Ok(());
+            }
+        }
+
+        if let Some(child_cell) = child.location().cell_index() {
+            let child_node: Node = current_page.get_value(child_cell)?;
+            child_path.extend(&child_node.prefix().into());
+            stack.push_node(child_path, child_node, current_page, overlay);
+        } else {
+            let child_page_id = child.location().page_id().unwrap();
+            let child_page = self.engine.get_page(self.context, child_page_id)?;
+            let child_slotted_page = SlottedPage::try_from(child_page).unwrap();
+            let child_node: Node = child_slotted_page.get_value(0)?;
+            child_path.extend(&child_node.prefix().into());
+            stack.push_node(child_path, child_node, Rc::new(child_slotted_page), overlay);
+        }
+        Ok(())
+    }
+
+    fn process_overlayed_account(
+        &self,
+        root_builder: &mut OverlayProver,
+        path: Nibbles,
+        account: &Account,
+        storage_overlay: OverlayState,
+    ) -> Result<(), Error> {
+        let storage_proof_targets =
+            self.storage_proof_targets.get(&path).cloned().unwrap_or_default();
+
+        if storage_overlay.is_empty() && storage_proof_targets.is_empty() {
+            let encoded = self.encode_account(account);
+            root_builder.add_leaf(path, &encoded);
+            return Ok(());
+        }
+
+        let storage_root = self.compute_and_update_storage_root(
+            root_builder,
+            B256::from_slice(&path.pack()),
+            None,
+            None,
+            storage_overlay,
+            storage_proof_targets,
+        )?;
+
+        let encoded = self.encode_account_with_root(account, storage_root);
+        root_builder.add_leaf(path, &encoded);
+        Ok(())
+    }
+
+    /// Adds overlay entries to the root builder.
+    ///
+    /// This method processes overlay entries and adds them to the Merkle trie builder.
+    /// It handles accounts, storage slots, and hash nodes, skipping descendants of
+    /// already-processed paths for efficiency.
+    pub(crate) fn add_overlay_to_root_builder(
+        &self,
+        root_builder: &mut OverlayProver,
+        overlay: &OverlayState,
+    ) -> Result<(), Error> {
+        let mut last_processed_path = None;
+        for (path, value) in overlay.iter() {
+            if let Some(last_processed_path) = last_processed_path {
+                if path.starts_with(&last_processed_path) {
+                    // skip over all descendants of a processed path
+                    continue;
+                }
+            }
+
+            match value {
+                Some(OverlayValue::Account(account)) => {
+                    let storage_overlay =
+                        overlay.sub_slice_for_prefix(&path).with_prefix_offset(64);
+                    let nibbles = path.try_into().unwrap();
+                    self.process_overlayed_account(
+                        root_builder,
+                        nibbles,
+                        account,
+                        storage_overlay,
+                    )?;
+                    last_processed_path = Some(path);
+                }
+                Some(OverlayValue::Storage(storage_value)) => {
+                    let encoded = self.encode_storage(storage_value);
+                    let nibbles = path.try_into().unwrap();
+                    root_builder.add_leaf(nibbles, &encoded);
+                }
+                Some(OverlayValue::Hash(hash)) => {
+                    let nibbles = path.try_into().unwrap();
+                    root_builder.add_branch(nibbles, *hash, false);
+                    last_processed_path = Some(path);
+                }
+                None => {
+                    last_processed_path = Some(path);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub fn encode_account(&self, account: &Account) -> ArrayVec<u8, 110> {
+        let trie_account = Account {
+            nonce: account.nonce,
+            balance: account.balance,
+            storage_root: account.storage_root,
+            code_hash: account.code_hash,
+        };
+        encode_fixed_size(&trie_account)
+    }
+
+    #[inline]
+    pub fn encode_account_with_root(&self, account: &Account, root: B256) -> ArrayVec<u8, 110> {
+        let trie_account = Account {
+            nonce: account.nonce,
+            balance: account.balance,
+            storage_root: root,
+            code_hash: account.code_hash,
+        };
+        encode_fixed_size(&trie_account)
+    }
+
+    #[inline]
+    pub fn encode_storage(&self, storage_value: &U256) -> ArrayVec<u8, 33> {
+        encode_fixed_size(storage_value)
+    }
+}
 
 #[derive(Debug)]
 enum TriePosition<'a> {
@@ -69,51 +721,41 @@ impl<'a> TraversalStack<'a> {
 }
 
 #[derive(Debug)]
-pub struct OverlayedRoot {
-    pub root: B256,
-    pub updated_branch_nodes: HashMap<Nibbles, BranchNodeCompact>,
-    pub storage_branch_updates: B256Map<HashMap<Nibbles, BranchNodeCompact>>,
+#[derive(Default)]
+pub struct OverlayProver {
+    pub(crate) hash_builder: HashBuilder,
+    pub(crate) storage_branch_updates: B256Map<HashMap<Nibbles, BranchNodeCompact>>,
+    pub(crate) retained_storage_proofs: B256Map<ProofNodes>,
 }
 
-impl OverlayedRoot {
-    pub fn new(
-        root: B256,
-        updated_branch_nodes: HashMap<Nibbles, BranchNodeCompact>,
-        storage_branch_updates: B256Map<HashMap<Nibbles, BranchNodeCompact>>,
-    ) -> Self {
-        Self { root, updated_branch_nodes, storage_branch_updates }
-    }
 
-    pub fn new_hash(root: B256) -> Self {
-        Self {
-            root,
-            updated_branch_nodes: HashMap::default(),
-            storage_branch_updates: B256Map::default(),
-        }
-    }
-}
-struct RootBuilder {
-    hash_builder: HashBuilder,
-    storage_branch_updates: B256Map<HashMap<Nibbles, BranchNodeCompact>>,
-}
-
-impl RootBuilder {
-    fn new() -> Self {
-        Self {
-            hash_builder: HashBuilder::default().with_updates(true),
-            storage_branch_updates: B256Map::default(),
+impl OverlayProver {
+    pub(crate) fn with_proof_retainer(self, targets: HashSet<Nibbles>) -> OverlayProver {
+        OverlayProver {
+            hash_builder: self.hash_builder
+                .with_proof_retainer(ProofRetainer::new(
+                    targets.into_iter().collect(),
+                ))
+                .with_updates(true),
+            storage_branch_updates: self.storage_branch_updates,
+            retained_storage_proofs: self.retained_storage_proofs,
         }
     }
 
-    fn add_leaf(&mut self, key: Nibbles, value: &[u8]) {
+    pub(crate) fn with_updates(mut self, with_updates: bool) -> Self {
+        self.hash_builder = self.hash_builder.with_updates(with_updates);
+        self
+    }
+
+    pub(crate) fn add_leaf(&mut self, key: Nibbles, value: &[u8]) {
         self.hash_builder.add_leaf(key, value);
     }
 
-    fn add_branch(&mut self, key: Nibbles, value: B256, stored_in_database: bool) {
+    pub(crate) fn add_branch(&mut self, key: Nibbles, value: B256, stored_in_database: bool) {
         self.hash_builder.add_branch(key, value, stored_in_database);
     }
 
-    fn add_storage_branch_updates(
+    pub(crate) fn add_storage_branch_updates(
         &mut self,
         account: B256,
         updates: HashMap<Nibbles, BranchNodeCompact>,
@@ -121,476 +763,97 @@ impl RootBuilder {
         self.storage_branch_updates.insert(account, updates);
     }
 
-    fn finalize(self) -> OverlayedRoot {
+    pub(crate) fn add_storage_proofs(&mut self, account: B256, proofs: ProofNodes) {
+        self.retained_storage_proofs.insert(account, proofs);
+    }
+
+    pub fn account_proof(&mut self, address_path: AddressPath) -> Option<AccountProof> {
+        let account_nibbles = Nibbles::from(address_path);
+        let proof_nodes = self.hash_builder.take_proof_nodes();
+        let matching_nodes = proof_nodes.matching_nodes_sorted(&account_nibbles);
+
+        let mut proof_map = BTreeMap::new();
+        for (key, val) in matching_nodes.iter() {
+            proof_map.insert(RawPath::from(*key), val.clone());
+        }
+
+        let found_account = 'info: {
+            if let Some((_, last_node_bytes)) = matching_nodes.last() {
+                let mut data = last_node_bytes.as_ref();
+                if let Ok(TrieNode::Leaf(leaf)) = TrieNode::decode(&mut data) {
+                    let mut full_path = matching_nodes.last().unwrap().0;
+                    full_path.extend(&leaf.key);
+
+                    if full_path == account_nibbles {
+                        let mut value_data = leaf.value.as_ref();
+                        if let Ok(account) = TrieAccount::decode(&mut value_data) {
+                            break 'info Some(Account::new(
+                                account.nonce,
+                                account.balance,
+                                account.storage_root,
+                                account.code_hash,
+                            ));
+                        }
+                    }
+                }
+            }
+            None
+        };
+
+        found_account.map(|account| {
+            AccountProof {
+                hashed_address: account_nibbles,
+                account,
+                proof: proof_map,
+                storage_proofs: B256Map::default(),
+            }
+        })
+    }
+
+    pub fn storage_proof(&self, storage_path: StoragePath) -> Option<StorageProof> {
+        let account_nibbles = Nibbles::from(storage_path.get_address().clone());
+        let slot_nibbles = *storage_path.get_slot();
+        
+        let account_key = B256::from_slice(&RawPath::from(account_nibbles).pack::<32>());
+        if let Some(storage_proof_nodes) = self.retained_storage_proofs.get(&account_key) {
+            let matching_nodes = storage_proof_nodes.matching_nodes_sorted(&slot_nibbles);
+            
+            let mut proof_map = BTreeMap::new();
+            for (key, val) in matching_nodes.iter() {
+                proof_map.insert(RawPath::from(*key), val.clone());
+            }
+
+            let found_value = 'info: {
+                if let Some((_, last_node_bytes)) = matching_nodes.last() {
+                    let mut data = last_node_bytes.as_ref();
+                    if let Ok(TrieNode::Leaf(leaf)) = TrieNode::decode(&mut data) {
+                        let mut full_path = matching_nodes.last().unwrap().0;
+                        full_path.extend(&leaf.key);
+                        if full_path == slot_nibbles {
+                             let mut value_data = leaf.value.as_ref();
+                             if let Ok(value) = U256::decode(&mut value_data) {
+                                break 'info Some(value);
+                             }
+                        }
+                    }
+                }
+
+                break 'info Some(U256::ZERO);
+            };
+
+            found_value.map(|value| StorageProof {
+                hashed_slot: slot_nibbles,
+                value,
+                proof: proof_map,
+            })
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn root(self) -> OverlayedRoot {
         let (mut hash_builder, updated_branch_nodes) = self.hash_builder.split();
         OverlayedRoot::new(hash_builder.root(), updated_branch_nodes, self.storage_branch_updates)
-    }
-}
-
-impl StorageEngine {
-    pub fn compute_state_root_with_overlay(
-        &self,
-        context: &TransactionContext,
-        overlay: OverlayState,
-    ) -> Result<OverlayedRoot, Error> {
-        if overlay.is_empty() {
-            return Ok(OverlayedRoot::new_hash(context.root_node_hash));
-        }
-
-        let mut root_builder = RootBuilder::new();
-
-        let root_page = if let Some(root_page_id) = context.root_node_page_id {
-            let page = self.get_page(context, root_page_id)?;
-            SlottedPage::try_from(page).unwrap()
-        } else {
-            self.add_overlay_to_root_builder(&mut root_builder, &overlay);
-            return Ok(root_builder.finalize());
-        };
-
-        let root_node: Node = root_page.get_value(0)?;
-        let mut stack = TraversalStack::new();
-        stack.push_node(root_node.prefix().into(), root_node, Rc::new(root_page), overlay);
-
-        self.compute_root_with_overlay(context, &mut stack, &mut root_builder)?;
-
-        Ok(root_builder.finalize())
-    }
-
-    fn compute_root_with_overlay<'a>(
-        &'a self,
-        context: &TransactionContext,
-        stack: &mut TraversalStack<'a>,
-        root_builder: &mut RootBuilder,
-    ) -> Result<(), Error> {
-        // Depth first traversal of the trie, starting at the root node.
-        // This applies any overlay state to the trie, taking precedence over the trie's own values.
-        // Whenever a branch or leaf is known to be the final unchanged value, we can add it to the
-        // hash builder.
-        while let Some((position, overlay)) = stack.pop() {
-            match position {
-                TriePosition::None => {
-                    // No trie position, process whatever is in the overlay
-                    self.add_overlay_to_root_builder(root_builder, &overlay);
-                }
-                TriePosition::Pointer(path, page, pointer, can_add_by_hash) => {
-                    if overlay.is_empty() && can_add_by_hash {
-                        if let Some(hash) = pointer.rlp().as_hash() {
-                            // No overlay, just add the pointer by hash
-                            root_builder.add_branch(path.try_into().unwrap(), hash, true);
-                            continue;
-                        }
-                    }
-                    // We have an overlay, need to process the child
-                    self.process_overlayed_child(
-                        context,
-                        overlay,
-                        root_builder,
-                        path,
-                        &pointer,
-                        page,
-                        stack,
-                    )?;
-                }
-                TriePosition::Node(path, page, node) => {
-                    let (pre_overlay, matching_overlay, post_overlay) =
-                        overlay.sub_slice_by_prefix(&path);
-                    if pre_overlay.contains_prefix_of(&path) {
-                        // The pre_overlay invalidates the current node, so we can simply add the
-                        // full overlay. We need to process it all together,
-                        // as the post_overlay may contain descendants of the pre_overlay.
-                        self.add_overlay_to_root_builder(root_builder, &overlay);
-                        continue;
-                    }
-
-                    self.add_overlay_to_root_builder(root_builder, &pre_overlay);
-                    // Defer the post_overlay to be processed after the node is traversed
-                    stack.push_overlay(post_overlay);
-
-                    match node.into_kind() {
-                        NodeKind::Branch { children } => {
-                            if let Some((overlay_path, Some(OverlayValue::Hash(_)))) =
-                                matching_overlay.first()
-                            {
-                                if overlay_path == path {
-                                    // the overlay invalidates the current node, so just add this
-                                    // and skip the rest of the db traversal
-                                    self.add_overlay_to_root_builder(
-                                        root_builder,
-                                        &matching_overlay,
-                                    );
-                                    continue;
-                                }
-                            }
-                            self.process_branch_node_with_overlay(
-                                matching_overlay,
-                                &path,
-                                children,
-                                page,
-                                stack,
-                            )?;
-                        }
-                        NodeKind::AccountLeaf {
-                            nonce_rlp,
-                            balance_rlp,
-                            code_hash,
-                            storage_root,
-                        } => {
-                            self.process_account_leaf_with_overlay(
-                                context,
-                                &matching_overlay,
-                                root_builder,
-                                &path,
-                                page,
-                                nonce_rlp,
-                                balance_rlp,
-                                code_hash,
-                                storage_root,
-                            )?;
-                        }
-                        NodeKind::StorageLeaf { value_rlp } => {
-                            if let Some((overlay_path, _)) = matching_overlay.first() {
-                                if overlay_path == path {
-                                    // the overlay invalidates the current node, so just add this
-                                    // and skip the rest of the db traversal
-                                    self.add_overlay_to_root_builder(
-                                        root_builder,
-                                        &matching_overlay,
-                                    );
-                                    continue;
-                                }
-                            }
-                            // Leaf node, add it to the hash builder
-                            root_builder.add_leaf(path.try_into().unwrap(), &value_rlp);
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn process_branch_node_with_overlay<'a>(
-        &'a self,
-        mut overlay: OverlayState,
-        path: &RawPath,
-        mut children: [Option<Pointer>; 16],
-        current_page: Rc<SlottedPage<'a>>,
-        stack: &mut TraversalStack<'a>,
-    ) -> Result<(), Error> {
-        let mut child_data = ArrayVec::<_, 16>::new();
-
-        let mut minimum_possible_child_count = 0;
-        for idx in 0..16 {
-            let child_pointer = children[idx as usize].take();
-            if child_pointer.is_none() && overlay.is_empty() {
-                continue;
-            }
-
-            let mut child_path = *path;
-            child_path.push(idx);
-            let (_, child_overlay, overlay_after_child) = overlay.sub_slice_by_prefix(&child_path);
-
-            if child_pointer.is_some() && child_overlay.is_empty() {
-                minimum_possible_child_count += 1;
-            } else if let Some((_, Some(_))) = child_overlay.first() {
-                // we have a non-tombstone overlay, so there must be at least one descendant
-                // in this child index
-                minimum_possible_child_count += 1;
-            }
-
-            child_data.push((child_path, child_pointer, child_overlay));
-            overlay = overlay_after_child;
-        }
-        let can_add_by_hash = minimum_possible_child_count > 1;
-
-        for (child_path, child_pointer, child_overlay) in child_data.into_iter().rev() {
-            match child_pointer {
-                Some(pointer) => {
-                    stack.push_pointer(
-                        child_path,
-                        pointer,
-                        current_page.clone(),
-                        can_add_by_hash,
-                        child_overlay,
-                    );
-                }
-                None => {
-                    if child_overlay.is_empty() {
-                        // nothing here to add
-                    } else {
-                        // we have a nonconflicting overlay, add all of it to the hash builder
-                        stack.push_overlay(child_overlay);
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn process_account_leaf_with_overlay<'a>(
-        &'a self,
-        context: &TransactionContext,
-        overlay: &OverlayState,
-        root_builder: &mut RootBuilder,
-        path: &RawPath,
-        current_page: Rc<SlottedPage<'a>>,
-        mut nonce_rlp: ArrayVec<u8, 9>,
-        mut balance_rlp: ArrayVec<u8, 33>,
-        mut code_hash: B256,
-        storage_root: Option<Pointer>,
-    ) -> Result<(), Error> {
-        let overlayed_account = overlay.lookup(path);
-        match overlayed_account {
-            Some(None) => {
-                // The account is removed in the overlay
-                return Ok(());
-            }
-            Some(Some(OverlayValue::Account(overlayed_account))) => {
-                // The account is updated in the overlay
-                nonce_rlp = alloy_rlp::encode_fixed_size(&overlayed_account.nonce);
-                balance_rlp = alloy_rlp::encode_fixed_size(&overlayed_account.balance);
-                code_hash = overlayed_account.code_hash;
-            }
-            _ => {
-                // The account is not updated in the overlay
-            }
-        };
-
-        let has_storage_overlays = overlay.iter().any(|(path, _)| path.len() > 64);
-        if !has_storage_overlays {
-            let storage_root_hash = storage_root
-                .as_ref()
-                .map_or(EMPTY_ROOT_HASH, |p| p.rlp().as_hash().unwrap_or(EMPTY_ROOT_HASH));
-
-            self.add_account_leaf_to_root_builder(
-                root_builder,
-                *path,
-                &nonce_rlp,
-                &balance_rlp,
-                &code_hash,
-                &storage_root_hash,
-            );
-            return Ok(());
-        }
-
-        let mut storage_root_builder = RootBuilder::new();
-
-        // We have storage overlays, need to compute a new storage root
-        let storage_overlay = overlay.with_prefix_offset(64);
-
-        match storage_root {
-            Some(pointer) => {
-                let mut storage_stack = TraversalStack::new();
-
-                // load the root storage node
-                if let Some(child_cell) = pointer.location().cell_index() {
-                    let root_storage_node: Node = current_page.get_value(child_cell)?;
-                    storage_stack.push_node(
-                        root_storage_node.prefix().into(),
-                        root_storage_node,
-                        current_page,
-                        storage_overlay,
-                    );
-                    self.compute_root_with_overlay(
-                        context,
-                        &mut storage_stack,
-                        &mut storage_root_builder,
-                    )?
-                } else {
-                    let storage_page =
-                        self.get_page(context, pointer.location().page_id().unwrap())?;
-                    let slotted_page = SlottedPage::try_from(storage_page)?;
-                    let root_storage_node: Node = slotted_page.get_value(0)?;
-                    storage_stack.push_node(
-                        root_storage_node.prefix().into(),
-                        root_storage_node,
-                        Rc::new(slotted_page),
-                        storage_overlay,
-                    );
-                    self.compute_root_with_overlay(
-                        context,
-                        &mut storage_stack,
-                        &mut storage_root_builder,
-                    )?;
-                }
-            }
-            None => {
-                // No existing storage root, just add the overlay
-                self.add_overlay_to_root_builder(&mut storage_root_builder, &storage_overlay);
-            }
-        };
-        let (mut storage_hash_builder, updated_storage_branch_nodes) =
-            storage_root_builder.hash_builder.split();
-        let new_root = storage_hash_builder.root();
-
-        root_builder.add_storage_branch_updates(
-            B256::from_slice(&path.pack::<32>()),
-            updated_storage_branch_nodes,
-        );
-
-        self.add_account_leaf_to_root_builder(
-            root_builder,
-            *path,
-            &nonce_rlp,
-            &balance_rlp,
-            &code_hash,
-            &new_root,
-        );
-
-        Ok(())
-    }
-
-    fn add_account_leaf_to_root_builder(
-        &self,
-        root_builder: &mut RootBuilder,
-        path: RawPath,
-        nonce_rlp: &ArrayVec<u8, 9>,
-        balance_rlp: &ArrayVec<u8, 33>,
-        code_hash: &B256,
-        storage_root: &B256,
-    ) {
-        let mut buf = [0u8; 110]; // max RLP length for an account: 2 bytes for list length, 9 for nonce, 33 for
-                                  // balance, 33 for storage root, 33 for code hash
-        let mut value_rlp = buf.as_mut();
-        let account_rlp_length =
-            encode_account_leaf(nonce_rlp, balance_rlp, code_hash, storage_root, &mut value_rlp);
-        root_builder.add_leaf(path.try_into().unwrap(), &buf[..account_rlp_length]);
-    }
-
-    fn process_overlayed_child<'a>(
-        &'a self,
-        context: &TransactionContext,
-        overlay: OverlayState,
-        root_builder: &mut RootBuilder,
-        mut child_path: RawPath,
-        child: &Pointer,
-        current_page: Rc<SlottedPage<'a>>,
-        stack: &mut TraversalStack<'a>,
-    ) -> Result<(), Error> {
-        // First consider the overlay. All values in it must already contain the child_path prefix.
-        // If the overlay matches the child path, we can add it to the hash builder and skip
-        // actually reading the child node.
-        // Account values cannot be directly overlayed, as they may need to be merged with the
-        // existing storage trie.
-        if let Some((overlay_path, overlay_value)) = overlay.first() {
-            if child_path == overlay_path &&
-                !matches!(overlay_value, Some(OverlayValue::Account(_)))
-            {
-                // the child path is directly overlayed, so only use the overlay state
-                self.add_overlay_to_root_builder(root_builder, &overlay);
-                return Ok(());
-            }
-        }
-
-        if let Some(child_cell) = child.location().cell_index() {
-            let child_node: Node = current_page.get_value(child_cell)?;
-            child_path.extend(&child_node.prefix().into());
-            stack.push_node(child_path, child_node, current_page, overlay);
-        } else {
-            let child_page_id = child.location().page_id().unwrap();
-            let child_page = self.get_page(context, child_page_id)?;
-            let child_slotted_page = SlottedPage::try_from(child_page).unwrap();
-            let child_node: Node = child_slotted_page.get_value(0)?;
-            child_path.extend(&child_node.prefix().into());
-            stack.push_node(child_path, child_node, Rc::new(child_slotted_page), overlay);
-        }
-        Ok(())
-    }
-
-    fn process_overlayed_account(
-        &self,
-        root_builder: &mut RootBuilder,
-        path: Nibbles,
-        account: &Account,
-        storage_overlay: OverlayState,
-    ) -> Result<(), Error> {
-        if storage_overlay.is_empty() {
-            let encoded = self.encode_account(account);
-            root_builder.add_leaf(path, &encoded);
-            return Ok(());
-        }
-
-        let mut storage_root_builder = RootBuilder::new();
-        self.add_overlay_to_root_builder(&mut storage_root_builder, &storage_overlay);
-
-        let (mut storage_hash_builder, updated_storage_branch_nodes) =
-            storage_root_builder.hash_builder.split();
-        let storage_root = storage_hash_builder.root();
-
-        root_builder.add_storage_branch_updates(
-            B256::from_slice(&path.pack()),
-            updated_storage_branch_nodes,
-        );
-
-        let encoded = self.encode_account_with_root(account, storage_root);
-        root_builder.add_leaf(path, &encoded);
-        Ok(())
-    }
-
-    fn add_overlay_to_root_builder(&self, root_builder: &mut RootBuilder, overlay: &OverlayState) {
-        let mut last_processed_path = None;
-        for (path, value) in overlay.iter() {
-            if let Some(last_processed_path) = last_processed_path {
-                if path.starts_with(&last_processed_path) {
-                    // skip over all descendants of a processed path
-                    continue;
-                }
-            }
-
-            match value {
-                Some(OverlayValue::Account(account)) => {
-                    let storage_overlay =
-                        overlay.sub_slice_for_prefix(&path).with_prefix_offset(64);
-                    self.process_overlayed_account(
-                        root_builder,
-                        path.try_into().unwrap(),
-                        account,
-                        storage_overlay,
-                    )
-                    .unwrap();
-                    last_processed_path = Some(path);
-                }
-                Some(OverlayValue::Storage(storage_value)) => {
-                    let encoded = self.encode_storage(storage_value);
-                    root_builder.add_leaf(path.try_into().unwrap(), &encoded);
-                }
-                Some(OverlayValue::Hash(hash)) => {
-                    root_builder.add_branch(path.try_into().unwrap(), *hash, false);
-                    last_processed_path = Some(path);
-                }
-                None => {
-                    // Tombstone - skip
-                    last_processed_path = Some(path);
-                }
-            }
-        }
-    }
-
-    #[inline]
-    pub fn encode_account(&self, account: &Account) -> ArrayVec<u8, 110> {
-        let trie_account = Account {
-            nonce: account.nonce,
-            balance: account.balance,
-            storage_root: account.storage_root,
-            code_hash: account.code_hash,
-        };
-        encode_fixed_size(&trie_account)
-    }
-
-    #[inline]
-    pub fn encode_account_with_root(&self, account: &Account, root: B256) -> ArrayVec<u8, 110> {
-        let trie_account = Account {
-            nonce: account.nonce,
-            balance: account.balance,
-            storage_root: root,
-            code_hash: account.code_hash,
-        };
-        encode_fixed_size(&trie_account)
-    }
-
-    #[inline]
-    pub fn encode_storage(&self, storage_value: &U256) -> ArrayVec<u8, 33> {
-        encode_fixed_size(storage_value)
     }
 }
 
