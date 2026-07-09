@@ -1952,6 +1952,163 @@ fn test_leaf_update_and_non_existent_delete_works() {
     assert_eq!(account_in_database, updated_account);
 }
 
+#[test]
+fn test_delete_non_existent_value_in_new_snapshot_repoints_root() {
+    let (storage_engine, mut context) = create_test_engine(300);
+
+    // GIVEN: a committed trie with a single account, so that the next transaction
+    // must copy-on-write any page it touches
+    let address_nibbles =
+        Nibbles::unpack(hex!("0xf80f21938e5248ec70b870ac1103d0dd01b7811550a7a5c971e1c3e85ea62492"));
+    let account = create_test_account(100, 1);
+    storage_engine
+        .set_values(
+            &mut context,
+            vec![(AddressPath::new(address_nibbles).into(), Some(account.clone().into()))].as_mut(),
+        )
+        .unwrap();
+    storage_engine.commit(&context).unwrap();
+    let mut context = storage_engine.write_context();
+    let root_node_hash_before = context.root_node_hash;
+
+    // WHEN: an account with a similar but divergent path is deleted in the new snapshot
+    let divergent_nibbles =
+        Nibbles::unpack(hex!("0xf80f21938e5248ec70b870ac1103d0dd01b7811550a7ffffffffffffffffffff"));
+    storage_engine
+        .set_values(&mut context, vec![(AddressPath::new(divergent_nibbles).into(), None)].as_mut())
+        .unwrap();
+
+    // THEN: the root page was cloned (orphaning the original), so the root pointer
+    // must reference the clone, not the orphaned page
+    let root_page_id = context.root_node_page_id.unwrap();
+    {
+        let mut meta_manager = storage_engine.meta_manager.lock();
+        let orphan_ids: HashSet<_> =
+            meta_manager.orphan_pages().iter().map(|orphan| orphan.page_id()).collect();
+        assert!(
+            !orphan_ids.contains(&root_page_id),
+            "root page {root_page_id} is orphaned but still referenced as the trie root"
+        );
+    }
+
+    // AND: the root hash is unchanged and the account is still readable
+    assert_eq!(context.root_node_hash, root_node_hash_before);
+    let read_account = storage_engine
+        .get_account(&mut context, &AddressPath::new(address_nibbles))
+        .unwrap()
+        .unwrap();
+    assert_eq!(read_account, account);
+}
+
+#[test]
+fn test_delete_non_existent_value_on_remote_page_repoints_child() {
+    let (storage_engine, mut context) = create_test_engine(10_000);
+
+    // GIVEN: a branch node whose child lives on a different page (as in issue #189)
+
+    // Create a target account that lives alone on its own page
+    let target_address = address!("1111111111111111111111111111111111111111");
+    let target_account = create_test_account(1, 100);
+    let target_path = AddressPath::for_address(target_address);
+
+    let target_page = storage_engine.allocate_page(&mut context).unwrap();
+    let target_page_id = target_page.id();
+    let mut target_slotted_page = SlottedPageMut::try_from(target_page).unwrap();
+    let target_node = Node::new_leaf(
+        &RawPath::from(&target_path).slice(1..),
+        &TrieValue::Account(target_account.clone()),
+    )
+    .unwrap();
+    let target_node_index = target_slotted_page.insert_value(&target_node).unwrap();
+    assert_eq!(target_node_index, 0, "Target node should be at root of its page");
+    drop(target_slotted_page);
+
+    // Create a sibling account leaf on its own page under a different branch index,
+    // so the branch keeps at least two children and is not merged away during cleanup
+    let target_nibbles = RawPath::from(&target_path);
+    let branch_index = target_nibbles.get_unchecked(0);
+    let sibling_branch_index = (branch_index + 1) % 16;
+    let mut sibling_nibbles = [0u8; 64];
+    for (i, nibble) in sibling_nibbles.iter_mut().enumerate() {
+        *nibble = target_nibbles.get_unchecked(i);
+    }
+    sibling_nibbles[0] = sibling_branch_index;
+    let sibling_path = AddressPath::new(Nibbles::from_nibbles(sibling_nibbles));
+    let sibling_account = create_test_account(2, 200);
+
+    let sibling_page = storage_engine.allocate_page(&mut context).unwrap();
+    let sibling_page_id = sibling_page.id();
+    let mut sibling_slotted_page = SlottedPageMut::try_from(sibling_page).unwrap();
+    let sibling_node = Node::new_leaf(
+        &RawPath::from(&sibling_path).slice(1..),
+        &TrieValue::Account(sibling_account.clone()),
+    )
+    .unwrap();
+    let sibling_node_index = sibling_slotted_page.insert_value(&sibling_node).unwrap();
+    assert_eq!(sibling_node_index, 0, "Sibling node should be at root of its page");
+    drop(sibling_slotted_page);
+
+    // Create a parent branch node on a different page that points to both leaves
+    let parent_page = storage_engine.allocate_page(&mut context).unwrap();
+    let parent_page_id = parent_page.id();
+    context.root_node_page_id = Some(parent_page_id);
+    let mut parent_slotted_page = SlottedPageMut::try_from(parent_page).unwrap();
+
+    let mut parent_branch = Node::new_branch(&RawPath::new()).unwrap();
+    let target_pointer = Pointer::new(Location::from(target_page_id), target_node.to_rlp_node());
+    parent_branch.set_child(branch_index, target_pointer).unwrap();
+    let sibling_pointer = Pointer::new(Location::from(sibling_page_id), sibling_node.to_rlp_node());
+    parent_branch.set_child(sibling_branch_index, sibling_pointer).unwrap();
+    context.root_node_hash = parent_branch.to_rlp_node().as_hash().unwrap();
+
+    let parent_node_index = parent_slotted_page.insert_value(&parent_branch).unwrap();
+    assert_eq!(parent_node_index, 0, "Parent branch should be at root of its page");
+    drop(parent_slotted_page);
+
+    // Commit so that the next transaction must copy-on-write any page it touches
+    storage_engine.commit(&context).unwrap();
+    let mut context = storage_engine.write_context();
+    let root_node_hash_before = context.root_node_hash;
+
+    // WHEN: deleting a non-existent account whose path traverses the branch into the
+    // target page but diverges from the leaf stored there
+    let mut divergent_nibbles = [0u8; 64];
+    for (i, nibble) in divergent_nibbles.iter_mut().enumerate() {
+        *nibble = target_nibbles.get_unchecked(i);
+    }
+    // Diverge inside the leaf's prefix while keeping the branch child nibble
+    for nibble in divergent_nibbles[32..].iter_mut() {
+        *nibble = 0xf;
+    }
+    let divergent_path = AddressPath::new(Nibbles::from_nibbles(divergent_nibbles));
+    assert_ne!(RawPath::from(&divergent_path), target_nibbles);
+    storage_engine.set_values(&mut context, vec![(divergent_path.into(), None)].as_mut()).unwrap();
+
+    // THEN: the target page was cloned (orphaning the original), so the branch's child
+    // pointer must reference the clone, not the orphaned page
+    let root_page = storage_engine.get_page(&context, context.root_node_page_id.unwrap()).unwrap();
+    let root_slotted_page = SlottedPage::try_from(root_page).unwrap();
+    let root_node: Node = root_slotted_page.get_value(0).unwrap();
+    let child_pointer = root_node.child(branch_index).unwrap().unwrap();
+    let child_page_id = child_pointer.location().page_id().unwrap();
+    {
+        let mut meta_manager = storage_engine.meta_manager.lock();
+        let orphan_ids: HashSet<_> =
+            meta_manager.orphan_pages().iter().map(|orphan| orphan.page_id()).collect();
+        assert!(
+            !orphan_ids.contains(&child_page_id),
+            "child page {child_page_id} is orphaned but still referenced by the branch node"
+        );
+    }
+
+    // AND: the root hash is unchanged and the target account is still readable
+    assert_eq!(context.root_node_hash, root_node_hash_before);
+    let read_account = storage_engine.get_account(&mut context, &target_path).unwrap().unwrap();
+    assert_eq!(read_account, target_account);
+    let read_sibling = storage_engine.get_account(&mut context, &sibling_path).unwrap().unwrap();
+    assert_eq!(read_sibling, sibling_account);
+}
+
 fn address_path_for_idx(idx: u64) -> AddressPath {
     let mut nibbles = [0u8; 64];
     let mut val = idx;

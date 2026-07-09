@@ -100,7 +100,23 @@ impl StorageEngine {
 
             match result {
                 Ok(PointerChange::Delete) => return Ok(PointerChange::Delete),
-                Ok(PointerChange::None) => return Ok(PointerChange::None),
+                Ok(PointerChange::None) => {
+                    // Even when no logical change occurred (e.g. the only changes were
+                    // deletes of values that don't exist), `get_mut_clone` may have
+                    // copied this page to a new one and orphaned the original. In that
+                    // case the caller must be repointed at the clone; returning `None`
+                    // would leave it referencing the orphaned page, which is later
+                    // reused and zeroed. The node contents are unchanged, so the RLP
+                    // (and therefore all hashes up the trie) stays the same.
+                    if new_slotted_page.id() != page_id {
+                        let root_node: Node = new_slotted_page.get_value(0)?;
+                        return Ok(PointerChange::Update(Pointer::new(
+                            helpers::node_location(new_slotted_page.id(), 0),
+                            root_node.to_rlp_node(),
+                        )));
+                    }
+                    return Ok(PointerChange::None);
+                }
                 Ok(PointerChange::Update(pointer)) => return Ok(PointerChange::Update(pointer)),
                 // In the case of a page split, re-attempt the operation from scratch. This ensures
                 // that a page will be consistently evaluated, and not modified in
